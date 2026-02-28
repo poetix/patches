@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 
-use patches_core::{Module, ModuleDescriptor, ModuleGraph, NodeId, SampleBuffer};
+use patches_core::{Module, ModuleDescriptor, ModuleGraph, NodeId};
 
 /// Errors that can occur when building an [`ExecutionPlan`].
 #[derive(Debug)]
@@ -49,7 +49,12 @@ pub struct ModuleSlot {
 /// and [`last_right`](ExecutionPlan::last_right).
 pub struct ExecutionPlan {
     pub slots: Vec<ModuleSlot>,
-    pub buffers: Vec<SampleBuffer>,
+    /// Flat cable buffer pool. Each element is a 2-element ring `[prev, curr]`.
+    /// All buffers share a single write-slot index tracked by `write_phase`.
+    pub buffers: Vec<[f64; 2]>,
+    /// Selects the write slot this tick: `false` → index 0, `true` → index 1.
+    /// The read slot is always `1 - write slot`.
+    pub write_phase: bool,
     pub audio_out_index: usize,
 }
 
@@ -58,32 +63,31 @@ impl ExecutionPlan {
     ///
     /// Does not allocate.
     pub fn tick(&mut self, sample_rate: f64) {
-        let Self { slots, buffers, .. } = self;
+        let Self {
+            slots,
+            buffers,
+            write_phase,
+            ..
+        } = self;
+        let wi = *write_phase as usize;
+        let ri = 1 - wi;
 
-        // Phase 1: gather input values from the buffer pool into per-slot scratch.
+        // Phases 1–3 fused: per slot, read inputs → process → write outputs.
+        // Reading uses `ri` (previous tick's slot); writing uses `wi` (this tick's slot).
+        // Because ri ≠ wi, reads and writes never alias within a tick.
         for slot in slots.iter_mut() {
             for (j, &buf_idx) in slot.input_buffers.iter().enumerate() {
-                slot.input_scratch[j] = buffers[buf_idx].read();
+                slot.input_scratch[j] = buffers[buf_idx][ri];
             }
-        }
-
-        // Phase 2: run each module.
-        for slot in slots.iter_mut() {
             slot.module
                 .process(&slot.input_scratch, &mut slot.output_scratch, sample_rate);
-        }
-
-        // Phase 3: write output scratch values back into the buffer pool.
-        for slot in slots.iter_mut() {
             for (j, &buf_idx) in slot.output_buffers.iter().enumerate() {
-                buffers[buf_idx].write(slot.output_scratch[j]);
+                buffers[buf_idx][wi] = slot.output_scratch[j];
             }
         }
 
-        // Phase 4: advance all buffers (rotate the write slot).
-        for buf in buffers.iter_mut() {
-            buf.advance();
-        }
+        // Phase 4: advance the write slot (one bool flip, no per-buffer work).
+        *write_phase = !*write_phase;
     }
 
     /// Left-channel sample produced during the most recent [`tick`](Self::tick).
@@ -156,7 +160,7 @@ pub fn build_patch(graph: ModuleGraph) -> Result<ExecutionPlan, BuildError> {
     // Buffer pool.
     // Index 0: permanent-zero buffer (for unconnected input ports — never written to).
     // Indices 1..: one buffer per output port of each module, in execution order.
-    let mut buffers: Vec<SampleBuffer> = vec![SampleBuffer::new()];
+    let mut buffers: Vec<[f64; 2]> = vec![[0.0; 2]];
 
     // Map (NodeId, output_port_index) → buffer pool index.
     let mut output_buf: HashMap<(NodeId, usize), usize> = HashMap::new();
@@ -165,7 +169,7 @@ pub fn build_patch(graph: ModuleGraph) -> Result<ExecutionPlan, BuildError> {
         let desc = &descriptors[&id];
         for (port_idx, _) in desc.outputs.iter().enumerate() {
             let buf_idx = buffers.len();
-            buffers.push(SampleBuffer::new());
+            buffers.push([0.0; 2]);
             output_buf.insert((id, port_idx), buf_idx);
         }
     }
@@ -229,6 +233,7 @@ pub fn build_patch(graph: ModuleGraph) -> Result<ExecutionPlan, BuildError> {
     Ok(ExecutionPlan {
         slots,
         buffers,
+        write_phase: false,
         audio_out_index,
     })
 }

@@ -4,11 +4,11 @@ use patches_core::{Module, ModuleDescriptor, PortDescriptor};
 ///
 /// Output is `(a + b) / 2.0`, keeping the result in the same amplitude range
 /// as the inputs.
-pub struct Crossfade {
+pub struct Mix {
     descriptor: ModuleDescriptor,
 }
 
-impl Crossfade {
+impl Mix {
     pub fn new() -> Self {
         Self {
             descriptor: ModuleDescriptor {
@@ -22,13 +22,13 @@ impl Crossfade {
     }
 }
 
-impl Default for Crossfade {
+impl Default for Mix {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Module for Crossfade {
+impl Module for Mix {
     fn descriptor(&self) -> &ModuleDescriptor {
         &self.descriptor
     }
@@ -40,6 +40,10 @@ impl Module for Crossfade {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
 }
 
 #[cfg(test)]
@@ -48,7 +52,7 @@ mod tests {
 
     #[test]
     fn descriptor_has_two_inputs_and_one_output() {
-        let m = Crossfade::new();
+        let m = Mix::new();
         let desc = m.descriptor();
         assert_eq!(desc.inputs.len(), 2);
         assert_eq!(desc.inputs[0].name, "a");
@@ -59,7 +63,7 @@ mod tests {
 
     #[test]
     fn output_is_average_of_inputs() {
-        let mut m = Crossfade::new();
+        let mut m = Mix::new();
         let mut out = [0.0f64];
 
         m.process(&[1.0, 0.0], &mut out, 44100.0);

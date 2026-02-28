@@ -58,7 +58,9 @@ struct Edge {
 /// ordering and buffer allocation are handled by the patch builder.
 pub struct ModuleGraph {
     nodes: HashMap<NodeId, Box<dyn Module>>,
-    edges: Vec<Edge>,
+    /// Indexed by `(destination NodeId, input port name)` for O(1) duplicate-input
+    /// detection in [`connect`](Self::connect). Each input port can have at most one driver.
+    edges: HashMap<(NodeId, String), Edge>,
     next_id: usize,
 }
 
@@ -67,7 +69,7 @@ impl ModuleGraph {
     pub fn new() -> Self {
         Self {
             nodes: HashMap::new(),
-            edges: Vec::new(),
+            edges: HashMap::new(),
             next_id: 0,
         }
     }
@@ -121,24 +123,24 @@ impl ModuleGraph {
             });
         }
 
-        // Enforce one driver per input.
-        if self
-            .edges
-            .iter()
-            .any(|e| e.to == to && e.input == input)
-        {
+        // Enforce one driver per input — O(1) via the edge index.
+        let key = (to, input.to_string());
+        if self.edges.contains_key(&key) {
             return Err(GraphError::InputAlreadyConnected {
                 node: to,
                 port: input.to_string(),
             });
         }
 
-        self.edges.push(Edge {
-            from,
-            output: output.to_string(),
-            to,
-            input: input.to_string(),
-        });
+        self.edges.insert(
+            key,
+            Edge {
+                from,
+                output: output.to_string(),
+                to,
+                input: input.to_string(),
+            },
+        );
 
         Ok(())
     }
@@ -148,12 +150,12 @@ impl ModuleGraph {
     /// No-ops if the [`NodeId`] is not present.
     pub fn remove_module(&mut self, id: NodeId) {
         self.nodes.remove(&id);
-        self.edges.retain(|e| e.from != id && e.to != id);
+        self.edges.retain(|_, e| e.from != id && e.to != id);
     }
 
     /// Remove a specific connection. No-op if the edge does not exist.
     pub fn disconnect(&mut self, from: NodeId, output: &str, to: NodeId, input: &str) {
-        self.edges.retain(|e| {
+        self.edges.retain(|_, e| {
             !(e.from == from && e.output == output && e.to == to && e.input == input)
         });
     }
@@ -166,7 +168,7 @@ impl ModuleGraph {
     /// Return a snapshot of all edges as `(from, output_name, to, input_name)` tuples.
     pub fn edge_list(&self) -> Vec<(NodeId, String, NodeId, String)> {
         self.edges
-            .iter()
+            .values()
             .map(|e| (e.from, e.output.clone(), e.to, e.input.clone()))
             .collect()
     }
@@ -229,6 +231,10 @@ mod tests {
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
+
+        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+            self
+        }
     }
 
     fn stub(inputs: &[&'static str], outputs: &[&'static str]) -> Box<dyn Module> {
@@ -255,7 +261,11 @@ mod tests {
     fn connect_unknown_source_node_errors() {
         let mut g = ModuleGraph::new();
         let dst = g.add_module(stub(&["in"], &[]));
-        let ghost = NodeId(99);
+        let ghost = {
+            let id = g.add_module(stub(&[], &["out"]));
+            g.remove_module(id);
+            id
+        };
         assert!(matches!(
             g.connect(ghost, "out", dst, "in"),
             Err(GraphError::NodeNotFound(_))
@@ -266,7 +276,11 @@ mod tests {
     fn connect_unknown_dest_node_errors() {
         let mut g = ModuleGraph::new();
         let src = g.add_module(stub(&[], &["out"]));
-        let ghost = NodeId(99);
+        let ghost = {
+            let id = g.add_module(stub(&["in"], &[]));
+            g.remove_module(id);
+            id
+        };
         assert!(matches!(
             g.connect(src, "out", ghost, "in"),
             Err(GraphError::NodeNotFound(_))

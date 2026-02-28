@@ -28,6 +28,7 @@ pub trait Module: Send {
     fn descriptor(&self) -> &ModuleDescriptor;
     fn process(&mut self, inputs: &[f64], outputs: &mut [f64], sample_rate: f64);
     fn as_any(&self) -> &dyn std::any::Any;
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
     /// Returns `Some(self)` if this module is a [`Sink`], `None` otherwise.
     fn as_sink(&self) -> Option<&dyn Sink> {
         None

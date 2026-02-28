@@ -2,5 +2,6 @@
 members = [
     "patches-core",
     "patches-modules",
+    "patches-engine",
 ]
 resolver = "2"

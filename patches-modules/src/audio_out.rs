@@ -59,6 +59,10 @@ impl Module for AudioOut {
         self.last_left = inputs[0];
         self.last_right = inputs[1];
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 #[cfg(test)]

@@ -36,6 +36,10 @@ impl Module for SineOscillator {
         outputs[0] = self.phase.sin();
         self.phase = (self.phase + TAU * self.frequency / sample_rate) % TAU;
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 #[cfg(test)]

@@ -1,0 +1,12 @@
+[package]
+name = "patches-engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+patches-core = { path = "../patches-core" }
+patches-modules = { path = "../patches-modules" }
+
+[lib]
+name = "patches_engine"
+path = "src/lib.rs"

@@ -4,7 +4,7 @@ use std::fmt;
 use crate::module::Module;
 
 /// Stable identifier for a module node in the graph.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct NodeId(usize);
 
 /// Errors returned by [`ModuleGraph::connect`].
@@ -155,6 +155,33 @@ impl ModuleGraph {
             !(e.from == from && e.output == output && e.to == to && e.input == input)
         });
     }
+
+    /// Return all node IDs currently in the graph.
+    pub fn node_ids(&self) -> Vec<NodeId> {
+        self.nodes.keys().copied().collect()
+    }
+
+    /// Return a snapshot of all edges as `(from, output_name, to, input_name)` tuples.
+    pub fn edge_list(&self) -> Vec<(NodeId, String, NodeId, String)> {
+        self.edges
+            .iter()
+            .map(|e| (e.from, e.output.clone(), e.to, e.input.clone()))
+            .collect()
+    }
+
+    /// Borrow a module by id for inspection (e.g. descriptor or type-checking).
+    pub fn get_module(&self, id: NodeId) -> Option<&dyn Module> {
+        self.nodes.get(&id).map(|m| m.as_ref())
+    }
+
+    /// Consume the graph and return the underlying module map.
+    ///
+    /// Call [`node_ids`](Self::node_ids), [`edge_list`](Self::edge_list), and
+    /// [`get_module`](Self::get_module) first to snapshot any information you need
+    /// before consuming.
+    pub fn into_modules(self) -> HashMap<NodeId, Box<dyn Module>> {
+        self.nodes
+    }
 }
 
 impl Default for ModuleGraph {
@@ -206,6 +233,10 @@ mod tests {
         }
 
         fn process(&mut self, _inputs: &[f64], _outputs: &mut [f64], _sample_rate: f64) {}
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
     }
 
     fn stub(inputs: &[&'static str], outputs: &[&'static str]) -> Box<dyn Module> {

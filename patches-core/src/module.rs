@@ -28,9 +28,13 @@ pub struct ModuleDescriptor {
 ///
 /// `process` is called once per sample by the audio engine. `inputs` and
 /// `outputs` are indexed according to the module's [`ModuleDescriptor`].
+///
+/// `as_any` enables downcasting from `&dyn Module` to a concrete type — for
+/// example, the patch builder uses it to locate the `AudioOut` node by type.
 pub trait Module {
     fn descriptor(&self) -> ModuleDescriptor;
     fn process(&mut self, inputs: &[f64], outputs: &mut [f64], sample_rate: f64);
+    fn as_any(&self) -> &dyn std::any::Any;
 }
 
 #[cfg(test)]

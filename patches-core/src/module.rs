@@ -8,7 +8,7 @@ pub enum PortDirection {
 /// Describes a single port on a module by name and direction.
 #[derive(Debug, Clone)]
 pub struct PortDescriptor {
-    pub name: String,
+    pub name: &'static str,
     pub direction: PortDirection,
 }
 
@@ -32,7 +32,7 @@ pub struct ModuleDescriptor {
 /// `as_any` enables downcasting from `&dyn Module` to a concrete type — for
 /// example, the patch builder uses it to locate the `AudioOut` node by type.
 pub trait Module: Send {
-    fn descriptor(&self) -> ModuleDescriptor;
+    fn descriptor(&self) -> &ModuleDescriptor;
     fn process(&mut self, inputs: &[f64], outputs: &mut [f64], sample_rate: f64);
     fn as_any(&self) -> &dyn std::any::Any;
 }
@@ -44,7 +44,7 @@ mod tests {
     #[test]
     fn port_descriptor_fields() {
         let p = PortDescriptor {
-            name: "freq".to_string(),
+            name: "freq",
             direction: PortDirection::Input,
         };
         assert_eq!(p.name, "freq");
@@ -55,16 +55,16 @@ mod tests {
     fn module_descriptor_port_counts() {
         let desc = ModuleDescriptor {
             inputs: vec![PortDescriptor {
-                name: "in".to_string(),
+                name: "in",
                 direction: PortDirection::Input,
             }],
             outputs: vec![
                 PortDescriptor {
-                    name: "out_l".to_string(),
+                    name: "out_l",
                     direction: PortDirection::Output,
                 },
                 PortDescriptor {
-                    name: "out_r".to_string(),
+                    name: "out_r",
                     direction: PortDirection::Output,
                 },
             ],

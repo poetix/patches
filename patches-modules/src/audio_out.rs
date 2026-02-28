@@ -11,6 +11,7 @@ use patches_core::{Module, ModuleDescriptor, PortDescriptor, PortDirection};
 pub struct AudioOut {
     last_left: f64,
     last_right: f64,
+    descriptor: ModuleDescriptor,
 }
 
 impl AudioOut {
@@ -18,6 +19,19 @@ impl AudioOut {
         Self {
             last_left: 0.0,
             last_right: 0.0,
+            descriptor: ModuleDescriptor {
+                inputs: vec![
+                    PortDescriptor {
+                        name: "left",
+                        direction: PortDirection::Input,
+                    },
+                    PortDescriptor {
+                        name: "right",
+                        direction: PortDirection::Input,
+                    },
+                ],
+                outputs: vec![],
+            },
         }
     }
 
@@ -39,20 +53,8 @@ impl Default for AudioOut {
 }
 
 impl Module for AudioOut {
-    fn descriptor(&self) -> ModuleDescriptor {
-        ModuleDescriptor {
-            inputs: vec![
-                PortDescriptor {
-                    name: "left".to_string(),
-                    direction: PortDirection::Input,
-                },
-                PortDescriptor {
-                    name: "right".to_string(),
-                    direction: PortDirection::Input,
-                },
-            ],
-            outputs: vec![],
-        }
+    fn descriptor(&self) -> &ModuleDescriptor {
+        &self.descriptor
     }
 
     fn process(&mut self, inputs: &[f64], _outputs: &mut [f64], _sample_rate: f64) {

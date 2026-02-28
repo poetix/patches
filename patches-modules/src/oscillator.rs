@@ -10,6 +10,7 @@ use patches_core::{Module, ModuleDescriptor, PortDescriptor, PortDirection};
 pub struct SineOscillator {
     frequency: f64,
     phase: f64,
+    descriptor: ModuleDescriptor,
 }
 
 impl SineOscillator {
@@ -17,19 +18,20 @@ impl SineOscillator {
         Self {
             frequency,
             phase: 0.0,
+            descriptor: ModuleDescriptor {
+                inputs: vec![],
+                outputs: vec![PortDescriptor {
+                    name: "out",
+                    direction: PortDirection::Output,
+                }],
+            },
         }
     }
 }
 
 impl Module for SineOscillator {
-    fn descriptor(&self) -> ModuleDescriptor {
-        ModuleDescriptor {
-            inputs: vec![],
-            outputs: vec![PortDescriptor {
-                name: "out".to_string(),
-                direction: PortDirection::Output,
-            }],
-        }
+    fn descriptor(&self) -> &ModuleDescriptor {
+        &self.descriptor
     }
 
     fn process(&mut self, _inputs: &[f64], outputs: &mut [f64], sample_rate: f64) {

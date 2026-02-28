@@ -4,11 +4,30 @@ use patches_core::{Module, ModuleDescriptor, PortDescriptor, PortDirection};
 ///
 /// Output is `(a + b) / 2.0`, keeping the result in the same amplitude range
 /// as the inputs.
-pub struct Crossfade;
+pub struct Crossfade {
+    descriptor: ModuleDescriptor,
+}
 
 impl Crossfade {
     pub fn new() -> Self {
-        Self
+        Self {
+            descriptor: ModuleDescriptor {
+                inputs: vec![
+                    PortDescriptor {
+                        name: "a",
+                        direction: PortDirection::Input,
+                    },
+                    PortDescriptor {
+                        name: "b",
+                        direction: PortDirection::Input,
+                    },
+                ],
+                outputs: vec![PortDescriptor {
+                    name: "out",
+                    direction: PortDirection::Output,
+                }],
+            },
+        }
     }
 }
 
@@ -19,23 +38,8 @@ impl Default for Crossfade {
 }
 
 impl Module for Crossfade {
-    fn descriptor(&self) -> ModuleDescriptor {
-        ModuleDescriptor {
-            inputs: vec![
-                PortDescriptor {
-                    name: "a".to_string(),
-                    direction: PortDirection::Input,
-                },
-                PortDescriptor {
-                    name: "b".to_string(),
-                    direction: PortDirection::Input,
-                },
-            ],
-            outputs: vec![PortDescriptor {
-                name: "out".to_string(),
-                direction: PortDirection::Output,
-            }],
-        }
+    fn descriptor(&self) -> &ModuleDescriptor {
+        &self.descriptor
     }
 
     fn process(&mut self, inputs: &[f64], outputs: &mut [f64], _sample_rate: f64) {

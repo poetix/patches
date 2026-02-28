@@ -11,6 +11,8 @@ pub enum BuildError {
     NoAudioOut,
     /// The graph contains more than one `AudioOut` node.
     MultipleAudioOut,
+    /// An internal consistency invariant was violated (indicates a bug in the builder).
+    InternalError(String),
 }
 
 impl fmt::Display for BuildError {
@@ -20,6 +22,7 @@ impl fmt::Display for BuildError {
             BuildError::MultipleAudioOut => {
                 write!(f, "patch graph has more than one AudioOut node")
             }
+            BuildError::InternalError(msg) => write!(f, "internal builder error: {msg}"),
         }
     }
 }
@@ -117,8 +120,15 @@ pub fn build_patch(graph: ModuleGraph) -> Result<ExecutionPlan, BuildError> {
     // Snapshot descriptors before consuming the graph.
     let descriptors: HashMap<NodeId, ModuleDescriptor> = node_ids
         .iter()
-        .map(|&id| (id, graph.get_module(id).unwrap().descriptor()))
-        .collect();
+        .map(|&id| {
+            graph
+                .get_module(id)
+                .ok_or_else(|| {
+                    BuildError::InternalError(format!("node {id:?} missing from graph"))
+                })
+                .map(|m| (id, m.descriptor().clone()))
+        })
+        .collect::<Result<HashMap<_, _>, _>>()?;
 
     // Identify AudioOut nodes by downcasting.
     let audio_out_ids: Vec<NodeId> = node_ids
@@ -139,12 +149,14 @@ pub fn build_patch(graph: ModuleGraph) -> Result<ExecutionPlan, BuildError> {
     };
 
     // Topological sort — cycle-tolerant via Kahn's algorithm.
-    let order = kahn_toposort(&node_ids, &edges);
+    let order = kahn_toposort(&node_ids, &edges)?;
 
     let audio_out_index = order
         .iter()
         .position(|&id| id == audio_out_node)
-        .unwrap();
+        .ok_or_else(|| {
+            BuildError::InternalError("audio_out node missing from toposort result".to_string())
+        })?;
 
     // Consume the graph's modules.
     let mut modules = graph.into_modules();
@@ -177,22 +189,28 @@ pub fn build_patch(graph: ModuleGraph) -> Result<ExecutionPlan, BuildError> {
             .iter()
             .map(|port| {
                 // Find the edge that drives this input port.
-                edges
+                let buf_idx = edges
                     .iter()
-                    .find(|(_, _, to, input)| *to == id && input == &port.name)
-                    .map(|(from, out_name, _, _)| {
+                    .find(|(_, _, to, input)| *to == id && input == port.name)
+                    .map(|(from, out_name, _, _)| -> Result<usize, BuildError> {
                         // Resolve the driving output's buffer index.
                         let from_desc = &descriptors[from];
                         let out_port_idx = from_desc
                             .outputs
                             .iter()
-                            .position(|p| &p.name == out_name)
-                            .unwrap();
-                        output_buf[&(*from, out_port_idx)]
+                            .position(|p| p.name == out_name)
+                            .ok_or_else(|| {
+                                BuildError::InternalError(format!(
+                                    "output port {out_name:?} not found on node {from:?}"
+                                ))
+                            })?;
+                        Ok(output_buf[&(*from, out_port_idx)])
                     })
-                    .unwrap_or(0) // 0 = zero buffer for unconnected inputs
+                    .transpose()?
+                    .unwrap_or(0); // 0 = zero buffer for unconnected inputs
+                Ok(buf_idx)
             })
-            .collect();
+            .collect::<Result<Vec<_>, BuildError>>()?;
 
         let output_buffers: Vec<usize> = desc
             .outputs
@@ -203,7 +221,9 @@ pub fn build_patch(graph: ModuleGraph) -> Result<ExecutionPlan, BuildError> {
 
         let n_in = desc.inputs.len();
         let n_out = desc.outputs.len();
-        let module = modules.remove(&id).unwrap();
+        let module = modules.remove(&id).ok_or_else(|| {
+            BuildError::InternalError(format!("module {id:?} missing from map"))
+        })?;
 
         slots.push(ModuleSlot {
             module,
@@ -229,12 +249,14 @@ pub fn build_patch(graph: ModuleGraph) -> Result<ExecutionPlan, BuildError> {
 fn kahn_toposort(
     node_ids: &[NodeId],
     edges: &[(NodeId, String, NodeId, String)],
-) -> Vec<NodeId> {
+) -> Result<Vec<NodeId>, BuildError> {
     let mut in_degree: HashMap<NodeId, usize> =
         node_ids.iter().map(|&id| (id, 0)).collect();
 
     for (_, _, to, _) in edges {
-        *in_degree.get_mut(to).unwrap() += 1;
+        *in_degree.get_mut(to).ok_or_else(|| {
+            BuildError::InternalError(format!("edge target {to:?} not in node set"))
+        })? += 1;
     }
 
     // Initialise the queue with zero-in-degree nodes, sorted for determinism.
@@ -263,7 +285,9 @@ fn kahn_toposort(
         successors.dedup();
 
         for succ in successors {
-            let deg = in_degree.get_mut(&succ).unwrap();
+            let deg = in_degree.get_mut(&succ).ok_or_else(|| {
+                BuildError::InternalError(format!("successor {succ:?} not in node set"))
+            })?;
             *deg -= 1;
             if *deg == 0 {
                 queue.push_back(succ);
@@ -280,7 +304,7 @@ fn kahn_toposort(
     remaining.sort_unstable();
     order.extend(remaining);
 
-    order
+    Ok(order)
 }
 
 #[cfg(test)]

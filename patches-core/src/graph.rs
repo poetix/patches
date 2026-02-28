@@ -96,7 +96,8 @@ impl ModuleGraph {
             .nodes
             .get(&from)
             .ok_or(GraphError::NodeNotFound(from))?
-            .descriptor();
+            .descriptor()
+            .clone();
 
         if !from_desc.outputs.iter().any(|p| p.name == output) {
             return Err(GraphError::OutputPortNotFound {
@@ -110,7 +111,8 @@ impl ModuleGraph {
             .nodes
             .get(&to)
             .ok_or(GraphError::NodeNotFound(to))?
-            .descriptor();
+            .descriptor()
+            .clone();
 
         if !to_desc.inputs.iter().any(|p| p.name == input) {
             return Err(GraphError::InputPortNotFound {
@@ -197,39 +199,35 @@ mod tests {
 
     // A minimal stub module with configurable ports for testing.
     struct StubModule {
-        inputs: Vec<&'static str>,
-        outputs: Vec<&'static str>,
+        descriptor: ModuleDescriptor,
     }
 
     impl StubModule {
         fn new(inputs: &[&'static str], outputs: &[&'static str]) -> Self {
             Self {
-                inputs: inputs.to_vec(),
-                outputs: outputs.to_vec(),
+                descriptor: ModuleDescriptor {
+                    inputs: inputs
+                        .iter()
+                        .map(|&n| PortDescriptor {
+                            name: n,
+                            direction: PortDirection::Input,
+                        })
+                        .collect(),
+                    outputs: outputs
+                        .iter()
+                        .map(|&n| PortDescriptor {
+                            name: n,
+                            direction: PortDirection::Output,
+                        })
+                        .collect(),
+                },
             }
         }
     }
 
     impl Module for StubModule {
-        fn descriptor(&self) -> ModuleDescriptor {
-            ModuleDescriptor {
-                inputs: self
-                    .inputs
-                    .iter()
-                    .map(|&n| PortDescriptor {
-                        name: n.to_string(),
-                        direction: PortDirection::Input,
-                    })
-                    .collect(),
-                outputs: self
-                    .outputs
-                    .iter()
-                    .map(|&n| PortDescriptor {
-                        name: n.to_string(),
-                        direction: PortDirection::Output,
-                    })
-                    .collect(),
-            }
+        fn descriptor(&self) -> &ModuleDescriptor {
+            &self.descriptor
         }
 
         fn process(&mut self, _inputs: &[f64], _outputs: &mut [f64], _sample_rate: f64) {}

@@ -1,5 +1,4 @@
 use std::fmt;
-use std::sync::{Arc, Mutex};
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream, StreamConfig};
@@ -19,6 +18,10 @@ pub enum EngineError {
     PlayStreamError(cpal::PlayStreamError),
     /// The device's native sample format is not supported by this engine.
     UnsupportedSampleFormat(SampleFormat),
+    /// [`start`](SoundEngine::start) was called a second time after the engine
+    /// has already been started and stopped. Create a new [`SoundEngine`] to
+    /// restart with a fresh plan.
+    AlreadyConsumed,
 }
 
 impl fmt::Display for EngineError {
@@ -33,6 +36,10 @@ impl fmt::Display for EngineError {
             EngineError::UnsupportedSampleFormat(fmt) => {
                 write!(f, "unsupported sample format: {fmt:?}")
             }
+            EngineError::AlreadyConsumed => write!(
+                f,
+                "engine has already been started and stopped; create a new SoundEngine to restart"
+            ),
         }
     }
 }
@@ -41,6 +48,15 @@ impl std::error::Error for EngineError {}
 
 /// Drives an [`ExecutionPlan`] continuously, writing stereo output to the
 /// default hardware audio device via CPAL.
+///
+/// The audio callback owns the [`ExecutionPlan`] directly — no `Arc`, no
+/// `Mutex`. A new plan can be swapped in at any time via
+/// [`swap_plan`](Self::swap_plan), which sends it over a wait-free SPSC
+/// channel (`rtrb`).
+///
+/// A `SoundEngine` can be started once. After [`stop`](Self::stop) the plan
+/// has been moved into (and dropped with) the audio closure; to run again
+/// with a new plan, create a fresh `SoundEngine`.
 ///
 /// ```no_run
 /// # use patches_engine::{SoundEngine, EngineError};
@@ -53,10 +69,13 @@ impl std::error::Error for EngineError {}
 /// # }
 /// ```
 pub struct SoundEngine {
-    /// Shared with the audio callback; protected by a Mutex so `stop` can
-    /// reclaim the plan and the engine is restartable.
-    plan: Arc<Mutex<ExecutionPlan>>,
-    /// Holds the live CPAL stream while the engine is running.
+    /// Write end of the lock-free plan channel. Held here so that
+    /// [`swap_plan`](Self::swap_plan) can publish new plans at any time.
+    plan_tx: rtrb::Producer<ExecutionPlan>,
+    /// Consumer end and initial plan, stashed here until [`start`](Self::start)
+    /// moves them into the audio closure. `None` after `start()` has been called.
+    pending: Option<(rtrb::Consumer<ExecutionPlan>, ExecutionPlan)>,
+    /// Live CPAL stream while the engine is running.
     stream: Option<Stream>,
 }
 
@@ -65,19 +84,30 @@ impl SoundEngine {
     ///
     /// No audio device is opened until [`start`](Self::start) is called.
     pub fn new(plan: ExecutionPlan) -> Result<Self, EngineError> {
+        // Capacity-1 ring buffer: one slot is sufficient to queue a single
+        // in-flight plan swap. Only the latest plan matters for hot-reload.
+        let (plan_tx, plan_rx) = rtrb::RingBuffer::new(1);
         Ok(Self {
-            plan: Arc::new(Mutex::new(plan)),
+            plan_tx,
+            pending: Some((plan_rx, plan)),
             stream: None,
         })
     }
 
     /// Open the default output device and begin audio processing.
     ///
-    /// If the engine is already running this is a no-op.
+    /// Returns [`EngineError::AlreadyConsumed`] if called after the engine has
+    /// already been started and stopped. Returns `Ok(())` if the engine is
+    /// already running (no-op).
     pub fn start(&mut self) -> Result<(), EngineError> {
         if self.stream.is_some() {
             return Ok(());
         }
+
+        let (consumer, initial_plan) = self
+            .pending
+            .take()
+            .ok_or(EngineError::AlreadyConsumed)?;
 
         let host = cpal::default_host();
         let device = host
@@ -95,13 +125,13 @@ impl SoundEngine {
 
         let stream = match sample_format {
             SampleFormat::F32 => {
-                self.build_stream::<f32>(&device, &config, sample_rate, channels)
+                build_stream::<f32>(&device, &config, sample_rate, channels, consumer, initial_plan)
             }
             SampleFormat::I16 => {
-                self.build_stream::<i16>(&device, &config, sample_rate, channels)
+                build_stream::<i16>(&device, &config, sample_rate, channels, consumer, initial_plan)
             }
             SampleFormat::U16 => {
-                self.build_stream::<u16>(&device, &config, sample_rate, channels)
+                build_stream::<u16>(&device, &config, sample_rate, channels, consumer, initial_plan)
             }
             other => return Err(EngineError::UnsupportedSampleFormat(other)),
         }?;
@@ -114,57 +144,63 @@ impl SoundEngine {
     /// Stop audio processing and close the device.
     ///
     /// Dropping the [`Stream`] causes CPAL to join the audio thread before
-    /// returning, so by the time `stop` returns the audio callback is finished.
-    /// The engine can be restarted by calling [`start`](Self::start) again.
+    /// returning, so by the time `stop` returns the audio callback has
+    /// finished and the [`ExecutionPlan`] it owned has been dropped.
     pub fn stop(&mut self) {
         self.stream.take();
     }
 
-    fn build_stream<T>(
-        &self,
-        device: &cpal::Device,
-        config: &StreamConfig,
-        sample_rate: f64,
-        channels: usize,
-    ) -> Result<Stream, EngineError>
-    where
-        T: cpal::SizedSample + cpal::FromSample<f32>,
-    {
-        let plan = Arc::clone(&self.plan);
-
-        device
-            .build_output_stream(
-                config,
-                move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
-                    fill_buffer(data, &plan, sample_rate, channels);
-                },
-                |err| {
-                    eprintln!("patches audio stream error: {err}");
-                },
-                None,
-            )
-            .map_err(EngineError::BuildStreamError)
+    /// Send a new [`ExecutionPlan`] to the audio callback.
+    ///
+    /// The callback will adopt the new plan at the start of its next
+    /// invocation. If the single-slot channel is already full (i.e. a
+    /// previous plan has been queued but not yet consumed), the push is a
+    /// no-op and `new_plan` is returned as `Err`. In practice the audio
+    /// callback drains the slot within one buffer period (~10 ms), so
+    /// callers may simply retry.
+    ///
+    /// This method is wait-free and safe to call from any thread.
+    pub fn swap_plan(&mut self, new_plan: ExecutionPlan) -> Result<(), ExecutionPlan> {
+        self.plan_tx.push(new_plan).map_err(|rtrb::PushError::Full(v)| v)
     }
 }
 
+fn build_stream<T>(
+    device: &cpal::Device,
+    config: &StreamConfig,
+    sample_rate: f64,
+    channels: usize,
+    mut consumer: rtrb::Consumer<ExecutionPlan>,
+    mut current_plan: ExecutionPlan,
+) -> Result<Stream, EngineError>
+where
+    T: cpal::SizedSample + cpal::FromSample<f32>,
+{
+    device
+        .build_output_stream(
+            config,
+            move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
+                // Adopt a new plan if one has been published — wait-free, no allocation.
+                if let Ok(new_plan) = consumer.pop() {
+                    current_plan = new_plan;
+                }
+                fill_buffer(data, &mut current_plan, sample_rate, channels);
+            },
+            |err| {
+                eprintln!("patches audio stream error: {err}");
+            },
+            None,
+        )
+        .map_err(EngineError::BuildStreamError)
+}
+
 /// Write one full CPAL output callback buffer without allocating or blocking.
-///
-/// Uses [`try_lock`](Mutex::try_lock) so the audio thread never sleeps waiting
-/// for the mutex. In the unlikely event the lock is held (e.g. during a
-/// future hot-reload plan swap), the buffer is filled with silence.
 fn fill_buffer<T: cpal::SizedSample + cpal::FromSample<f32>>(
     data: &mut [T],
-    plan: &Arc<Mutex<ExecutionPlan>>,
+    plan: &mut ExecutionPlan,
     sample_rate: f64,
     channels: usize,
 ) {
-    let Ok(mut plan) = plan.try_lock() else {
-        for s in data.iter_mut() {
-            *s = T::from_sample(0.0_f32);
-        }
-        return;
-    };
-
     let frames = if channels > 0 {
         data.len() / channels
     } else {

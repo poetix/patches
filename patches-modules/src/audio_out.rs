@@ -1,4 +1,4 @@
-use patches_core::{Module, ModuleDescriptor, PortDescriptor};
+use patches_core::{Module, ModuleDescriptor, PortDescriptor, Sink};
 
 /// A passive stereo sink node.
 ///
@@ -58,6 +58,20 @@ impl Module for AudioOut {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self
+    }
+
+    fn as_sink(&self) -> Option<&dyn Sink> {
+        Some(self)
+    }
+}
+
+impl Sink for AudioOut {
+    fn last_left(&self) -> f64 {
+        self.last_left
+    }
+
+    fn last_right(&self) -> f64 {
+        self.last_right
     }
 }
 

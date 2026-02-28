@@ -2,7 +2,6 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt;
 
 use patches_core::{Module, ModuleDescriptor, ModuleGraph, NodeId, SampleBuffer};
-use patches_modules::AudioOut;
 
 /// Errors that can occur when building an [`ExecutionPlan`].
 #[derive(Debug)]
@@ -91,18 +90,16 @@ impl ExecutionPlan {
     pub fn last_left(&self) -> f64 {
         self.slots[self.audio_out_index]
             .module
-            .as_any()
-            .downcast_ref::<AudioOut>()
-            .map_or(0.0, |a| a.last_left())
+            .as_sink()
+            .map_or(0.0, |s| s.last_left())
     }
 
     /// Right-channel sample produced during the most recent [`tick`](Self::tick).
     pub fn last_right(&self) -> f64 {
         self.slots[self.audio_out_index]
             .module
-            .as_any()
-            .downcast_ref::<AudioOut>()
-            .map_or(0.0, |a| a.last_right())
+            .as_sink()
+            .map_or(0.0, |s| s.last_right())
     }
 }
 
@@ -130,15 +127,10 @@ pub fn build_patch(graph: ModuleGraph) -> Result<ExecutionPlan, BuildError> {
         })
         .collect::<Result<HashMap<_, _>, _>>()?;
 
-    // Identify AudioOut nodes by downcasting.
+    // Identify sink nodes via the Sink trait.
     let audio_out_ids: Vec<NodeId> = node_ids
         .iter()
-        .filter(|&&id| {
-            graph
-                .get_module(id)
-                .and_then(|m| m.as_any().downcast_ref::<AudioOut>())
-                .is_some()
-        })
+        .filter(|&&id| graph.get_module(id).and_then(|m| m.as_sink()).is_some())
         .copied()
         .collect();
 

@@ -5,9 +5,11 @@ edition = "2021"
 
 [dependencies]
 patches-core = { path = "../patches-core" }
-patches-modules = { path = "../patches-modules" }
 cpal = "0.15"
 rtrb = "0.3"
+
+[dev-dependencies]
+patches-modules = { path = "../patches-modules" }
 
 [lib]
 name = "patches_engine"

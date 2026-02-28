@@ -31,7 +31,7 @@ pub struct ModuleDescriptor {
 ///
 /// `as_any` enables downcasting from `&dyn Module` to a concrete type — for
 /// example, the patch builder uses it to locate the `AudioOut` node by type.
-pub trait Module {
+pub trait Module: Send {
     fn descriptor(&self) -> ModuleDescriptor;
     fn process(&mut self, inputs: &[f64], outputs: &mut [f64], sample_rate: f64);
     fn as_any(&self) -> &dyn std::any::Any;

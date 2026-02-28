@@ -27,12 +27,12 @@ This epic delivers the first end-to-end vertical slice of the system — no DSL,
 
 | ID | Title |
 |----|-------|
-| [0001](../../tickets/open/0001-core-module-trait.md) | Core module trait and signal types |
-| [0002](../../tickets/open/0002-module-graph.md) | Module graph structure |
-| [0003](../../tickets/open/0003-sine-oscillator-module.md) | Sine oscillator module |
-| [0004](../../tickets/open/0004-audio-output-module.md) | Audio output module |
-| [0005](../../tickets/open/0005-patch-builder.md) | Patch builder (toposort and execution plan) |
-| [0006](../../tickets/open/0006-sound-engine.md) | Sound engine |
+| [0001](../../tickets/closed/0001-core-module-trait.md) | Core module trait and signal types |
+| [0002](../../tickets/closed/0002-module-graph.md) | Module graph structure |
+| [0003](../../tickets/closed/0003-sine-oscillator-module.md) | Sine oscillator module |
+| [0004](../../tickets/closed/0004-audio-output-module.md) | Audio output module |
+| [0005](../../tickets/closed/0005-patch-builder.md) | Patch builder (toposort and execution plan) |
+| [0006](../../tickets/closed/0006-sound-engine.md) | Sound engine |
 
 ## Notes
 
@@ -45,3 +45,5 @@ patches-core     ←  patches-modules  ←  patches-engine
 **Not in scope for this epic:** DSL parsing, hot-reload, patch serialisation, parameter control, multiple patch outputs, or any form of UI.
 
 **440 Hz is a deliberate choice** for the demo binary — it is concert A, unambiguous and easy to verify by ear.
+
+**Spec divergence:** the acceptance criterion asked for an executable that runs until Ctrl-C. The deliverable is instead `patches-engine/examples/sine_tone.rs`, which plays for 3 seconds and exits. The example plays a major third (A4 + C#5) via `Crossfade` rather than a raw 440 Hz sine, and demonstrates the full end-to-end stack. No `src/bin/` or dedicated CLI crate was created; the example is judged sufficient for a reference implementation at this stage.

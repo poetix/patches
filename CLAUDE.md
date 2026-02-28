@@ -13,10 +13,11 @@ The two key concerns are:
 ```
 patches-core/     Core types, traits, DSL parsing, and the audio engine runtime
 patches-modules/  Module implementations (oscillators, filters, effects, etc.)
+patches-engine/   Patch builder, sound engine, CPAL integration, and examples
 tickets/          Work tracking (see Ticket workflow below)
 ```
 
-`patches-modules` depends on `patches-core`. New audio modules should live in `patches-modules` unless they are foundational types needed by the engine itself.
+`patches-modules` depends on `patches-core`. `patches-engine` depends on both. New audio modules should live in `patches-modules` unless they are foundational types needed by the engine itself.
 
 ## Commands
 

@@ -1,15 +1,7 @@
-/// Whether a port carries signal into or out of a module.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PortDirection {
-    Input,
-    Output,
-}
-
-/// Describes a single port on a module by name and direction.
+/// Describes a single port on a module by name.
 #[derive(Debug, Clone)]
 pub struct PortDescriptor {
     pub name: &'static str,
-    pub direction: PortDirection,
 }
 
 /// Describes the full port layout of a module.
@@ -43,30 +35,17 @@ mod tests {
 
     #[test]
     fn port_descriptor_fields() {
-        let p = PortDescriptor {
-            name: "freq",
-            direction: PortDirection::Input,
-        };
+        let p = PortDescriptor { name: "freq" };
         assert_eq!(p.name, "freq");
-        assert_eq!(p.direction, PortDirection::Input);
     }
 
     #[test]
     fn module_descriptor_port_counts() {
         let desc = ModuleDescriptor {
-            inputs: vec![PortDescriptor {
-                name: "in",
-                direction: PortDirection::Input,
-            }],
+            inputs: vec![PortDescriptor { name: "in" }],
             outputs: vec![
-                PortDescriptor {
-                    name: "out_l",
-                    direction: PortDirection::Output,
-                },
-                PortDescriptor {
-                    name: "out_r",
-                    direction: PortDirection::Output,
-                },
+                PortDescriptor { name: "out_l" },
+                PortDescriptor { name: "out_r" },
             ],
         };
         assert_eq!(desc.inputs.len(), 1);

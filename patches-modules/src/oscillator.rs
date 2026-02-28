@@ -1,6 +1,6 @@
 use std::f64::consts::TAU;
 
-use patches_core::{Module, ModuleDescriptor, PortDescriptor, PortDirection};
+use patches_core::{Module, ModuleDescriptor, PortDescriptor};
 
 /// A sine wave oscillator with fixed frequency set at construction time.
 ///
@@ -20,10 +20,7 @@ impl SineOscillator {
             phase: 0.0,
             descriptor: ModuleDescriptor {
                 inputs: vec![],
-                outputs: vec![PortDescriptor {
-                    name: "out",
-                    direction: PortDirection::Output,
-                }],
+                outputs: vec![PortDescriptor { name: "out" }],
             },
         }
     }

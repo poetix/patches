@@ -1,4 +1,4 @@
-use patches_core::{Module, ModuleDescriptor, PortDescriptor, PortDirection};
+use patches_core::{Module, ModuleDescriptor, PortDescriptor};
 
 /// A passive stereo sink node.
 ///
@@ -21,14 +21,8 @@ impl AudioOut {
             last_right: 0.0,
             descriptor: ModuleDescriptor {
                 inputs: vec![
-                    PortDescriptor {
-                        name: "left",
-                        direction: PortDirection::Input,
-                    },
-                    PortDescriptor {
-                        name: "right",
-                        direction: PortDirection::Input,
-                    },
+                    PortDescriptor { name: "left" },
+                    PortDescriptor { name: "right" },
                 ],
                 outputs: vec![],
             },

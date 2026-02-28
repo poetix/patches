@@ -1,4 +1,4 @@
-use patches_core::{Module, ModuleDescriptor, PortDescriptor, PortDirection};
+use patches_core::{Module, ModuleDescriptor, PortDescriptor};
 
 /// Mixes two input signals at a fixed 50/50 blend.
 ///
@@ -13,19 +13,10 @@ impl Crossfade {
         Self {
             descriptor: ModuleDescriptor {
                 inputs: vec![
-                    PortDescriptor {
-                        name: "a",
-                        direction: PortDirection::Input,
-                    },
-                    PortDescriptor {
-                        name: "b",
-                        direction: PortDirection::Input,
-                    },
+                    PortDescriptor { name: "a" },
+                    PortDescriptor { name: "b" },
                 ],
-                outputs: vec![PortDescriptor {
-                    name: "out",
-                    direction: PortDirection::Output,
-                }],
+                outputs: vec![PortDescriptor { name: "out" }],
             },
         }
     }

@@ -195,7 +195,7 @@ impl Default for ModuleGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::module::{ModuleDescriptor, PortDescriptor, PortDirection};
+    use crate::module::{ModuleDescriptor, PortDescriptor};
 
     // A minimal stub module with configurable ports for testing.
     struct StubModule {
@@ -208,17 +208,11 @@ mod tests {
                 descriptor: ModuleDescriptor {
                     inputs: inputs
                         .iter()
-                        .map(|&n| PortDescriptor {
-                            name: n,
-                            direction: PortDirection::Input,
-                        })
+                        .map(|&n| PortDescriptor { name: n })
                         .collect(),
                     outputs: outputs
                         .iter()
-                        .map(|&n| PortDescriptor {
-                            name: n,
-                            direction: PortDirection::Output,
-                        })
+                        .map(|&n| PortDescriptor { name: n })
                         .collect(),
                 },
             }

@@ -1,13 +1,5 @@
-pub fn greet() -> String {
-    "Hello from patches-core".to_string()
-}
+pub mod buffer;
+pub mod module;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_greets() {
-        assert_eq!(greet(), "Hello from patches-core");
-    }
-}
+pub use buffer::SampleBuffer;
+pub use module::{Module, ModuleDescriptor, PortDescriptor, PortDirection};

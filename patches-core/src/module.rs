@@ -1,0 +1,73 @@
+/// Whether a port carries signal into or out of a module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PortDirection {
+    Input,
+    Output,
+}
+
+/// Describes a single port on a module by name and direction.
+#[derive(Debug, Clone)]
+pub struct PortDescriptor {
+    pub name: String,
+    pub direction: PortDirection,
+}
+
+/// Describes the full port layout of a module.
+///
+/// Inputs and outputs are stored in separate vecs. The index of a port in
+/// `inputs` corresponds to the index in the `inputs` slice passed to
+/// [`Module::process`], and similarly for `outputs`. The graph and patch builder
+/// use this to resolve port names to slice indices at build time.
+#[derive(Debug, Clone)]
+pub struct ModuleDescriptor {
+    pub inputs: Vec<PortDescriptor>,
+    pub outputs: Vec<PortDescriptor>,
+}
+
+/// The core trait all audio modules implement.
+///
+/// `process` is called once per sample by the audio engine. `inputs` and
+/// `outputs` are indexed according to the module's [`ModuleDescriptor`].
+pub trait Module {
+    fn descriptor(&self) -> ModuleDescriptor;
+    fn process(&mut self, inputs: &[f64], outputs: &mut [f64], sample_rate: f64);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn port_descriptor_fields() {
+        let p = PortDescriptor {
+            name: "freq".to_string(),
+            direction: PortDirection::Input,
+        };
+        assert_eq!(p.name, "freq");
+        assert_eq!(p.direction, PortDirection::Input);
+    }
+
+    #[test]
+    fn module_descriptor_port_counts() {
+        let desc = ModuleDescriptor {
+            inputs: vec![PortDescriptor {
+                name: "in".to_string(),
+                direction: PortDirection::Input,
+            }],
+            outputs: vec![
+                PortDescriptor {
+                    name: "out_l".to_string(),
+                    direction: PortDirection::Output,
+                },
+                PortDescriptor {
+                    name: "out_r".to_string(),
+                    direction: PortDirection::Output,
+                },
+            ],
+        };
+        assert_eq!(desc.inputs.len(), 1);
+        assert_eq!(desc.outputs.len(), 2);
+        assert_eq!(desc.inputs[0].name, "in");
+        assert_eq!(desc.outputs[1].name, "out_r");
+    }
+}

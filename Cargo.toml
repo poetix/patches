@@ -3,3 +3,4 @@ members = [
     "patches-core",
     "patches-modules",
 ]
+resolver = "2"

@@ -41,11 +41,24 @@ Use `tickets/TEMPLATE.md` as the starting point for new tickets.
 
 When starting a ticket: move it to `in-progress/`. When done: move it to `closed/`.
 
+## Architecture decision records
+
+Design decisions with trade-offs are recorded in `adr/` as numbered markdown files (`NNNN-short-description.md`). Reference the relevant ADR from tickets and code comments where a decision might otherwise seem arbitrary.
+
 ## Audio engine conventions
 
 - **No allocations on the audio thread.** All buffers and module state must be pre-allocated.
 - **No blocking on the audio thread.** No mutexes, no I/O, no syscalls in the processing path.
 - **Real-time/non-real-time boundary.** Use lock-free data structures (e.g. ring buffers, atomics) to communicate between the audio thread and the hot-reload/control thread.
+
+## Design desiderata
+
+These are qualities the system should preserve as it evolves. They inform design decisions but are not hard rules — trade-offs are recorded in `adr/`.
+
+- **Parallelism-ready execution.** The 1-sample cable delay means modules can run in any order. The execution plan should remain structured so that splitting modules across threads is a contained change to `ExecutionPlan::tick()` and the builder's buffer layout, with no impact on the Module trait, ModuleGraph, or module implementations.
+- **Cache-friendly buffer layout.** Cable buffers should be packed densely in memory. When parallelism arrives, the builder should partition buffers by thread affinity (buffers accessed by the same thread are contiguous) and pad partition boundaries to cache lines to avoid false sharing.
+- **Zero-cost descriptors.** Module descriptors (port names, counts) are compile-time constants. Accessing them should not allocate.
+- **Backend-agnostic core.** `patches-core` defines traits and data structures with no knowledge of audio backends, file formats, or UI. Concrete backends live in `patches-engine` or dedicated crates.
 
 ## General conventions
 

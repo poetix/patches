@@ -13,25 +13,25 @@ No new features or modules are added. The system's observable behaviour is uncha
 
 ## Acceptance criteria
 
-- [ ] All eight tickets closed
-- [ ] `cargo build` and `cargo clippy` are clean across the workspace
-- [ ] `cargo test` passes across the workspace
-- [ ] Zero `.unwrap()` or `.expect()` calls in non-test library code
-- [ ] `SoundEngine` audio callback uses no `Mutex`
-- [ ] `cargo run --example sine_tone` still plays audio correctly
+- [x] All eight tickets closed
+- [x] `cargo build` and `cargo clippy` are clean across the workspace
+- [x] `cargo test` passes across the workspace
+- [x] Zero `.unwrap()` or `.expect()` calls in non-test library code
+- [x] `SoundEngine` audio callback uses no `Mutex`
+- [x] `cargo run --example sine_tone` still plays audio correctly
 
 ## Tickets
 
 | ID | Title | Priority |
 |----|-------|----------|
-| [0009](../../tickets/open/0009-lock-free-engine.md) | Replace Mutex with triple-buffer in SoundEngine | high |
-| [0010](../../tickets/open/0010-eliminate-unwrap.md) | Eliminate `.unwrap()` from library code | high |
-| [0011](../../tickets/open/0011-static-port-names.md) | Use `&'static str` port names and return `&ModuleDescriptor` | medium |
-| [0012](../../tickets/open/0012-remove-port-direction.md) | Remove redundant `PortDirection` from `PortDescriptor` | low |
-| [0013](../../tickets/open/0013-sink-trait.md) | Introduce `Sink` trait to decouple engine from `AudioOut` | medium |
-| [0014](../../tickets/open/0014-example-error-handling.md) | Clean up `sine_tone` example error handling | low |
-| [0015](../../tickets/open/0015-misc-improvements.md) | Miscellaneous small improvements | low |
-| [0016](../../tickets/open/0016-update-documentation.md) | Update documentation and fix broken links | low |
+| [0009](../../tickets/closed/0009-lock-free-engine.md) | Replace Mutex with triple-buffer in SoundEngine | high |
+| [0010](../../tickets/closed/0010-eliminate-unwrap.md) | Eliminate `.unwrap()` from library code | high |
+| [0011](../../tickets/closed/0011-static-port-names.md) | Use `&'static str` port names and return `&ModuleDescriptor` | medium |
+| [0012](../../tickets/closed/0012-remove-port-direction.md) | Remove redundant `PortDirection` from `PortDescriptor` | low |
+| [0013](../../tickets/closed/0013-sink-trait.md) | Introduce `Sink` trait to decouple engine from `AudioOut` | medium |
+| [0014](../../tickets/closed/0014-example-error-handling.md) | Clean up `sine_tone` example error handling | low |
+| [0015](../../tickets/closed/0015-misc-improvements.md) | Miscellaneous small improvements | low |
+| [0016](../../tickets/closed/0016-update-documentation.md) | Update documentation and fix broken links | low |
 
 ## Dependency graph
 

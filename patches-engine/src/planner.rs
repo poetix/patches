@@ -1,18 +1,26 @@
 use patches_core::ModuleGraph;
 
-use crate::builder::{build_patch, BuildError, ExecutionPlan};
+use crate::builder::{build_patch, BufferAllocState, BuildError, ExecutionPlan};
 use crate::engine::{EngineError, SoundEngine};
 
-/// A stateless, audio-agnostic patch builder.
+/// Default cable buffer pool capacity.
 ///
-/// `Planner` converts a [`ModuleGraph`] into an [`ExecutionPlan`]. If a
-/// previous plan is supplied, module instances with matching
-/// [`InstanceId`](patches_core::InstanceId)s are reused — preserving any
+/// 4096 slots accommodate up to 4096 concurrent output ports, which is more
+/// than sufficient for all expected patch sizes. Each slot is 16 bytes
+/// (`[f64; 2]`), so the pool is 64 KiB.
+const DEFAULT_POOL_CAPACITY: usize = 4096;
+
+/// Converts a [`ModuleGraph`] into an [`ExecutionPlan`] with stable buffer allocation.
+///
+/// `Planner` carries [`BufferAllocState`] forward across successive [`build`](Self::build)
+/// calls so that cables that share a `(NodeId, output_port_index)` key across
+/// re-plans reuse the same buffer pool slot. The audio thread reads and writes
+/// the same memory before and after a plan swap, eliminating discontinuities for
+/// stable connections.
+///
+/// If a previous plan is supplied to [`build`](Self::build), module instances with
+/// matching [`InstanceId`](patches_core::InstanceId)s are reused — preserving any
 /// internal state (e.g. oscillator phase) accumulated since the plan was built.
-///
-/// `Planner` itself is stateless; callers retain the previous plan and pass it
-/// back at each re-plan. This makes planning fully testable without a running
-/// audio device.
 ///
 /// # State freshness
 ///
@@ -21,16 +29,36 @@ use crate::engine::{EngineError, SoundEngine};
 /// For live-coding use cases (re-plans every few seconds) this difference is
 /// negligible. See `adr/0003-planner-state-freshness.md` for the trade-off
 /// record.
-#[derive(Default)]
-pub struct Planner;
+pub struct Planner {
+    alloc_state: BufferAllocState,
+    pool_capacity: usize,
+}
+
+impl Default for Planner {
+    fn default() -> Self {
+        Self::with_capacity(DEFAULT_POOL_CAPACITY)
+    }
+}
 
 impl Planner {
-    /// Create a new `Planner`.
+    /// Create a new `Planner` with the default pool capacity (4096 slots).
     pub fn new() -> Self {
-        Self
+        Self::default()
     }
 
-    /// Build an [`ExecutionPlan`] from `graph`.
+    /// Create a new `Planner` with a specific buffer pool capacity.
+    ///
+    /// `pool_capacity` must match the capacity of the [`SoundEngine`]'s buffer
+    /// pool so that [`BuildError::PoolExhausted`] is detected at plan-build time
+    /// rather than at index-access time.
+    pub fn with_capacity(pool_capacity: usize) -> Self {
+        Self {
+            alloc_state: BufferAllocState::default(),
+            pool_capacity,
+        }
+    }
+
+    /// Build an [`ExecutionPlan`] from `graph`, updating internal allocation state.
     ///
     /// If `prev_plan` is `Some`, module instances with matching
     /// [`InstanceId`](patches_core::InstanceId)s are reused, preserving their
@@ -38,14 +66,17 @@ impl Planner {
     ///
     /// If `prev_plan` is `None`, all modules are taken fresh from `graph`.
     pub fn build(
-        &self,
+        &mut self,
         graph: ModuleGraph,
         prev_plan: Option<ExecutionPlan>,
     ) -> Result<ExecutionPlan, BuildError> {
         let mut registry = prev_plan
             .map(|p| p.into_registry())
             .unwrap_or_default();
-        build_patch(graph, Some(&mut registry))
+        let (plan, new_alloc) =
+            build_patch(graph, Some(&mut registry), &self.alloc_state, self.pool_capacity)?;
+        self.alloc_state = new_alloc;
+        Ok(plan)
     }
 }
 
@@ -129,13 +160,6 @@ impl From<EngineError> for PatchEngineError {
     }
 }
 
-/// Default cable buffer pool capacity for [`PatchEngine`].
-///
-/// 4096 slots accommodate up to 4096 concurrent output ports, which is more
-/// than sufficient for all expected patch sizes. Each slot is 16 bytes
-/// (`[f64; 2]`), so the pool is 64 KiB.
-const DEFAULT_POOL_CAPACITY: usize = 4096;
-
 impl PatchEngine {
     /// Create a `PatchEngine` from an initial graph.
     ///
@@ -143,7 +167,7 @@ impl PatchEngine {
     /// does not open the audio device. Call [`start`](Self::start) to begin
     /// playback.
     pub fn new(graph: ModuleGraph) -> Result<Self, PatchEngineError> {
-        let planner = Planner::new();
+        let mut planner = Planner::with_capacity(DEFAULT_POOL_CAPACITY);
         let plan = planner.build(graph, None)?;
         let engine = SoundEngine::new(plan, DEFAULT_POOL_CAPACITY)?;
         Ok(Self {
@@ -264,18 +288,17 @@ mod tests {
         (graph, id)
     }
 
-    fn make_pool(plan: &ExecutionPlan) -> Vec<[f64; 2]> {
-        let capacity = plan.to_zero.iter().copied().max().map_or(1, |m| m + 1);
-        vec![[0.0; 2]; capacity]
+    fn make_pool(pool_capacity: usize) -> Vec<[f64; 2]> {
+        vec![[0.0; 2]; pool_capacity]
     }
 
     #[test]
     fn planner_reuses_module_instance_across_rebuild() {
-        let planner = Planner::new();
+        let mut planner = Planner::new();
 
         let (graph_a, counter_id) = counter_graph();
         let mut plan_a = planner.build(graph_a, None).unwrap();
-        let mut pool_a = make_pool(&plan_a);
+        let mut pool_a = make_pool(256);
 
         // Advance counter by ticking the plan.
         for i in 0..5 {
@@ -294,7 +317,7 @@ mod tests {
         graph_b.connect(c, "out", out, "right", 1.0).unwrap();
 
         let mut plan_b = planner.build(graph_b, Some(plan_a)).unwrap();
-        let mut pool_b = make_pool(&plan_b);
+        let mut pool_b = make_pool(256);
 
         // The counter in plan_b is the old Counter with count=5; the next tick
         // increments it to 6. wi=1 continues the alternating sequence (plan_a had 5 ticks).
@@ -311,10 +334,10 @@ mod tests {
 
     #[test]
     fn planner_uses_fresh_modules_when_no_prev_plan() {
-        let planner = Planner::new();
+        let mut planner = Planner::new();
         let (graph, _) = counter_graph();
         let mut plan = planner.build(graph, None).unwrap();
-        let mut pool = make_pool(&plan);
+        let mut pool = make_pool(256);
         plan.tick(&mut pool, 0);
 
         let counter = plan
@@ -328,13 +351,13 @@ mod tests {
 
     #[test]
     fn planner_build_succeeds_for_valid_graph() {
-        let planner = Planner::new();
+        let mut planner = Planner::new();
         assert!(planner.build(simple_graph(440.0), None).is_ok());
     }
 
     #[test]
     fn planner_build_fails_for_empty_graph() {
-        let planner = Planner::new();
+        let mut planner = Planner::new();
         assert!(planner.build(ModuleGraph::new(), None).is_err());
     }
 }

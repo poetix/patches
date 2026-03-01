@@ -58,7 +58,7 @@ These are qualities the system should preserve as it evolves. They inform design
 
 - **Parallelism-ready execution.** The 1-sample cable delay means modules can run in any order. The execution plan should remain structured so that splitting modules across threads is a contained change to `ExecutionPlan::tick()` and the builder's buffer layout, with no impact on the Module trait, ModuleGraph, or module implementations.
 - **Cache-friendly buffer layout.** Cable buffers should be packed densely in memory. When parallelism arrives, the builder should partition buffers by thread affinity (buffers accessed by the same thread are contiguous) and pad partition boundaries to cache lines to avoid false sharing.
-- **Zero-cost descriptors.** Module descriptors (port names, counts) are compile-time constants. Accessing them should not allocate.
+- **Zero-cost descriptors.** Module descriptors (port names, counts) are compile-time constants defined by module implementations, not by the DSL. Port names are `&'static str`; accessing descriptors should not allocate. The DSL specifies *which* modules to instantiate and how to wire them, but port layouts are fixed per module type.
 - **Backend-agnostic core.** `patches-core` defines traits and data structures with no knowledge of audio backends, file formats, or UI. Concrete backends live in `patches-engine` or dedicated crates.
 
 ## General conventions

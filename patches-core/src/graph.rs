@@ -14,6 +14,8 @@ pub enum GraphError {
     OutputPortNotFound { node: NodeId, port: String },
     InputPortNotFound { node: NodeId, port: String },
     InputAlreadyConnected { node: NodeId, port: String },
+    /// `scale` must be finite and in `[-1.0, 1.0]`.
+    ScaleOutOfRange(f64),
 }
 
 impl fmt::Display for GraphError {
@@ -33,6 +35,9 @@ impl fmt::Display for GraphError {
                     port, node
                 )
             }
+            GraphError::ScaleOutOfRange(s) => {
+                write!(f, "scale {s} is out of range; must be finite and in [-1.0, 1.0]")
+            }
         }
     }
 }
@@ -40,12 +45,14 @@ impl fmt::Display for GraphError {
 impl std::error::Error for GraphError {}
 
 /// A directed connection from one module's output to another's input.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct Edge {
     from: NodeId,
     output: String,
     to: NodeId,
     input: String,
+    /// Scaling factor applied to the signal at read-time. Must be in `[-1.0, 1.0]`.
+    scale: f64,
 }
 
 /// An in-memory, editable directed graph of audio modules connected by patch cables.
@@ -84,15 +91,23 @@ impl ModuleGraph {
 
     /// Connect an output port on one node to an input port on another.
     ///
-    /// Returns an error if either node or port does not exist, or if the target
-    /// input already has an incoming connection.
+    /// `scale` is a multiplier in `[-1.0, 1.0]` applied to the signal at
+    /// read-time during `tick()`. Use `1.0` for an unscaled connection.
+    ///
+    /// Returns an error if either node or port does not exist, if the target
+    /// input already has an incoming connection, or if `scale` is not finite
+    /// or falls outside `[-1.0, 1.0]`.
     pub fn connect(
         &mut self,
         from: NodeId,
         output: &str,
         to: NodeId,
         input: &str,
+        scale: f64,
     ) -> Result<(), GraphError> {
+        if !scale.is_finite() || !(-1.0..=1.0).contains(&scale) {
+            return Err(GraphError::ScaleOutOfRange(scale));
+        }
         // Validate source node and output port.
         let from_desc = self
             .nodes
@@ -139,6 +154,7 @@ impl ModuleGraph {
                 output: output.to_string(),
                 to,
                 input: input.to_string(),
+                scale,
             },
         );
 
@@ -165,11 +181,11 @@ impl ModuleGraph {
         self.nodes.keys().copied().collect()
     }
 
-    /// Return a snapshot of all edges as `(from, output_name, to, input_name)` tuples.
-    pub fn edge_list(&self) -> Vec<(NodeId, String, NodeId, String)> {
+    /// Return a snapshot of all edges as `(from, output_name, to, input_name, scale)` tuples.
+    pub fn edge_list(&self) -> Vec<(NodeId, String, NodeId, String, f64)> {
         self.edges
             .values()
-            .map(|e| (e.from, e.output.clone(), e.to, e.input.clone()))
+            .map(|e| (e.from, e.output.clone(), e.to, e.input.clone(), e.scale))
             .collect()
     }
 
@@ -197,16 +213,18 @@ impl Default for ModuleGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::module::{ModuleDescriptor, PortDescriptor};
+    use crate::module::{InstanceId, ModuleDescriptor, PortDescriptor};
 
     // A minimal stub module with configurable ports for testing.
     struct StubModule {
+        instance_id: InstanceId,
         descriptor: ModuleDescriptor,
     }
 
     impl StubModule {
         fn new(inputs: &[&'static str], outputs: &[&'static str]) -> Self {
             Self {
+                instance_id: InstanceId::next(),
                 descriptor: ModuleDescriptor {
                     inputs: inputs
                         .iter()
@@ -226,7 +244,11 @@ mod tests {
             &self.descriptor
         }
 
-        fn process(&mut self, _inputs: &[f64], _outputs: &mut [f64], _sample_rate: f64) {}
+        fn instance_id(&self) -> InstanceId {
+            self.instance_id
+        }
+
+        fn process(&mut self, _inputs: &[f64], _outputs: &mut [f64]) {}
 
         fn as_any(&self) -> &dyn std::any::Any {
             self
@@ -254,7 +276,7 @@ mod tests {
         let mut g = ModuleGraph::new();
         let src = g.add_module(stub(&[], &["out"]));
         let dst = g.add_module(stub(&["in"], &[]));
-        assert!(g.connect(src, "out", dst, "in").is_ok());
+        assert!(g.connect(src, "out", dst, "in", 1.0).is_ok());
     }
 
     #[test]
@@ -267,7 +289,7 @@ mod tests {
             id
         };
         assert!(matches!(
-            g.connect(ghost, "out", dst, "in"),
+            g.connect(ghost, "out", dst, "in", 1.0),
             Err(GraphError::NodeNotFound(_))
         ));
     }
@@ -282,7 +304,7 @@ mod tests {
             id
         };
         assert!(matches!(
-            g.connect(src, "out", ghost, "in"),
+            g.connect(src, "out", ghost, "in", 1.0),
             Err(GraphError::NodeNotFound(_))
         ));
     }
@@ -293,7 +315,7 @@ mod tests {
         let src = g.add_module(stub(&[], &["out"]));
         let dst = g.add_module(stub(&["in"], &[]));
         assert!(matches!(
-            g.connect(src, "nope", dst, "in"),
+            g.connect(src, "nope", dst, "in", 1.0),
             Err(GraphError::OutputPortNotFound { .. })
         ));
     }
@@ -304,7 +326,7 @@ mod tests {
         let src = g.add_module(stub(&[], &["out"]));
         let dst = g.add_module(stub(&["in"], &[]));
         assert!(matches!(
-            g.connect(src, "out", dst, "nope"),
+            g.connect(src, "out", dst, "nope", 1.0),
             Err(GraphError::InputPortNotFound { .. })
         ));
     }
@@ -315,9 +337,9 @@ mod tests {
         let src1 = g.add_module(stub(&[], &["out"]));
         let src2 = g.add_module(stub(&[], &["out"]));
         let dst = g.add_module(stub(&["in"], &[]));
-        g.connect(src1, "out", dst, "in").unwrap();
+        g.connect(src1, "out", dst, "in", 1.0).unwrap();
         assert!(matches!(
-            g.connect(src2, "out", dst, "in"),
+            g.connect(src2, "out", dst, "in", 1.0),
             Err(GraphError::InputAlreadyConnected { .. })
         ));
     }
@@ -328,8 +350,8 @@ mod tests {
         let src = g.add_module(stub(&[], &["out"]));
         let dst1 = g.add_module(stub(&["in"], &[]));
         let dst2 = g.add_module(stub(&["in"], &[]));
-        assert!(g.connect(src, "out", dst1, "in").is_ok());
-        assert!(g.connect(src, "out", dst2, "in").is_ok());
+        assert!(g.connect(src, "out", dst1, "in", 1.0).is_ok());
+        assert!(g.connect(src, "out", dst2, "in", 1.0).is_ok());
     }
 
     #[test]
@@ -337,8 +359,8 @@ mod tests {
         let mut g = ModuleGraph::new();
         let a = g.add_module(stub(&["in"], &["out"]));
         let b = g.add_module(stub(&["in"], &["out"]));
-        assert!(g.connect(a, "out", b, "in").is_ok());
-        assert!(g.connect(b, "out", a, "in").is_ok());
+        assert!(g.connect(a, "out", b, "in", 1.0).is_ok());
+        assert!(g.connect(b, "out", a, "in", 1.0).is_ok());
     }
 
     #[test]
@@ -347,13 +369,13 @@ mod tests {
         let a = g.add_module(stub(&[], &["out"]));
         let b = g.add_module(stub(&["in"], &["out"]));
         let c = g.add_module(stub(&["in"], &[]));
-        g.connect(a, "out", b, "in").unwrap();
-        g.connect(b, "out", c, "in").unwrap();
+        g.connect(a, "out", b, "in", 1.0).unwrap();
+        g.connect(b, "out", c, "in", 1.0).unwrap();
 
         g.remove_module(b);
 
         // b is gone; a→b and b→c edges are removed; a→c would still be addable.
-        assert!(g.connect(a, "out", c, "in").is_ok());
+        assert!(g.connect(a, "out", c, "in", 1.0).is_ok());
     }
 
     #[test]
@@ -361,14 +383,50 @@ mod tests {
         let mut g = ModuleGraph::new();
         let src = g.add_module(stub(&[], &["out"]));
         let dst = g.add_module(stub(&["in"], &[]));
-        g.connect(src, "out", dst, "in").unwrap();
+        g.connect(src, "out", dst, "in", 1.0).unwrap();
 
         g.disconnect(src, "out", dst, "in");
         // Now we can connect again (input is free).
-        assert!(g.connect(src, "out", dst, "in").is_ok());
+        assert!(g.connect(src, "out", dst, "in", 1.0).is_ok());
 
         // Second disconnect is a no-op (no panic).
         g.disconnect(src, "out", dst, "in");
         g.disconnect(src, "out", dst, "in");
+    }
+
+    #[test]
+    fn connect_scale_out_of_range_errors() {
+        let mut g = ModuleGraph::new();
+        let src = g.add_module(stub(&[], &["out"]));
+        let dst = g.add_module(stub(&["in"], &[]));
+
+        assert!(matches!(
+            g.connect(src, "out", dst, "in", 1.5),
+            Err(GraphError::ScaleOutOfRange(_))
+        ));
+        assert!(matches!(
+            g.connect(src, "out", dst, "in", -2.0),
+            Err(GraphError::ScaleOutOfRange(_))
+        ));
+        assert!(matches!(
+            g.connect(src, "out", dst, "in", f64::NAN),
+            Err(GraphError::ScaleOutOfRange(_))
+        ));
+        assert!(matches!(
+            g.connect(src, "out", dst, "in", f64::INFINITY),
+            Err(GraphError::ScaleOutOfRange(_))
+        ));
+        // Boundary values are valid.
+        assert!(g.connect(src, "out", dst, "in", -1.0).is_ok());
+    }
+
+    #[test]
+    fn connect_scale_boundary_values_are_valid() {
+        let mut g = ModuleGraph::new();
+        let src = g.add_module(stub(&[], &["out"]));
+        let dst1 = g.add_module(stub(&["in"], &[]));
+        let dst2 = g.add_module(stub(&["in"], &[]));
+        assert!(g.connect(src, "out", dst1, "in", 1.0).is_ok());
+        assert!(g.connect(src, "out", dst2, "in", -1.0).is_ok());
     }
 }

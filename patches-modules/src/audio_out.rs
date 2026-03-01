@@ -1,4 +1,4 @@
-use patches_core::{Module, ModuleDescriptor, PortDescriptor, Sink};
+use patches_core::{InstanceId, Module, ModuleDescriptor, PortDescriptor, Sink};
 
 /// A passive stereo sink node.
 ///
@@ -9,6 +9,7 @@ use patches_core::{Module, ModuleDescriptor, PortDescriptor, Sink};
 ///
 /// `AudioOut` does not call any audio API; it knows nothing about the backend.
 pub struct AudioOut {
+    instance_id: InstanceId,
     last_left: f64,
     last_right: f64,
     descriptor: ModuleDescriptor,
@@ -17,6 +18,7 @@ pub struct AudioOut {
 impl AudioOut {
     pub fn new() -> Self {
         Self {
+            instance_id: InstanceId::next(),
             last_left: 0.0,
             last_right: 0.0,
             descriptor: ModuleDescriptor {
@@ -51,7 +53,11 @@ impl Module for AudioOut {
         &self.descriptor
     }
 
-    fn process(&mut self, inputs: &[f64], _outputs: &mut [f64], _sample_rate: f64) {
+    fn instance_id(&self) -> InstanceId {
+        self.instance_id
+    }
+
+    fn process(&mut self, inputs: &[f64], _outputs: &mut [f64]) {
         self.last_left = inputs[0];
         self.last_right = inputs[1];
     }
@@ -94,16 +100,23 @@ mod tests {
     }
 
     #[test]
+    fn instance_ids_are_distinct() {
+        let a = AudioOut::new();
+        let b = AudioOut::new();
+        assert_ne!(a.instance_id(), b.instance_id());
+    }
+
+    #[test]
     fn process_stores_left_and_right_samples() {
         let mut sink = AudioOut::new();
         assert_eq!(sink.last_left(), 0.0);
         assert_eq!(sink.last_right(), 0.0);
 
-        sink.process(&[0.5, -0.3], &mut [], 44100.0);
+        sink.process(&[0.5, -0.3], &mut []);
         assert_eq!(sink.last_left(), 0.5);
         assert_eq!(sink.last_right(), -0.3);
 
-        sink.process(&[1.0, 0.0], &mut [], 44100.0);
+        sink.process(&[1.0, 0.0], &mut []);
         assert_eq!(sink.last_left(), 1.0);
         assert_eq!(sink.last_right(), 0.0);
     }

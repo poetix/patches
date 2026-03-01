@@ -16,12 +16,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let sine_b = graph.add_module(Box::new(SineOscillator::new(FREQ_CS5)));
     let mix = graph.add_module(Box::new(Mix::new()));
     let out = graph.add_module(Box::new(AudioOut::new()));
-    graph.connect(sine_a, "out", mix, "a")?;
-    graph.connect(sine_b, "out", mix, "b")?;
-    graph.connect(mix, "out", out, "left")?;
-    graph.connect(mix, "out", out, "right")?;
+    graph.connect(sine_a, "out", mix, "a", 1.0)?;
+    graph.connect(sine_b, "out", mix, "b", 1.0)?;
+    graph.connect(mix, "out", out, "left", 1.0)?;
+    graph.connect(mix, "out", out, "right", 1.0)?;
 
-    let plan = build_patch(graph)?;
+    let plan = build_patch(graph, None)?;
 
     let mut engine = SoundEngine::new(plan)?;
     engine.start()?;

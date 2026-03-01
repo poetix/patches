@@ -1,16 +1,18 @@
-use patches_core::{Module, ModuleDescriptor, PortDescriptor};
+use patches_core::{InstanceId, Module, ModuleDescriptor, PortDescriptor};
 
 /// Mixes two input signals at a fixed 50/50 blend.
 ///
 /// Output is `(a + b) / 2.0`, keeping the result in the same amplitude range
 /// as the inputs.
 pub struct Mix {
+    instance_id: InstanceId,
     descriptor: ModuleDescriptor,
 }
 
 impl Mix {
     pub fn new() -> Self {
         Self {
+            instance_id: InstanceId::next(),
             descriptor: ModuleDescriptor {
                 inputs: vec![
                     PortDescriptor { name: "a" },
@@ -33,7 +35,11 @@ impl Module for Mix {
         &self.descriptor
     }
 
-    fn process(&mut self, inputs: &[f64], outputs: &mut [f64], _sample_rate: f64) {
+    fn instance_id(&self) -> InstanceId {
+        self.instance_id
+    }
+
+    fn process(&mut self, inputs: &[f64], outputs: &mut [f64]) {
         outputs[0] = (inputs[0] + inputs[1]) / 2.0;
     }
 
@@ -62,17 +68,24 @@ mod tests {
     }
 
     #[test]
+    fn instance_ids_are_distinct() {
+        let a = Mix::new();
+        let b = Mix::new();
+        assert_ne!(a.instance_id(), b.instance_id());
+    }
+
+    #[test]
     fn output_is_average_of_inputs() {
         let mut m = Mix::new();
         let mut out = [0.0f64];
 
-        m.process(&[1.0, 0.0], &mut out, 44100.0);
+        m.process(&[1.0, 0.0], &mut out);
         assert_eq!(out[0], 0.5);
 
-        m.process(&[-1.0, 1.0], &mut out, 44100.0);
+        m.process(&[-1.0, 1.0], &mut out);
         assert_eq!(out[0], 0.0);
 
-        m.process(&[0.4, 0.6], &mut out, 44100.0);
+        m.process(&[0.4, 0.6], &mut out);
         assert!((out[0] - 0.5).abs() < f64::EPSILON);
     }
 }

@@ -3,6 +3,8 @@ use std::fmt;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream, StreamConfig};
 
+use patches_core::AudioEnvironment;
+
 use crate::builder::ExecutionPlan;
 
 /// Errors returned by [`SoundEngine`] operations.
@@ -54,6 +56,14 @@ impl std::error::Error for EngineError {}
 /// [`swap_plan`](Self::swap_plan), which sends it over a wait-free SPSC
 /// channel (`rtrb`).
 ///
+/// Plans are initialised (via [`ExecutionPlan::initialise`]) with the device's
+/// sample rate before being sent to the audio callback — either in
+/// [`start`](Self::start) for the initial plan, or in
+/// [`swap_plan`](Self::swap_plan) for subsequent hot-reloads. Calling
+/// `swap_plan` before `start` skips initialisation (sample rate not yet known);
+/// the plan will be initialised when adopted by the audio callback if the engine
+/// is later started.
+///
 /// A `SoundEngine` can be started once. After [`stop`](Self::stop) the plan
 /// has been moved into (and dropped with) the audio closure; to run again
 /// with a new plan, create a fresh `SoundEngine`.
@@ -77,6 +87,9 @@ pub struct SoundEngine {
     pending: Option<(rtrb::Consumer<ExecutionPlan>, ExecutionPlan)>,
     /// Live CPAL stream while the engine is running.
     stream: Option<Stream>,
+    /// Sample rate of the open audio device. Set in [`start`](Self::start);
+    /// used by [`swap_plan`](Self::swap_plan) to initialise incoming plans.
+    sample_rate: Option<f64>,
 }
 
 impl SoundEngine {
@@ -91,10 +104,14 @@ impl SoundEngine {
             plan_tx,
             pending: Some((plan_rx, plan)),
             stream: None,
+            sample_rate: None,
         })
     }
 
     /// Open the default output device and begin audio processing.
+    ///
+    /// Initialises the pending plan with the device's sample rate before
+    /// starting the audio callback.
     ///
     /// Returns [`EngineError::AlreadyConsumed`] if called after the engine has
     /// already been started and stopped. Returns `Ok(())` if the engine is
@@ -104,7 +121,7 @@ impl SoundEngine {
             return Ok(());
         }
 
-        let (consumer, initial_plan) = self
+        let (consumer, mut initial_plan) = self
             .pending
             .take()
             .ok_or(EngineError::AlreadyConsumed)?;
@@ -123,15 +140,20 @@ impl SoundEngine {
         let sample_rate = f64::from(config.sample_rate.0);
         let channels = usize::from(config.channels);
 
+        // Initialise plan before handing it to the audio callback.
+        let env = AudioEnvironment { sample_rate };
+        initial_plan.initialise(&env);
+        self.sample_rate = Some(sample_rate);
+
         let stream = match sample_format {
             SampleFormat::F32 => {
-                build_stream::<f32>(&device, &config, sample_rate, channels, consumer, initial_plan)
+                build_stream::<f32>(&device, &config, channels, consumer, initial_plan)
             }
             SampleFormat::I16 => {
-                build_stream::<i16>(&device, &config, sample_rate, channels, consumer, initial_plan)
+                build_stream::<i16>(&device, &config, channels, consumer, initial_plan)
             }
             SampleFormat::U16 => {
-                build_stream::<u16>(&device, &config, sample_rate, channels, consumer, initial_plan)
+                build_stream::<u16>(&device, &config, channels, consumer, initial_plan)
             }
             other => return Err(EngineError::UnsupportedSampleFormat(other)),
         }?;
@@ -152,6 +174,10 @@ impl SoundEngine {
 
     /// Send a new [`ExecutionPlan`] to the audio callback.
     ///
+    /// If the engine has been started, the plan is initialised with the
+    /// device's sample rate before being queued. If the engine has not yet
+    /// been started, initialisation is skipped (sample rate is unknown).
+    ///
     /// The callback will adopt the new plan at the start of its next
     /// invocation. If the single-slot channel is already full (i.e. a
     /// previous plan has been queued but not yet consumed), the push is a
@@ -160,7 +186,10 @@ impl SoundEngine {
     /// callers may simply retry.
     ///
     /// This method is wait-free and safe to call from any thread.
-    pub fn swap_plan(&mut self, new_plan: ExecutionPlan) -> Result<(), ExecutionPlan> {
+    pub fn swap_plan(&mut self, mut new_plan: ExecutionPlan) -> Result<(), ExecutionPlan> {
+        if let Some(sr) = self.sample_rate {
+            new_plan.initialise(&AudioEnvironment { sample_rate: sr });
+        }
         self.plan_tx.push(new_plan).map_err(|rtrb::PushError::Full(v)| v)
     }
 }
@@ -168,7 +197,6 @@ impl SoundEngine {
 fn build_stream<T>(
     device: &cpal::Device,
     config: &StreamConfig,
-    sample_rate: f64,
     channels: usize,
     mut consumer: rtrb::Consumer<ExecutionPlan>,
     mut current_plan: ExecutionPlan,
@@ -184,7 +212,7 @@ where
                 if let Ok(new_plan) = consumer.pop() {
                     current_plan = new_plan;
                 }
-                fill_buffer(data, &mut current_plan, sample_rate, channels);
+                fill_buffer(data, &mut current_plan, channels);
             },
             |err| {
                 eprintln!("patches audio stream error: {err}");
@@ -198,7 +226,6 @@ where
 fn fill_buffer<T: cpal::SizedSample + cpal::FromSample<f32>>(
     data: &mut [T],
     plan: &mut ExecutionPlan,
-    sample_rate: f64,
     channels: usize,
 ) {
     let frames = if channels > 0 {
@@ -208,7 +235,7 @@ fn fill_buffer<T: cpal::SizedSample + cpal::FromSample<f32>>(
     };
 
     for i in 0..frames {
-        plan.tick(sample_rate);
+        plan.tick();
         let left = plan.last_left() as f32;
         let right = plan.last_right() as f32;
 

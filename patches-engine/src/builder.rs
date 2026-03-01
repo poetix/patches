@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 
-use patches_core::{Module, ModuleDescriptor, ModuleGraph, NodeId};
+use patches_core::{AudioEnvironment, Module, ModuleDescriptor, ModuleGraph, ModuleInstanceRegistry, NodeId};
 
 /// Errors that can occur when building an [`ExecutionPlan`].
 #[derive(Debug)]
@@ -34,6 +34,10 @@ pub struct ModuleSlot {
     pub module: Box<dyn Module>,
     /// Indices into the [`ExecutionPlan`] buffer pool — one per input port.
     pub input_buffers: Vec<usize>,
+    /// Scaling factors applied to each input at read-time — one per input port.
+    ///
+    /// `1.0` for unconnected inputs; the edge's scale for connected inputs.
+    pub input_scales: Vec<f64>,
     /// Indices into the [`ExecutionPlan`] buffer pool — one per output port.
     pub output_buffers: Vec<usize>,
     /// Pre-allocated scratch space for reading input values before `process`.
@@ -59,10 +63,20 @@ pub struct ExecutionPlan {
 }
 
 impl ExecutionPlan {
+    /// Call `initialise` on every module in this plan with the given environment.
+    ///
+    /// Must be called once before the first [`tick`](Self::tick), and again
+    /// whenever the plan is swapped into a running engine (e.g. after a hot-reload).
+    pub fn initialise(&mut self, env: &AudioEnvironment) {
+        for slot in &mut self.slots {
+            slot.module.initialise(env);
+        }
+    }
+
     /// Process one sample across all modules in execution order.
     ///
     /// Does not allocate.
-    pub fn tick(&mut self, sample_rate: f64) {
+    pub fn tick(&mut self) {
         let Self {
             slots,
             buffers,
@@ -77,10 +91,10 @@ impl ExecutionPlan {
         // Because ri ≠ wi, reads and writes never alias within a tick.
         for slot in slots.iter_mut() {
             for (j, &buf_idx) in slot.input_buffers.iter().enumerate() {
-                slot.input_scratch[j] = buffers[buf_idx][ri];
+                slot.input_scratch[j] = buffers[buf_idx][ri] * slot.input_scales[j];
             }
             slot.module
-                .process(&slot.input_scratch, &mut slot.output_scratch, sample_rate);
+                .process(&slot.input_scratch, &mut slot.output_scratch);
             for (j, &buf_idx) in slot.output_buffers.iter().enumerate() {
                 buffers[buf_idx][wi] = slot.output_scratch[j];
             }
@@ -88,6 +102,18 @@ impl ExecutionPlan {
 
         // Phase 4: advance the write slot (one bool flip, no per-buffer work).
         *write_phase = !*write_phase;
+    }
+
+    /// Consume this plan and move all module instances into a [`ModuleInstanceRegistry`].
+    ///
+    /// The registry can be passed to [`build_patch`] for the next plan so that
+    /// module state (e.g. oscillator phase) is preserved across re-plans.
+    pub fn into_registry(self) -> ModuleInstanceRegistry {
+        let mut registry = ModuleInstanceRegistry::new();
+        for slot in self.slots {
+            registry.insert(slot.module);
+        }
+        registry
     }
 
     /// Left-channel sample produced during the most recent [`tick`](Self::tick).
@@ -110,16 +136,29 @@ impl ExecutionPlan {
 /// Consume a [`ModuleGraph`] and produce an [`ExecutionPlan`].
 ///
 /// Validates that exactly one `AudioOut` node is present, performs a
-/// cycle-tolerant topological sort (Kahn's algorithm), allocates one
-/// [`SampleBuffer`] per output port, and resolves per-module input/output
-/// buffer assignments. Unconnected input ports are assigned a permanent-zero
-/// buffer; all output ports (connected or not) get a dedicated buffer.
-pub fn build_patch(graph: ModuleGraph) -> Result<ExecutionPlan, BuildError> {
+/// cycle-tolerant topological sort (Kahn's algorithm), allocates one buffer per
+/// output port, and resolves per-module input/output buffer assignments.
+/// Unconnected input ports are assigned a permanent-zero buffer; all output ports
+/// (connected or not) get a dedicated buffer.
+///
+/// If `registry` is `Some`, for each module in the new graph the registry is
+/// checked for an existing instance with the same [`InstanceId`]. If found, the
+/// old (stateful) instance is used instead of the graph's fresh instance. Modules
+/// not matched in the registry are left in it and will be dropped with the registry.
+pub fn build_patch(
+    graph: ModuleGraph,
+    mut registry: Option<&mut ModuleInstanceRegistry>,
+) -> Result<ExecutionPlan, BuildError> {
     let node_ids = graph.node_ids();
     let edges = graph.edge_list();
 
-    // Snapshot descriptors before consuming the graph.
-    let descriptors: HashMap<NodeId, ModuleDescriptor> = node_ids
+    // Snapshot descriptors and instance IDs before consuming the graph.
+    struct NodeMeta {
+        descriptor: ModuleDescriptor,
+        instance_id: patches_core::InstanceId,
+        is_sink: bool,
+    }
+    let meta: HashMap<NodeId, NodeMeta> = node_ids
         .iter()
         .map(|&id| {
             graph
@@ -127,14 +166,23 @@ pub fn build_patch(graph: ModuleGraph) -> Result<ExecutionPlan, BuildError> {
                 .ok_or_else(|| {
                     BuildError::InternalError(format!("node {id:?} missing from graph"))
                 })
-                .map(|m| (id, m.descriptor().clone()))
+                .map(|m| {
+                    (
+                        id,
+                        NodeMeta {
+                            descriptor: m.descriptor().clone(),
+                            instance_id: m.instance_id(),
+                            is_sink: m.as_sink().is_some(),
+                        },
+                    )
+                })
         })
         .collect::<Result<HashMap<_, _>, _>>()?;
 
     // Identify sink nodes via the Sink trait.
     let audio_out_ids: Vec<NodeId> = node_ids
         .iter()
-        .filter(|&&id| graph.get_module(id).and_then(|m| m.as_sink()).is_some())
+        .filter(|&&id| meta[&id].is_sink)
         .copied()
         .collect();
 
@@ -166,7 +214,7 @@ pub fn build_patch(graph: ModuleGraph) -> Result<ExecutionPlan, BuildError> {
     let mut output_buf: HashMap<(NodeId, usize), usize> = HashMap::new();
 
     for &id in &order {
-        let desc = &descriptors[&id];
+        let desc = &meta[&id].descriptor;
         for (port_idx, _) in desc.outputs.iter().enumerate() {
             let buf_idx = buffers.len();
             buffers.push([0.0; 2]);
@@ -178,19 +226,20 @@ pub fn build_patch(graph: ModuleGraph) -> Result<ExecutionPlan, BuildError> {
     let mut slots: Vec<ModuleSlot> = Vec::with_capacity(order.len());
 
     for &id in &order {
-        let desc = &descriptors[&id];
+        let desc = &meta[&id].descriptor;
 
-        let input_buffers: Vec<usize> = desc
+        // Resolve (buffer_index, scale) for each input port.
+        let (input_buffers, input_scales): (Vec<usize>, Vec<f64>) = desc
             .inputs
             .iter()
             .map(|port| {
                 // Find the edge that drives this input port.
-                let buf_idx = edges
+                let (buf_idx, scale) = edges
                     .iter()
-                    .find(|(_, _, to, input)| *to == id && input == port.name)
-                    .map(|(from, out_name, _, _)| -> Result<usize, BuildError> {
+                    .find(|(_, _, to, input, _)| *to == id && input == port.name)
+                    .map(|(from, out_name, _, _, scale)| -> Result<(usize, f64), BuildError> {
                         // Resolve the driving output's buffer index.
-                        let from_desc = &descriptors[from];
+                        let from_desc = &meta[from].descriptor;
                         let out_port_idx = from_desc
                             .outputs
                             .iter()
@@ -200,13 +249,15 @@ pub fn build_patch(graph: ModuleGraph) -> Result<ExecutionPlan, BuildError> {
                                     "output port {out_name:?} not found on node {from:?}"
                                 ))
                             })?;
-                        Ok(output_buf[&(*from, out_port_idx)])
+                        Ok((output_buf[&(*from, out_port_idx)], *scale))
                     })
                     .transpose()?
-                    .unwrap_or(0); // 0 = zero buffer for unconnected inputs
-                Ok(buf_idx)
+                    .unwrap_or((0, 1.0)); // 0 = zero buffer, 1.0 = no scale for unconnected inputs
+                Ok((buf_idx, scale))
             })
-            .collect::<Result<Vec<_>, BuildError>>()?;
+            .collect::<Result<Vec<_>, BuildError>>()?
+            .into_iter()
+            .unzip();
 
         let output_buffers: Vec<usize> = desc
             .outputs
@@ -217,13 +268,21 @@ pub fn build_patch(graph: ModuleGraph) -> Result<ExecutionPlan, BuildError> {
 
         let n_in = desc.inputs.len();
         let n_out = desc.outputs.len();
-        let module = modules.remove(&id).ok_or_else(|| {
+
+        // Prefer an old (stateful) instance from the registry when available.
+        let fresh = modules.remove(&id).ok_or_else(|| {
             BuildError::InternalError(format!("module {id:?} missing from map"))
         })?;
+        let module = if let Some(reg) = registry.as_deref_mut() {
+            reg.take(meta[&id].instance_id).unwrap_or(fresh)
+        } else {
+            fresh
+        };
 
         slots.push(ModuleSlot {
             module,
             input_buffers,
+            input_scales,
             output_buffers,
             input_scratch: vec![0.0; n_in],
             output_scratch: vec![0.0; n_out],
@@ -245,12 +304,12 @@ pub fn build_patch(graph: ModuleGraph) -> Result<ExecutionPlan, BuildError> {
 /// chosen order safe for cyclic graphs.
 fn kahn_toposort(
     node_ids: &[NodeId],
-    edges: &[(NodeId, String, NodeId, String)],
+    edges: &[(NodeId, String, NodeId, String, f64)],
 ) -> Result<Vec<NodeId>, BuildError> {
     let mut in_degree: HashMap<NodeId, usize> =
         node_ids.iter().map(|&id| (id, 0)).collect();
 
-    for (_, _, to, _) in edges {
+    for (_, _, to, _, _) in edges {
         *in_degree.get_mut(to).ok_or_else(|| {
             BuildError::InternalError(format!("edge target {to:?} not in node set"))
         })? += 1;
@@ -275,8 +334,8 @@ fn kahn_toposort(
         // Decrement in-degree for each unique successor.
         let mut successors: Vec<NodeId> = edges
             .iter()
-            .filter(|(from, _, _, _)| *from == node)
-            .map(|(_, _, to, _)| *to)
+            .filter(|(from, _, _, _, _)| *from == node)
+            .map(|(_, _, to, _, _)| *to)
             .collect();
         successors.sort_unstable();
         successors.dedup();
@@ -313,15 +372,15 @@ mod tests {
         let mut graph = ModuleGraph::new();
         let sine_id = graph.add_module(Box::new(SineOscillator::new(440.0)));
         let out_id = graph.add_module(Box::new(AudioOut::new()));
-        graph.connect(sine_id, "out", out_id, "left").unwrap();
-        graph.connect(sine_id, "out", out_id, "right").unwrap();
+        graph.connect(sine_id, "out", out_id, "left", 1.0).unwrap();
+        graph.connect(sine_id, "out", out_id, "right", 1.0).unwrap();
         (graph, sine_id, out_id)
     }
 
     #[test]
     fn builds_minimal_plan_with_correct_order() {
         let (graph, _, _) = sine_to_audio_out_graph();
-        let plan = build_patch(graph).expect("build should succeed");
+        let plan = build_patch(graph, None).expect("build should succeed");
 
         // AudioOut must be last (after the sine oscillator).
         let audio_out_idx = plan.audio_out_index;
@@ -342,7 +401,7 @@ mod tests {
     #[test]
     fn fanout_buffer_shared_between_both_inputs() {
         let (graph, _, _) = sine_to_audio_out_graph();
-        let plan = build_patch(graph).expect("build should succeed");
+        let plan = build_patch(graph, None).expect("build should succeed");
 
         let audio_out_idx = plan.audio_out_index;
         let sine_idx = plan
@@ -368,10 +427,11 @@ mod tests {
     #[test]
     fn tick_produces_bounded_audio_output() {
         let (graph, _, _) = sine_to_audio_out_graph();
-        let mut plan = build_patch(graph).expect("build should succeed");
+        let mut plan = build_patch(graph, None).expect("build should succeed");
+        plan.initialise(&patches_core::AudioEnvironment { sample_rate: 44100.0 });
 
         for _ in 0..1000 {
-            plan.tick(44100.0);
+            plan.tick();
         }
 
         assert!(plan.last_left().abs() <= 1.0);
@@ -384,7 +444,7 @@ mod tests {
     fn no_audio_out_returns_error() {
         let mut graph = ModuleGraph::new();
         graph.add_module(Box::new(SineOscillator::new(440.0)));
-        assert!(matches!(build_patch(graph), Err(BuildError::NoAudioOut)));
+        assert!(matches!(build_patch(graph, None), Err(BuildError::NoAudioOut)));
     }
 
     #[test]
@@ -393,13 +453,54 @@ mod tests {
         let sine_id = graph.add_module(Box::new(SineOscillator::new(440.0)));
         let out1 = graph.add_module(Box::new(AudioOut::new()));
         let out2 = graph.add_module(Box::new(AudioOut::new()));
-        graph.connect(sine_id, "out", out1, "left").unwrap();
-        graph.connect(sine_id, "out", out1, "right").unwrap();
-        graph.connect(sine_id, "out", out2, "left").unwrap();
-        graph.connect(sine_id, "out", out2, "right").unwrap();
+        graph.connect(sine_id, "out", out1, "left", 1.0).unwrap();
+        graph.connect(sine_id, "out", out1, "right", 1.0).unwrap();
+        graph.connect(sine_id, "out", out2, "left", 1.0).unwrap();
+        graph.connect(sine_id, "out", out2, "right", 1.0).unwrap();
         assert!(matches!(
-            build_patch(graph),
+            build_patch(graph, None),
             Err(BuildError::MultipleAudioOut)
         ));
+    }
+
+    #[test]
+    fn input_scale_is_applied_at_tick_time() {
+        // Build a graph with scale = 0.5 on both connections from the sine oscillator
+        // to AudioOut. The output should be half what it would be with scale = 1.0.
+        let mut graph_half = ModuleGraph::new();
+        let sine_h = graph_half.add_module(Box::new(SineOscillator::new(440.0)));
+        let out_h = graph_half.add_module(Box::new(patches_modules::AudioOut::new()));
+        graph_half.connect(sine_h, "out", out_h, "left", 0.5).unwrap();
+        graph_half.connect(sine_h, "out", out_h, "right", 0.5).unwrap();
+
+        let mut graph_full = ModuleGraph::new();
+        let sine_f = graph_full.add_module(Box::new(SineOscillator::new(440.0)));
+        let out_f = graph_full.add_module(Box::new(patches_modules::AudioOut::new()));
+        graph_full.connect(sine_f, "out", out_f, "left", 1.0).unwrap();
+        graph_full.connect(sine_f, "out", out_f, "right", 1.0).unwrap();
+
+        let env = patches_core::AudioEnvironment { sample_rate: 44100.0 };
+        let mut plan_half = build_patch(graph_half, None).unwrap();
+        let mut plan_full = build_patch(graph_full, None).unwrap();
+        plan_half.initialise(&env);
+        plan_full.initialise(&env);
+
+        // Tick both plans the same number of times so they are in phase.
+        for _ in 0..100 {
+            plan_half.tick();
+            plan_full.tick();
+        }
+
+        let half = plan_half.last_left();
+        let full = plan_full.last_left();
+
+        // Both should be non-zero (avoid testing at a zero crossing).
+        if full.abs() > 1e-6 {
+            let ratio = half / full;
+            assert!(
+                (ratio - 0.5).abs() < 1e-9,
+                "expected half ≈ full * 0.5, got half={half}, full={full}, ratio={ratio}"
+            );
+        }
     }
 }

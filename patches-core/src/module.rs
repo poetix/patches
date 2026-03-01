@@ -1,3 +1,6 @@
+use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 /// Describes a single port on a module by name.
 #[derive(Debug, Clone)]
 pub struct PortDescriptor {
@@ -16,9 +19,46 @@ pub struct ModuleDescriptor {
     pub outputs: Vec<PortDescriptor>,
 }
 
+/// Environmental parameters supplied to modules once when a plan is activated.
+///
+/// Modules that depend on these parameters (e.g. oscillators that use `sample_rate`)
+/// should store them in [`Module::initialise`] and use the stored copies during
+/// [`Module::process`] rather than receiving them per sample.
+#[derive(Debug, Clone, Copy)]
+pub struct AudioEnvironment {
+    pub sample_rate: f64,
+}
+
+/// A stable, unique identifier assigned to a module instance at construction time.
+///
+/// `InstanceId` is immutable for the lifetime of the module and survives across
+/// plan rebuilds, enabling the [`ModuleInstanceRegistry`](crate::ModuleInstanceRegistry)
+/// to match old instances to their counterparts in a new plan.
+///
+/// IDs are generated from a global atomic counter; no two independently constructed
+/// modules will share an `InstanceId` within a single process run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct InstanceId(u64);
+
+impl fmt::Display for InstanceId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "InstanceId({})", self.0)
+    }
+}
+
+static NEXT_INSTANCE_ID: AtomicU64 = AtomicU64::new(0);
+
+impl InstanceId {
+    /// Allocate a fresh `InstanceId`. Each call returns a distinct value.
+    pub fn next() -> Self {
+        Self(NEXT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed))
+    }
+}
+
 /// The core trait all audio modules implement.
 ///
-/// `process` is called once per sample by the audio engine. `inputs` and
+/// `initialise` is called once when a plan is activated (or re-activated after a
+/// hot-reload). `process` is then called once per sample. Both `inputs` and
 /// `outputs` are indexed according to the module's [`ModuleDescriptor`].
 ///
 /// `as_any` enables downcasting from `&dyn Module` to a concrete type.
@@ -26,7 +66,17 @@ pub struct ModuleDescriptor {
 /// concrete type — see [`Sink`].
 pub trait Module: Send {
     fn descriptor(&self) -> &ModuleDescriptor;
-    fn process(&mut self, inputs: &[f64], outputs: &mut [f64], sample_rate: f64);
+    /// The stable identity of this module instance.
+    ///
+    /// Must be assigned at construction time (e.g. via [`InstanceId::next()`]) and
+    /// return the same value for the lifetime of the instance.
+    fn instance_id(&self) -> InstanceId;
+    /// Called once when the plan containing this module is activated.
+    ///
+    /// Modules that depend on environment parameters (e.g. sample rate) should
+    /// store what they need here. The default implementation is a no-op.
+    fn initialise(&mut self, _env: &AudioEnvironment) {}
+    fn process(&mut self, inputs: &[f64], outputs: &mut [f64]);
     fn as_any(&self) -> &dyn std::any::Any;
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
     /// Returns `Some(self)` if this module is a [`Sink`], `None` otherwise.
@@ -70,5 +120,12 @@ mod tests {
         assert_eq!(desc.outputs.len(), 2);
         assert_eq!(desc.inputs[0].name, "in");
         assert_eq!(desc.outputs[1].name, "out_r");
+    }
+
+    #[test]
+    fn instance_ids_are_unique() {
+        let a = InstanceId::next();
+        let b = InstanceId::next();
+        assert_ne!(a, b);
     }
 }

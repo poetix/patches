@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::fmt;
 
 use patches_core::{AudioEnvironment, Module, ModuleDescriptor, ModuleGraph, ModuleInstanceRegistry, NodeId};
@@ -48,17 +48,14 @@ pub struct ModuleSlot {
 
 /// A fully resolved, allocation-free execution structure produced by [`build_patch`].
 ///
-/// Call [`tick`](ExecutionPlan::tick) once per sample on the audio thread.
+/// Call [`tick`](ExecutionPlan::tick) once per sample on the audio thread,
+/// alternating `wi = 0` and `wi = 1` on successive calls.
 /// After each tick, retrieve the stereo output via [`last_left`](ExecutionPlan::last_left)
 /// and [`last_right`](ExecutionPlan::last_right).
 pub struct ExecutionPlan {
     pub slots: Vec<ModuleSlot>,
-    /// Flat cable buffer pool. Each element is a 2-element ring `[prev, curr]`.
-    /// All buffers share a single write-slot index tracked by `write_phase`.
+    /// Flat cable buffer pool. Each element is a 2-element ring `[slot0, slot1]`.
     pub buffers: Vec<[f64; 2]>,
-    /// Selects the write slot this tick: `false` → index 0, `true` → index 1.
-    /// The read slot is always `1 - write slot`.
-    pub write_phase: bool,
     pub audio_out_index: usize,
 }
 
@@ -75,18 +72,15 @@ impl ExecutionPlan {
 
     /// Process one sample across all modules in execution order.
     ///
+    /// `wi` is the write slot index (0 or 1); the read slot is `1 - wi`.
+    /// Callers must alternate between `wi = 0` and `wi = 1` on successive calls.
+    ///
     /// Does not allocate.
-    pub fn tick(&mut self) {
-        let Self {
-            slots,
-            buffers,
-            write_phase,
-            ..
-        } = self;
-        let wi = *write_phase as usize;
+    pub fn tick(&mut self, wi: usize) {
         let ri = 1 - wi;
+        let Self { slots, buffers, .. } = self;
 
-        // Phases 1–3 fused: per slot, read inputs → process → write outputs.
+        // Per slot: read inputs → process → write outputs.
         // Reading uses `ri` (previous tick's slot); writing uses `wi` (this tick's slot).
         // Because ri ≠ wi, reads and writes never alias within a tick.
         for slot in slots.iter_mut() {
@@ -99,9 +93,6 @@ impl ExecutionPlan {
                 buffers[buf_idx][wi] = slot.output_scratch[j];
             }
         }
-
-        // Phase 4: advance the write slot (one bool flip, no per-buffer work).
-        *write_phase = !*write_phase;
     }
 
     /// Consume this plan and move all module instances into a [`ModuleInstanceRegistry`].
@@ -135,11 +126,12 @@ impl ExecutionPlan {
 
 /// Consume a [`ModuleGraph`] and produce an [`ExecutionPlan`].
 ///
-/// Validates that exactly one `AudioOut` node is present, performs a
-/// cycle-tolerant topological sort (Kahn's algorithm), allocates one buffer per
-/// output port, and resolves per-module input/output buffer assignments.
-/// Unconnected input ports are assigned a permanent-zero buffer; all output ports
-/// (connected or not) get a dedicated buffer.
+/// Validates that exactly one `AudioOut` node is present, orders modules by
+/// ascending [`NodeId`], allocates one buffer per output port, and resolves
+/// per-module input/output buffer assignments. Unconnected input ports are
+/// assigned a permanent-zero buffer; all output ports (connected or not) get a
+/// dedicated buffer. The 1-sample cable delay makes any module ordering produce
+/// correct output.
 ///
 /// If `registry` is `Some`, for each module in the new graph the registry is
 /// checked for an existing instance with the same [`InstanceId`]. If found, the
@@ -192,14 +184,16 @@ pub fn build_patch(
         _ => return Err(BuildError::MultipleAudioOut),
     };
 
-    // Topological sort — cycle-tolerant via Kahn's algorithm.
-    let order = kahn_toposort(&node_ids, &edges)?;
+    // Execution order: ascending NodeId (insertion order). The 1-sample cable
+    // delay makes any ordering correct; ascending NodeId gives stable, deterministic output.
+    let mut order = node_ids.clone();
+    order.sort_unstable();
 
     let audio_out_index = order
         .iter()
         .position(|&id| id == audio_out_node)
         .ok_or_else(|| {
-            BuildError::InternalError("audio_out node missing from toposort result".to_string())
+            BuildError::InternalError("audio_out node missing from order".to_string())
         })?;
 
     // Consume the graph's modules.
@@ -292,76 +286,10 @@ pub fn build_patch(
     Ok(ExecutionPlan {
         slots,
         buffers,
-        write_phase: false,
         audio_out_index,
     })
 }
 
-/// Cycle-tolerant topological sort using Kahn's algorithm.
-///
-/// Nodes remaining after the main queue empties (i.e. in cycles) are appended
-/// in ascending `NodeId` order. The 1-sample `SampleBuffer` delay makes the
-/// chosen order safe for cyclic graphs.
-fn kahn_toposort(
-    node_ids: &[NodeId],
-    edges: &[(NodeId, String, NodeId, String, f64)],
-) -> Result<Vec<NodeId>, BuildError> {
-    let mut in_degree: HashMap<NodeId, usize> =
-        node_ids.iter().map(|&id| (id, 0)).collect();
-
-    for (_, _, to, _, _) in edges {
-        *in_degree.get_mut(to).ok_or_else(|| {
-            BuildError::InternalError(format!("edge target {to:?} not in node set"))
-        })? += 1;
-    }
-
-    // Initialise the queue with zero-in-degree nodes, sorted for determinism.
-    let mut queue: VecDeque<NodeId> = {
-        let mut v: Vec<NodeId> = in_degree
-            .iter()
-            .filter(|(_, &deg)| deg == 0)
-            .map(|(&id, _)| id)
-            .collect();
-        v.sort_unstable();
-        v.into_iter().collect()
-    };
-
-    let mut order: Vec<NodeId> = Vec::with_capacity(node_ids.len());
-
-    while let Some(node) = queue.pop_front() {
-        order.push(node);
-
-        // Decrement in-degree for each unique successor.
-        let mut successors: Vec<NodeId> = edges
-            .iter()
-            .filter(|(from, _, _, _, _)| *from == node)
-            .map(|(_, _, to, _, _)| *to)
-            .collect();
-        successors.sort_unstable();
-        successors.dedup();
-
-        for succ in successors {
-            let deg = in_degree.get_mut(&succ).ok_or_else(|| {
-                BuildError::InternalError(format!("successor {succ:?} not in node set"))
-            })?;
-            *deg -= 1;
-            if *deg == 0 {
-                queue.push_back(succ);
-            }
-        }
-    }
-
-    // Append cycle participants in deterministic order.
-    let mut remaining: Vec<NodeId> = node_ids
-        .iter()
-        .filter(|id| !order.contains(id))
-        .copied()
-        .collect();
-    remaining.sort_unstable();
-    order.extend(remaining);
-
-    Ok(order)
-}
 
 #[cfg(test)]
 mod tests {
@@ -430,8 +358,8 @@ mod tests {
         let mut plan = build_patch(graph, None).expect("build should succeed");
         plan.initialise(&patches_core::AudioEnvironment { sample_rate: 44100.0 });
 
-        for _ in 0..1000 {
-            plan.tick();
+        for i in 0..1000 {
+            plan.tick(i % 2);
         }
 
         assert!(plan.last_left().abs() <= 1.0);
@@ -486,9 +414,9 @@ mod tests {
         plan_full.initialise(&env);
 
         // Tick both plans the same number of times so they are in phase.
-        for _ in 0..100 {
-            plan_half.tick();
-            plan_full.tick();
+        for i in 0..100 {
+            plan_half.tick(i % 2);
+            plan_full.tick(i % 2);
         }
 
         let half = plan_half.last_left();

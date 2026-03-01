@@ -13,8 +13,8 @@ skipped in any order.
 
 ## Acceptance criteria
 
-- [ ] All tickets closed
-- [ ] `cargo build`, `cargo test`, `cargo clippy` all clean
+- [x] All tickets closed
+- [x] `cargo build`, `cargo test`, `cargo clippy` all clean
 
 ## Tickets
 

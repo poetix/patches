@@ -223,6 +223,10 @@ where
 }
 
 /// Write one full CPAL output callback buffer without allocating or blocking.
+///
+/// Processes frames in pairs: `tick(0)` for the first frame, `tick(1)` for the
+/// second. CPAL buffer sizes are power-of-two in all common backends, so `frames`
+/// is always even; a `debug_assert` catches any violation early.
 fn fill_buffer<T: cpal::SizedSample + cpal::FromSample<f32>>(
     data: &mut [T],
     plan: &mut ExecutionPlan,
@@ -234,20 +238,26 @@ fn fill_buffer<T: cpal::SizedSample + cpal::FromSample<f32>>(
         0
     };
 
-    for i in 0..frames {
-        plan.tick();
-        let left = plan.last_left() as f32;
-        let right = plan.last_right() as f32;
+    debug_assert!(frames % 2 == 0, "CPAL buffer frame count must be even, got {frames}");
 
-        if channels == 1 {
-            data[i] = T::from_sample((left + right) * 0.5_f32);
-        } else {
-            data[i * channels] = T::from_sample(left);
-            data[i * channels + 1] = T::from_sample(right);
-            // Any additional channels beyond stereo receive silence.
-            for c in 2..channels {
-                data[i * channels + c] = T::from_sample(0.0_f32);
+    let mut i = 0;
+    while i < frames {
+        for wi in [0, 1] {
+            plan.tick(wi);
+            let left = plan.last_left() as f32;
+            let right = plan.last_right() as f32;
+
+            if channels == 1 {
+                data[i] = T::from_sample((left + right) * 0.5_f32);
+            } else {
+                data[i * channels] = T::from_sample(left);
+                data[i * channels + 1] = T::from_sample(right);
+                // Any additional channels beyond stereo receive silence.
+                for c in 2..channels {
+                    data[i * channels + c] = T::from_sample(0.0_f32);
+                }
             }
+            i += 1;
         }
     }
 }

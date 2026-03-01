@@ -269,8 +269,8 @@ mod tests {
         let mut plan_a = planner.build(graph_a, None).unwrap();
 
         // Advance counter by ticking the plan.
-        for _ in 0..5 {
-            plan_a.tick();
+        for i in 0..5 {
+            plan_a.tick(i % 2);
         }
 
         // Build graph_b with a fresh Counter that deliberately shares the same
@@ -287,8 +287,8 @@ mod tests {
         let mut plan_b = planner.build(graph_b, Some(plan_a)).unwrap();
 
         // The counter in plan_b is the old Counter with count=5; the next tick
-        // increments it to 6.
-        plan_b.tick();
+        // increments it to 6. wi=1 continues the alternating sequence (plan_a had 5 ticks).
+        plan_b.tick(1);
 
         let counter = plan_b
             .slots
@@ -304,7 +304,7 @@ mod tests {
         let planner = Planner::new();
         let (graph, _) = counter_graph();
         let mut plan = planner.build(graph, None).unwrap();
-        plan.tick();
+        plan.tick(0);
 
         let counter = plan
             .slots

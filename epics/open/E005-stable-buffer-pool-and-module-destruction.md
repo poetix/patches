@@ -2,7 +2,7 @@
 id: "E005"
 title: Stable buffer pool and module destruction
 created: 2026-03-01
-tickets: ["0024", "0025", "0026"]
+tickets: ["0024", "0025", "0026", "0028"]
 ---
 
 ## Summary
@@ -26,7 +26,7 @@ on the audio thread.
 
 ## Acceptance criteria
 
-- [ ] All three tickets closed
+- [ ] All four tickets closed
 - [ ] `cargo build`, `cargo test`, `cargo clippy` all clean
 - [ ] Re-planning with an unchanged cable produces no zeroing of that cable's buffer
 - [ ] Re-planning with a new cable starts that cable from zero
@@ -39,6 +39,7 @@ on the audio thread.
 | 0024 | Externalize buffer pool from ExecutionPlan    | high     |
 | 0025 | Stable buffer index allocation                | high     |
 | 0026 | Module::destroy and tombstoning               | medium   |
+| 0028 | Caller-assigned string NodeIds                | high     |
 
 ## Architecture introduced
 

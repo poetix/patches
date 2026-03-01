@@ -216,7 +216,7 @@ impl PatchEngine {
 
 #[cfg(test)]
 mod tests {
-    use patches_core::{InstanceId, Module, ModuleDescriptor, ModuleGraph, PortDescriptor};
+    use patches_core::{InstanceId, Module, ModuleDescriptor, ModuleGraph, NodeId, PortDescriptor};
     use patches_modules::{AudioOut, SineOscillator};
 
     use super::*;
@@ -224,10 +224,12 @@ mod tests {
     /// Build a simple valid graph: one SineOscillator connected to an AudioOut.
     fn simple_graph(freq: f64) -> ModuleGraph {
         let mut graph = ModuleGraph::new();
-        let osc = graph.add_module(Box::new(SineOscillator::new(freq)));
-        let out = graph.add_module(Box::new(AudioOut::new()));
-        graph.connect(osc, "out", out, "left", 1.0).unwrap();
-        graph.connect(osc, "out", out, "right", 1.0).unwrap();
+        let osc = NodeId::from("osc");
+        let out = NodeId::from("out");
+        graph.add_module(osc.clone(), Box::new(SineOscillator::new(freq))).unwrap();
+        graph.add_module(out.clone(), Box::new(AudioOut::new())).unwrap();
+        graph.connect(&osc, "out", &out, "left", 1.0).unwrap();
+        graph.connect(&osc, "out", &out, "right", 1.0).unwrap();
         graph
     }
 
@@ -281,10 +283,12 @@ mod tests {
         let counter = Counter::new();
         let id = counter.instance_id();
         let mut graph = ModuleGraph::new();
-        let c = graph.add_module(Box::new(counter));
-        let out = graph.add_module(Box::new(AudioOut::new()));
-        graph.connect(c, "out", out, "left", 1.0).unwrap();
-        graph.connect(c, "out", out, "right", 1.0).unwrap();
+        let c = NodeId::from("counter");
+        let out = NodeId::from("out");
+        graph.add_module(c.clone(), Box::new(counter)).unwrap();
+        graph.add_module(out.clone(), Box::new(AudioOut::new())).unwrap();
+        graph.connect(&c, "out", &out, "left", 1.0).unwrap();
+        graph.connect(&c, "out", &out, "right", 1.0).unwrap();
         (graph, id)
     }
 
@@ -311,10 +315,12 @@ mod tests {
         // with the old, stateful instance (count = 5).
         let mut graph_b = ModuleGraph::new();
         let placeholder = Counter::with_id(counter_id); // same ID, count = 0
-        let c = graph_b.add_module(Box::new(placeholder));
-        let out = graph_b.add_module(Box::new(AudioOut::new()));
-        graph_b.connect(c, "out", out, "left", 1.0).unwrap();
-        graph_b.connect(c, "out", out, "right", 1.0).unwrap();
+        let c = NodeId::from("counter");
+        let out = NodeId::from("out");
+        graph_b.add_module(c.clone(), Box::new(placeholder)).unwrap();
+        graph_b.add_module(out.clone(), Box::new(AudioOut::new())).unwrap();
+        graph_b.connect(&c, "out", &out, "left", 1.0).unwrap();
+        graph_b.connect(&c, "out", &out, "right", 1.0).unwrap();
 
         let mut plan_b = planner.build(graph_b, Some(plan_a)).unwrap();
         let mut pool_b = make_pool(256);

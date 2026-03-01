@@ -2,7 +2,7 @@ use std::process;
 use std::thread;
 use std::time::Duration;
 
-use patches_core::ModuleGraph;
+use patches_core::{ModuleGraph, NodeId};
 use patches_engine::{build_patch, BufferAllocState, SoundEngine};
 use patches_modules::{AudioOut, Mix, SineOscillator};
 
@@ -12,14 +12,18 @@ const FREQ_CS5: f64 = 554.365_226_444;
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut graph = ModuleGraph::new();
-    let sine_a = graph.add_module(Box::new(SineOscillator::new(FREQ_A4)));
-    let sine_b = graph.add_module(Box::new(SineOscillator::new(FREQ_CS5)));
-    let mix = graph.add_module(Box::new(Mix::new()));
-    let out = graph.add_module(Box::new(AudioOut::new()));
-    graph.connect(sine_a, "out", mix, "a", 1.0)?;
-    graph.connect(sine_b, "out", mix, "b", 1.0)?;
-    graph.connect(mix, "out", out, "left", 1.0)?;
-    graph.connect(mix, "out", out, "right", 1.0)?;
+    let sine_a = NodeId::from("sine_a");
+    let sine_b = NodeId::from("sine_b");
+    let mix = NodeId::from("mix");
+    let out = NodeId::from("out");
+    graph.add_module(sine_a.clone(), Box::new(SineOscillator::new(FREQ_A4)))?;
+    graph.add_module(sine_b.clone(), Box::new(SineOscillator::new(FREQ_CS5)))?;
+    graph.add_module(mix.clone(), Box::new(Mix::new()))?;
+    graph.add_module(out.clone(), Box::new(AudioOut::new()))?;
+    graph.connect(&sine_a, "out", &mix, "a", 1.0)?;
+    graph.connect(&sine_b, "out", &mix, "b", 1.0)?;
+    graph.connect(&mix, "out", &out, "left", 1.0)?;
+    graph.connect(&mix, "out", &out, "right", 1.0)?;
 
     let (plan, _) = build_patch(graph, None, &BufferAllocState::default(), 4096)?;
 

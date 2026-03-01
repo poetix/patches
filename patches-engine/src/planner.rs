@@ -129,6 +129,13 @@ impl From<EngineError> for PatchEngineError {
     }
 }
 
+/// Default cable buffer pool capacity for [`PatchEngine`].
+///
+/// 4096 slots accommodate up to 4096 concurrent output ports, which is more
+/// than sufficient for all expected patch sizes. Each slot is 16 bytes
+/// (`[f64; 2]`), so the pool is 64 KiB.
+const DEFAULT_POOL_CAPACITY: usize = 4096;
+
 impl PatchEngine {
     /// Create a `PatchEngine` from an initial graph.
     ///
@@ -138,7 +145,7 @@ impl PatchEngine {
     pub fn new(graph: ModuleGraph) -> Result<Self, PatchEngineError> {
         let planner = Planner::new();
         let plan = planner.build(graph, None)?;
-        let engine = SoundEngine::new(plan)?;
+        let engine = SoundEngine::new(plan, DEFAULT_POOL_CAPACITY)?;
         Ok(Self {
             planner,
             engine,
@@ -261,16 +268,22 @@ mod tests {
         (graph, id)
     }
 
+    fn make_pool(plan: &ExecutionPlan) -> Vec<[f64; 2]> {
+        let capacity = plan.to_zero.iter().copied().max().map_or(1, |m| m + 1);
+        vec![[0.0; 2]; capacity]
+    }
+
     #[test]
     fn planner_reuses_module_instance_across_rebuild() {
         let planner = Planner::new();
 
         let (graph_a, counter_id) = counter_graph();
         let mut plan_a = planner.build(graph_a, None).unwrap();
+        let mut pool_a = make_pool(&plan_a);
 
         // Advance counter by ticking the plan.
         for i in 0..5 {
-            plan_a.tick(i % 2);
+            plan_a.tick(&mut pool_a, i % 2);
         }
 
         // Build graph_b with a fresh Counter that deliberately shares the same
@@ -285,10 +298,11 @@ mod tests {
         graph_b.connect(c, "out", out, "right", 1.0).unwrap();
 
         let mut plan_b = planner.build(graph_b, Some(plan_a)).unwrap();
+        let mut pool_b = make_pool(&plan_b);
 
         // The counter in plan_b is the old Counter with count=5; the next tick
         // increments it to 6. wi=1 continues the alternating sequence (plan_a had 5 ticks).
-        plan_b.tick(1);
+        plan_b.tick(&mut pool_b, 1);
 
         let counter = plan_b
             .slots
@@ -304,7 +318,8 @@ mod tests {
         let planner = Planner::new();
         let (graph, _) = counter_graph();
         let mut plan = planner.build(graph, None).unwrap();
-        plan.tick(0);
+        let mut pool = make_pool(&plan);
+        plan.tick(&mut pool, 0);
 
         let counter = plan
             .slots

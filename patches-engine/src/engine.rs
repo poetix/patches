@@ -7,6 +7,11 @@ use patches_core::AudioEnvironment;
 
 use crate::builder::ExecutionPlan;
 
+/// Pre-start state: the plan channel consumer, the initial plan, and the buffer pool.
+/// Stored in [`SoundEngine`] until [`start`](SoundEngine::start) moves them into
+/// the audio closure.
+type PendingState = (rtrb::Consumer<ExecutionPlan>, ExecutionPlan, Box<[[f64; 2]]>);
+
 /// Errors returned by [`SoundEngine`] operations.
 #[derive(Debug)]
 pub enum EngineError {
@@ -71,7 +76,7 @@ impl std::error::Error for EngineError {}
 /// ```no_run
 /// # use patches_engine::{SoundEngine, EngineError};
 /// # fn example(plan: patches_engine::ExecutionPlan) -> Result<(), EngineError> {
-/// let mut engine = SoundEngine::new(plan)?;
+/// let mut engine = SoundEngine::new(plan, 4096)?;
 /// engine.start()?;
 /// // … patch runs until stop() is called …
 /// engine.stop();
@@ -82,9 +87,10 @@ pub struct SoundEngine {
     /// Write end of the lock-free plan channel. Held here so that
     /// [`swap_plan`](Self::swap_plan) can publish new plans at any time.
     plan_tx: rtrb::Producer<ExecutionPlan>,
-    /// Consumer end and initial plan, stashed here until [`start`](Self::start)
-    /// moves them into the audio closure. `None` after `start()` has been called.
-    pending: Option<(rtrb::Consumer<ExecutionPlan>, ExecutionPlan)>,
+    /// Consumer end, initial plan, and buffer pool — stashed here until
+    /// [`start`](Self::start) moves them into the audio closure.
+    /// `None` after `start()` has been called.
+    pending: Option<PendingState>,
     /// Live CPAL stream while the engine is running.
     stream: Option<Stream>,
     /// Sample rate of the open audio device. Set in [`start`](Self::start);
@@ -93,16 +99,22 @@ pub struct SoundEngine {
 }
 
 impl SoundEngine {
-    /// Create a new `SoundEngine` owning the given [`ExecutionPlan`].
+    /// Create a new `SoundEngine` owning the given [`ExecutionPlan`] and a
+    /// pre-allocated cable buffer pool.
+    ///
+    /// `pool_capacity` is the number of `[f64; 2]` slots to pre-allocate.
+    /// Slot 0 is the permanent-zero slot; slots 1… are for cable buffers.
+    /// A capacity of 4096 accommodates up to 4096 concurrent output ports.
     ///
     /// No audio device is opened until [`start`](Self::start) is called.
-    pub fn new(plan: ExecutionPlan) -> Result<Self, EngineError> {
+    pub fn new(plan: ExecutionPlan, pool_capacity: usize) -> Result<Self, EngineError> {
+        let pool = vec![[0.0_f64; 2]; pool_capacity].into_boxed_slice();
         // Capacity-1 ring buffer: one slot is sufficient to queue a single
         // in-flight plan swap. Only the latest plan matters for hot-reload.
         let (plan_tx, plan_rx) = rtrb::RingBuffer::new(1);
         Ok(Self {
             plan_tx,
-            pending: Some((plan_rx, plan)),
+            pending: Some((plan_rx, plan, pool)),
             stream: None,
             sample_rate: None,
         })
@@ -121,7 +133,7 @@ impl SoundEngine {
             return Ok(());
         }
 
-        let (consumer, mut initial_plan) = self
+        let (consumer, mut initial_plan, pool) = self
             .pending
             .take()
             .ok_or(EngineError::AlreadyConsumed)?;
@@ -147,13 +159,13 @@ impl SoundEngine {
 
         let stream = match sample_format {
             SampleFormat::F32 => {
-                build_stream::<f32>(&device, &config, channels, consumer, initial_plan)
+                build_stream::<f32>(&device, &config, channels, consumer, initial_plan, pool)
             }
             SampleFormat::I16 => {
-                build_stream::<i16>(&device, &config, channels, consumer, initial_plan)
+                build_stream::<i16>(&device, &config, channels, consumer, initial_plan, pool)
             }
             SampleFormat::U16 => {
-                build_stream::<u16>(&device, &config, channels, consumer, initial_plan)
+                build_stream::<u16>(&device, &config, channels, consumer, initial_plan, pool)
             }
             other => return Err(EngineError::UnsupportedSampleFormat(other)),
         }?;
@@ -200,6 +212,7 @@ fn build_stream<T>(
     channels: usize,
     mut consumer: rtrb::Consumer<ExecutionPlan>,
     mut current_plan: ExecutionPlan,
+    mut pool: Box<[[f64; 2]]>,
 ) -> Result<Stream, EngineError>
 where
     T: cpal::SizedSample + cpal::FromSample<f32>,
@@ -210,9 +223,14 @@ where
             move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
                 // Adopt a new plan if one has been published — wait-free, no allocation.
                 if let Ok(new_plan) = consumer.pop() {
+                    // Zero freed/new slots before the first tick with the new plan.
+                    // The audio thread is the sole writer of the pool.
+                    for &i in &new_plan.to_zero {
+                        pool[i] = [0.0; 2];
+                    }
                     current_plan = new_plan;
                 }
-                fill_buffer(data, &mut current_plan, channels);
+                fill_buffer(data, &mut current_plan, &mut pool, channels);
             },
             |err| {
                 eprintln!("patches audio stream error: {err}");
@@ -230,6 +248,7 @@ where
 fn fill_buffer<T: cpal::SizedSample + cpal::FromSample<f32>>(
     data: &mut [T],
     plan: &mut ExecutionPlan,
+    pool: &mut [[f64; 2]],
     channels: usize,
 ) {
     let frames = if channels > 0 {
@@ -243,7 +262,7 @@ fn fill_buffer<T: cpal::SizedSample + cpal::FromSample<f32>>(
     let mut i = 0;
     while i < frames {
         for wi in [0, 1] {
-            plan.tick(wi);
+            plan.tick(pool, wi);
             let left = plan.last_left() as f32;
             let right = plan.last_right() as f32;
 

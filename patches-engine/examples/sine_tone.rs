@@ -23,7 +23,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let plan = build_patch(graph, None)?;
 
-    let mut engine = SoundEngine::new(plan)?;
+    let mut engine = SoundEngine::new(plan, 4096)?;
     engine.start()?;
 
     println!("Playing A4 + C#5 (major third) for 3 seconds…");

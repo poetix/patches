@@ -49,13 +49,19 @@ pub struct ModuleSlot {
 /// A fully resolved, allocation-free execution structure produced by [`build_patch`].
 ///
 /// Call [`tick`](ExecutionPlan::tick) once per sample on the audio thread,
-/// alternating `wi = 0` and `wi = 1` on successive calls.
+/// passing the externally-owned buffer pool and alternating `wi = 0` and `wi = 1`
+/// on successive calls.
 /// After each tick, retrieve the stereo output via [`last_left`](ExecutionPlan::last_left)
 /// and [`last_right`](ExecutionPlan::last_right).
 pub struct ExecutionPlan {
     pub slots: Vec<ModuleSlot>,
-    /// Flat cable buffer pool. Each element is a 2-element ring `[slot0, slot1]`.
-    pub buffers: Vec<[f64; 2]>,
+    /// Buffer pool indices that the audio thread must zero when this plan is
+    /// first adopted (before the first `tick`).
+    ///
+    /// Currently contains every allocated index because all slots are freshly
+    /// assigned on each build. Ticket 0025 will narrow this to only freed or
+    /// newly-allocated indices once stable allocation is in place.
+    pub to_zero: Vec<usize>,
     pub audio_out_index: usize,
 }
 
@@ -72,25 +78,25 @@ impl ExecutionPlan {
 
     /// Process one sample across all modules in execution order.
     ///
+    /// `pool` is the externally-owned cable buffer pool (see [`SoundEngine`]).
     /// `wi` is the write slot index (0 or 1); the read slot is `1 - wi`.
     /// Callers must alternate between `wi = 0` and `wi = 1` on successive calls.
     ///
     /// Does not allocate.
-    pub fn tick(&mut self, wi: usize) {
+    pub fn tick(&mut self, pool: &mut [[f64; 2]], wi: usize) {
         let ri = 1 - wi;
-        let Self { slots, buffers, .. } = self;
 
         // Per slot: read inputs → process → write outputs.
         // Reading uses `ri` (previous tick's slot); writing uses `wi` (this tick's slot).
         // Because ri ≠ wi, reads and writes never alias within a tick.
-        for slot in slots.iter_mut() {
+        for slot in self.slots.iter_mut() {
             for (j, &buf_idx) in slot.input_buffers.iter().enumerate() {
-                slot.input_scratch[j] = buffers[buf_idx][ri] * slot.input_scales[j];
+                slot.input_scratch[j] = pool[buf_idx][ri] * slot.input_scales[j];
             }
             slot.module
                 .process(&slot.input_scratch, &mut slot.output_scratch);
             for (j, &buf_idx) in slot.output_buffers.iter().enumerate() {
-                buffers[buf_idx][wi] = slot.output_scratch[j];
+                pool[buf_idx][wi] = slot.output_scratch[j];
             }
         }
     }
@@ -199,10 +205,12 @@ pub fn build_patch(
     // Consume the graph's modules.
     let mut modules = graph.into_modules();
 
-    // Buffer pool.
-    // Index 0: permanent-zero buffer (for unconnected input ports — never written to).
-    // Indices 1..: one buffer per output port of each module, in execution order.
-    let mut buffers: Vec<[f64; 2]> = vec![[0.0; 2]];
+    // Buffer index allocation.
+    // Index 0: permanent-zero slot (for unconnected input ports — never written to).
+    // Indices 1..: one slot per output port of each module, in execution order.
+    // The actual buffer storage lives in the pool owned by SoundEngine (see ticket 0024).
+    let mut next_buf_idx: usize = 1;
+    let mut to_zero: Vec<usize> = Vec::new();
 
     // Map (NodeId, output_port_index) → buffer pool index.
     let mut output_buf: HashMap<(NodeId, usize), usize> = HashMap::new();
@@ -210,8 +218,9 @@ pub fn build_patch(
     for &id in &order {
         let desc = &meta[&id].descriptor;
         for (port_idx, _) in desc.outputs.iter().enumerate() {
-            let buf_idx = buffers.len();
-            buffers.push([0.0; 2]);
+            let buf_idx = next_buf_idx;
+            next_buf_idx += 1;
+            to_zero.push(buf_idx);
             output_buf.insert((id, port_idx), buf_idx);
         }
     }
@@ -285,7 +294,7 @@ pub fn build_patch(
 
     Ok(ExecutionPlan {
         slots,
-        buffers,
+        to_zero,
         audio_out_index,
     })
 }
@@ -303,6 +312,11 @@ mod tests {
         graph.connect(sine_id, "out", out_id, "left", 1.0).unwrap();
         graph.connect(sine_id, "out", out_id, "right", 1.0).unwrap();
         (graph, sine_id, out_id)
+    }
+
+    fn make_pool(plan: &ExecutionPlan) -> Vec<[f64; 2]> {
+        let capacity = plan.to_zero.iter().copied().max().map_or(1, |m| m + 1);
+        vec![[0.0; 2]; capacity]
     }
 
     #[test]
@@ -357,9 +371,10 @@ mod tests {
         let (graph, _, _) = sine_to_audio_out_graph();
         let mut plan = build_patch(graph, None).expect("build should succeed");
         plan.initialise(&patches_core::AudioEnvironment { sample_rate: 44100.0 });
+        let mut pool = make_pool(&plan);
 
         for i in 0..1000 {
-            plan.tick(i % 2);
+            plan.tick(&mut pool, i % 2);
         }
 
         assert!(plan.last_left().abs() <= 1.0);
@@ -412,11 +427,13 @@ mod tests {
         let mut plan_full = build_patch(graph_full, None).unwrap();
         plan_half.initialise(&env);
         plan_full.initialise(&env);
+        let mut pool_half = make_pool(&plan_half);
+        let mut pool_full = make_pool(&plan_full);
 
         // Tick both plans the same number of times so they are in phase.
         for i in 0..100 {
-            plan_half.tick(i % 2);
-            plan_full.tick(i % 2);
+            plan_half.tick(&mut pool_half, i % 2);
+            plan_full.tick(&mut pool_full, i % 2);
         }
 
         let half = plan_half.last_left();

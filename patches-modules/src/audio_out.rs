@@ -66,10 +66,6 @@ impl Module for AudioOut {
         self
     }
 
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-
     fn as_sink(&self) -> Option<&dyn Sink> {
         Some(self)
     }

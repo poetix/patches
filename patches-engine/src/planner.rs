@@ -250,10 +250,6 @@ mod tests {
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
-
-        fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-            self
-        }
     }
 
     /// Build a graph with a Counter driving AudioOut.
@@ -306,8 +302,8 @@ mod tests {
 
         let counter = plan_b
             .slots
-            .iter_mut()
-            .find_map(|s| s.module.as_any_mut().downcast_mut::<Counter>())
+            .iter()
+            .find_map(|s| s.module.as_any().downcast_ref::<Counter>())
             .expect("Counter module not found in plan_b");
 
         assert_eq!(counter.count, 6, "state should be preserved: count was 5, ticked once → 6");
@@ -323,8 +319,8 @@ mod tests {
 
         let counter = plan
             .slots
-            .iter_mut()
-            .find_map(|s| s.module.as_any_mut().downcast_mut::<Counter>())
+            .iter()
+            .find_map(|s| s.module.as_any().downcast_ref::<Counter>())
             .expect("Counter module not found");
 
         assert_eq!(counter.count, 1, "fresh plan: count starts at 0, ticked once → 1");

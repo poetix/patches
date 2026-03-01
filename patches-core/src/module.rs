@@ -64,6 +64,10 @@ impl InstanceId {
 /// `as_any` enables downcasting from `&dyn Module` to a concrete type.
 /// `as_sink` lets the patch builder detect a sink node without knowing its
 /// concrete type — see [`Sink`].
+///
+/// There is deliberately no `as_any_mut`: no production code needs mutable
+/// downcasting, and test code that inspects module state can use `as_any` +
+/// `downcast_ref` instead.
 pub trait Module: Send {
     fn descriptor(&self) -> &ModuleDescriptor;
     /// The stable identity of this module instance.
@@ -78,7 +82,6 @@ pub trait Module: Send {
     fn initialise(&mut self, _env: &AudioEnvironment) {}
     fn process(&mut self, inputs: &[f64], outputs: &mut [f64]);
     fn as_any(&self) -> &dyn std::any::Any;
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
     /// Returns `Some(self)` if this module is a [`Sink`], `None` otherwise.
     fn as_sink(&self) -> Option<&dyn Sink> {
         None

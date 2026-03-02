@@ -1,0 +1,14 @@
+[package]
+name = "patches-integration-tests"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[test]]
+name = "replan_integration"
+path = "tests/replan_integration.rs"
+
+[dev-dependencies]
+patches-core = { path = "../patches-core" }
+patches-engine = { path = "../patches-engine" }
+patches-modules = { path = "../patches-modules" }

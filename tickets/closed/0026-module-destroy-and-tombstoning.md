@@ -4,6 +4,8 @@ epic: "E005"
 title: Module::destroy and tombstoning on removal
 priority: medium
 created: 2026-03-01
+status: won't-implement
+closed: 2026-03-02
 ---
 
 ## Summary
@@ -23,7 +25,19 @@ the new plan and can no longer be accessing the old instances.
 The planner function itself does not call `destroy()` or mutate any module; it only
 returns the set of tombstoned IDs, keeping it pure.
 
-## Acceptance criteria
+## Decision
+
+Won't implement. See `adr/0007-no-module-destroy-hook.md` for the full reasoning.
+
+In short: the premise that modules need explicit teardown on a specific thread is
+false given the current ownership model. Tombstoned modules are always extracted from
+the *held plan* (not from the audio thread's running plan), so they are owned
+exclusively by the control thread at the point of removal. Rust's `Drop` runs on that
+thread and is sufficient for all resource cleanup. Adding `destroy()` and a cleanup
+thread solves a problem that does not exist, at the cost of permanent API surface and
+complexity.
+
+## Acceptance criteria (not implemented)
 
 - [ ] `Module` trait gains `fn destroy(&mut self) {}` with a default no-op; all
       existing module implementations require no changes

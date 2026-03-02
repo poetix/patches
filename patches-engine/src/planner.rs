@@ -366,4 +366,5 @@ mod tests {
         let mut planner = Planner::new();
         assert!(planner.build(ModuleGraph::new(), None).is_err());
     }
+
 }

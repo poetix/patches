@@ -11,13 +11,14 @@ The two key concerns are:
 ## Workspace layout
 
 ```
-patches-core/     Core types, traits, DSL parsing, and the audio engine runtime
-patches-modules/  Module implementations (oscillators, filters, effects, etc.)
-patches-engine/   Patch builder, sound engine, CPAL integration, and examples
-tickets/          Work tracking (see Ticket workflow below)
+patches-core/              Core types, traits, DSL parsing, and the audio engine runtime
+patches-modules/           Module implementations (oscillators, filters, effects, etc.)
+patches-engine/            Patch builder, sound engine, CPAL integration, and examples
+patches-integration-tests/ Cross-crate integration tests (publish = false)
+tickets/                   Work tracking (see Ticket workflow below)
 ```
 
-`patches-modules` depends on `patches-core`. `patches-engine` depends on both. New audio modules should live in `patches-modules` unless they are foundational types needed by the engine itself.
+`patches-modules` depends on `patches-core`. `patches-engine` depends on both. `patches-integration-tests` depends on all three and exists solely to house tests that span multiple crates; it is never published. New audio modules should live in `patches-modules` unless they are foundational types needed by the engine itself.
 
 ## Commands
 

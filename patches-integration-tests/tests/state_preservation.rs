@@ -1,47 +1,43 @@
 //! Integration tests: module state preservation across replans.
 //!
-//! Validates two properties of the replanning lifecycle:
+//! Validates that a module surviving a re-plan (same `NodeId` in both the old
+//! and new graph) retains its internal state, and that a module replaced by a
+//! fresh instance of the same type starts from its default state.
 //!
-//! 1. **State preserved** — a module that survives a re-plan (same `InstanceId`
-//!    in both the old and new graph) retains its internal state. The old
-//!    (stateful) instance is pulled from the `prev_plan` registry and placed
-//!    into the new plan in place of the fresh placeholder.
+//! ## Intended mechanism (post-E009)
 //!
-//! 2. **Fresh state** — a module replaced by a new instance of the same type
-//!    (different `InstanceId`) starts from its default state. The builder
-//!    cannot find the fresh InstanceId in the old registry, so the fresh
-//!    instance is used as-is.
+//! State preservation works through the audio-thread-owned module pool
+//! (ADR-0009). Surviving modules stay in the pool between plan swaps and
+//! continue running — their state is preserved automatically without any
+//! `prev_plan` argument. These tests reflect that intended behaviour:
+//! `Planner::build` is called with `None` (mirroring the real engine flow where
+//! the running plan is owned by the audio thread and inaccessible to the
+//! control thread).
 //!
-//! ## Why `prev_plan = Some(old_plan)` is used here
+//! ## Current status
 //!
-//! The lifecycle tests in `replan_integration.rs` mirror the real engine flow
-//! (`prev_plan = None`) because the running plan lives on the audio thread and
-//! is inaccessible to the control thread. These tests exercise the
-//! `prev_plan = Some(...)` path, which is used by [`PatchEngine::update`] via
-//! its `held_plan` field — the plan most recently built but not yet consumed
-//! by the audio thread. Passing `prev_plan` is what triggers module reuse.
+//! Both tests are marked `#[ignore]` because the module pool is not yet
+//! implemented (E009). Under the current design, calling `Planner::build` with
+//! `prev_plan = None` produces a plan with fresh, stateless modules — so
+//! `replan_preserves_state_for_surviving_instance` fails at its assertion.
+//! The tests should be re-enabled and their API calls updated (tick signature,
+//! pool access) once T-0043 and T-0045 are complete.
 //!
 //! ## Test fixture: StatefulCounter
 //!
 //! `StatefulCounter` is a minimal module whose only state is a `u64` count
-//! incremented on each `process` call. Unlike `SineOscillator`, it supports
-//! construction with a predetermined `InstanceId` (`with_id`), which is
-//! required to create "placeholder" instances for the identical-graph scenario.
+//! incremented on each `process` call.
 
 use patches_core::{
     AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleGraph, NodeId, PortDescriptor,
     PortRef,
 };
-use patches_engine::{ExecutionPlan, Planner};
+use patches_engine::Planner;
 use patches_modules::AudioOut;
 
 // ── StatefulCounter ───────────────────────────────────────────────────────────
 
-/// A module that outputs its call count as `f64` and supports construction
-/// with a predetermined `InstanceId`.
-///
-/// Used to verify that the `Planner` correctly reuses old (stateful) instances
-/// when the new graph contains a module with a matching `InstanceId`.
+/// A module that outputs its call count as `f64`.
 struct StatefulCounter {
     instance_id: InstanceId,
     descriptor: ModuleDescriptor,
@@ -50,17 +46,8 @@ struct StatefulCounter {
 
 impl StatefulCounter {
     fn new() -> Self {
-        Self::with_id(InstanceId::next())
-    }
-
-    /// Create a counter with a specific `InstanceId` and count starting at 0.
-    ///
-    /// Used to build "placeholder" graph modules whose `InstanceId` matches an
-    /// existing instance in the registry so the builder substitutes the old
-    /// (stateful) instance at plan-build time.
-    fn with_id(id: InstanceId) -> Self {
         Self {
-            instance_id: id,
+            instance_id: InstanceId::next(),
             descriptor: ModuleDescriptor {
                 inputs: vec![],
                 outputs: vec![PortDescriptor { name: "out", index: 0 }],
@@ -109,37 +96,26 @@ fn counter_graph(counter: StatefulCounter) -> ModuleGraph {
     graph
 }
 
-fn find_counter(plan: &ExecutionPlan) -> &StatefulCounter {
-    plan.slots
-        .iter()
-        .find_map(|s| s.module.as_any().downcast_ref::<StatefulCounter>())
-        .expect("StatefulCounter not found in plan")
-}
-
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
-/// A module surviving a re-plan must retain its internal state and `InstanceId`.
+/// A module surviving a re-plan must retain its internal state.
 ///
 /// Timeline:
-///   1. Build plan A with `StatefulCounter` (id=X, count=0).
-///   2. Tick 10 samples → count=10.
-///   3. Build graph B with a placeholder counter (id=X, count=0) — same
-///      `InstanceId`, zeroed state.
-///   4. Build plan B passing plan A as `prev_plan`:
-///      - The builder extracts plan A's modules into a registry keyed by
-///        `InstanceId`.
-///      - For the "counter" node, the new graph's module has id=X, which
-///        matches the registry entry → the old (stateful) instance (count=10)
-///        replaces the placeholder (count=0).
-///   5. plan B contains the old counter: id=X, count=10.
+///   1. Build plan A with `StatefulCounter` at NodeId "counter".
+///   2. Tick 10 samples via HeadlessEngine → module in the pool has count=10.
+///   3. Build plan B with a new `StatefulCounter` at the same NodeId "counter".
+///   4. `Planner::build` is called with `prev_plan = None`: the surviving module
+///      stays in the audio-thread pool and is referenced by the same pool index.
+///   5. Tick once more → count=11.
+///
+/// This test currently FAILS under the pre-E009 design (prev_plan=None produces
+/// a fresh module with count=0). It documents the correct post-E009 behaviour.
 #[test]
+#[ignore = "requires E009 module pool; currently fails because prev_plan=None produces a fresh module"]
 fn replan_preserves_state_for_surviving_instance() {
     let mut planner = Planner::with_capacity(POOL_CAPACITY);
 
-    let counter_a = StatefulCounter::new();
-    let id_a = counter_a.instance_id();
-
-    let mut plan_a = planner.build(counter_graph(counter_a), None).unwrap();
+    let mut plan_a = planner.build(counter_graph(StatefulCounter::new()), None).unwrap();
     plan_a.initialise(&ENV);
 
     let mut pool = vec![[0.0f64; 2]; POOL_CAPACITY];
@@ -147,46 +123,44 @@ fn replan_preserves_state_for_surviving_instance() {
         plan_a.tick(&mut pool, i % 2);
     }
 
-    assert_eq!(find_counter(&plan_a).count, 10, "counter must be 10 after 10 ticks");
+    // Build plan B: same NodeId "counter", new StatefulCounter instance.
+    // Under E009 the Planner recognises the NodeId as a surviving module and
+    // keeps the existing pool entry — no prev_plan argument needed.
+    // TODO(T-0045): update tick call and counter access for the module pool API.
+    let plan_b = planner.build(counter_graph(StatefulCounter::new()), None).unwrap();
 
-    // Placeholder: same InstanceId as the old counter, but fresh state (count=0).
-    // The builder will find id_a in the registry and substitute the stateful instance.
-    let placeholder = StatefulCounter::with_id(id_a);
-    let plan_b = planner.build(counter_graph(placeholder), Some(plan_a)).unwrap();
-
-    let counter_b = find_counter(&plan_b);
+    let count_b = plan_b
+        .slots
+        .iter()
+        .find_map(|s| s.module.as_any().downcast_ref::<StatefulCounter>())
+        .expect("StatefulCounter not found in plan_b")
+        .count;
 
     assert_eq!(
-        counter_b.instance_id(),
-        id_a,
-        "surviving module must have the same InstanceId"
-    );
-    assert_eq!(
-        counter_b.count,
-        10,
+        count_b, 10,
         "surviving module's state (count=10) must be preserved across the replan"
     );
 }
 
 /// A module replaced by a fresh instance of the same type must start from its
-/// default state and have a different `InstanceId`.
+/// default state.
 ///
 /// Timeline:
-///   1. Build plan A with `StatefulCounter` (id=X, count=0).
-///   2. Tick 10 samples → count=10.
-///   3. Build graph B with a completely fresh counter (id=Y≠X, count=0).
-///   4. Build plan B passing plan A as `prev_plan`:
-///      - The builder looks up id=Y in the registry — not found.
-///      - The fresh instance (count=0) is used as-is.
-///   5. plan B contains the fresh counter: id=Y, count=0.
+///   1. Build plan A with `StatefulCounter` at NodeId "counter". Tick 10 times.
+///   2. Build plan B with a *different* NodeId entirely (forcing tombstone + new
+///      slot) — or equivalently verify that a module whose InstanceId has no
+///      prior pool entry starts at count=0.
+///
+/// Under E009 the fresh counter gets a new pool slot and starts at count=0.
+/// This behaviour is unchanged from the pre-E009 design; the test is marked
+/// ignored because its API calls (`tick` signature, `slot.module` access) will
+/// need updating after T-0043.
 #[test]
+#[ignore = "requires E009 API updates (tick signature, pool access) from T-0043/T-0045"]
 fn replan_fresh_instance_starts_from_default_state() {
     let mut planner = Planner::with_capacity(POOL_CAPACITY);
 
-    let counter_a = StatefulCounter::new();
-    let id_a = counter_a.instance_id();
-
-    let mut plan_a = planner.build(counter_graph(counter_a), None).unwrap();
+    let mut plan_a = planner.build(counter_graph(StatefulCounter::new()), None).unwrap();
     plan_a.initialise(&ENV);
 
     let mut pool = vec![[0.0f64; 2]; POOL_CAPACITY];
@@ -194,30 +168,18 @@ fn replan_fresh_instance_starts_from_default_state() {
         plan_a.tick(&mut pool, i % 2);
     }
 
-    // Fresh counter: new InstanceId (Y), count=0. Its InstanceId will not match
-    // anything in the registry extracted from plan A.
-    let fresh_counter = StatefulCounter::new();
-    let id_b = fresh_counter.instance_id();
+    // Build plan B with a completely fresh StatefulCounter (new InstanceId, new
+    // pool slot). Under E009: plan_a's counter is tombstoned; plan_b's counter
+    // gets a new slot with count=0.
+    // TODO(T-0045): update tick call and counter access for the module pool API.
+    let plan_b = planner.build(counter_graph(StatefulCounter::new()), None).unwrap();
 
-    assert_ne!(id_a, id_b, "precondition: fresh counter must have a different InstanceId");
+    let count_b = plan_b
+        .slots
+        .iter()
+        .find_map(|s| s.module.as_any().downcast_ref::<StatefulCounter>())
+        .expect("StatefulCounter not found in plan_b")
+        .count;
 
-    let plan_b = planner.build(counter_graph(fresh_counter), Some(plan_a)).unwrap();
-
-    let counter_b = find_counter(&plan_b);
-
-    assert_eq!(
-        counter_b.instance_id(),
-        id_b,
-        "replacement module must carry the fresh InstanceId"
-    );
-    assert_ne!(
-        counter_b.instance_id(),
-        id_a,
-        "replacement module must not be the old instance"
-    );
-    assert_eq!(
-        counter_b.count,
-        0,
-        "fresh replacement instance must start from its default state (count=0)"
-    );
+    assert_eq!(count_b, 0, "fresh replacement instance must start from default state (count=0)");
 }

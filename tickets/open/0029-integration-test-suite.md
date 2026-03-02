@@ -1,8 +1,7 @@
 ---
 id: "0029"
 epic: "E006"
-type: epic
-title: Integration test suite
+title: Integration test suite (infra + replanning lifecycle)
 priority: medium
 created: 2026-03-02
 ---
@@ -37,19 +36,6 @@ thread and is never accessible to the control thread.
   `[[test]]` targets only)
 - `HeadlessEngine` and `DropSpy` fixtures implemented
 - Replanning lifecycle tests (ticket 0030)
-
-### Planned
-
-- **State preservation across replans** — verify that a module surviving a re-plan
-  retains its internal state (e.g. oscillator phase), and that a replaced module
-  starts fresh.
-- **Stable buffer indices** — end-to-end check that a cable surviving a re-plan
-  reads from the same pool slot before and after, producing no discontinuity in
-  the output signal.
-- **Multi-source mixing** — replanning a graph with `Mix`, verifying correct stereo
-  output and correct slot reuse for the mixer's output buffer.
-- **Held-plan / channel-full path** — simulate `swap_plan` returning a plan
-  (channel full) and verify that module state is preserved through the retry cycle.
 
 ## Notes
 

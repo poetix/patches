@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use patches_core::{AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleGraph, ModuleInstanceRegistry, NodeId};
@@ -14,6 +14,8 @@ pub enum BuildError {
     InternalError(String),
     /// The number of output ports would exceed the buffer pool capacity.
     PoolExhausted,
+    /// The number of modules would exceed the module pool capacity.
+    ModulePoolExhausted,
 }
 
 impl fmt::Display for BuildError {
@@ -25,6 +27,7 @@ impl fmt::Display for BuildError {
             }
             BuildError::InternalError(msg) => write!(f, "internal builder error: {msg}"),
             BuildError::PoolExhausted => write!(f, "buffer pool exhausted: too many output ports"),
+            BuildError::ModulePoolExhausted => write!(f, "module pool exhausted: too many modules"),
         }
     }
 }
@@ -56,6 +59,92 @@ impl Default for BufferAllocState {
             freelist: Vec::new(),
             next_hwm: 1,
         }
+    }
+}
+
+/// Stable module slot allocation state threaded across successive [`build_patch`] calls.
+///
+/// `ModuleAllocState` is the control-thread mirror of the audio thread's module pool,
+/// analogous to [`BufferAllocState`] for the buffer pool. It tracks which pool slot each
+/// [`InstanceId`] occupies so that surviving modules reuse their slots across re-plans.
+///
+/// The `Default` implementation starts the high-water mark at `0` (no permanent-zero slot
+/// is needed for modules).
+#[derive(Default)]
+pub struct ModuleAllocState {
+    /// Maps [`InstanceId`] to the pool slot index currently holding that module.
+    pub pool_map: HashMap<InstanceId, usize>,
+    /// Recycled slot indices available for reuse (LIFO via [`Vec::pop`]).
+    pub freelist: Vec<usize>,
+    /// High-water mark: the next index to allocate when the freelist is empty.
+    /// Starts at `0`.
+    pub next_hwm: usize,
+}
+
+/// Result of [`ModuleAllocState::diff`]: the new pool map and freelist after applying
+/// the module set for the next graph.
+#[derive(Debug)]
+pub struct ModuleAllocDiff {
+    /// Slot index for each [`InstanceId`] in the new graph (surviving + newly allocated).
+    pub slot_map: HashMap<InstanceId, usize>,
+    /// Updated freelist (surviving freelisted indices + newly tombstoned slots).
+    pub freelist: Vec<usize>,
+    /// New high-water mark.
+    pub next_hwm: usize,
+    /// Slot indices that were tombstoned (freed) by this diff.
+    pub tombstoned: Vec<usize>,
+}
+
+impl ModuleAllocState {
+    /// Compute allocation changes given the set of [`InstanceId`]s for the incoming graph.
+    ///
+    /// - **Surviving** entries: already in `pool_map` → reuse their existing slot index.
+    /// - **New** entries: not in `pool_map` → acquired from `freelist` (LIFO) or `next_hwm`.
+    ///   Returns [`BuildError::ModulePoolExhausted`] if the index would reach `capacity`.
+    /// - **Tombstoned** entries: in `pool_map` but not in `new_ids` → slot returned to freelist.
+    pub fn diff(
+        &self,
+        new_ids: &HashSet<InstanceId>,
+        capacity: usize,
+    ) -> Result<ModuleAllocDiff, BuildError> {
+        let mut slot_map: HashMap<InstanceId, usize> = HashMap::new();
+        let mut freelist: Vec<usize> = self.freelist.clone();
+        let mut next_hwm: usize = self.next_hwm;
+        let mut tombstoned: Vec<usize> = Vec::new();
+
+        // Tombstone: entries in the old pool_map that are not in the new set.
+        for (&id, &slot) in &self.pool_map {
+            if !new_ids.contains(&id) {
+                freelist.push(slot);
+                tombstoned.push(slot);
+            }
+        }
+
+        // Allocate: surviving entries reuse their slot; new entries get a fresh one.
+        for &id in new_ids {
+            if let Some(&existing) = self.pool_map.get(&id) {
+                slot_map.insert(id, existing);
+            } else {
+                let idx = if let Some(recycled) = freelist.pop() {
+                    recycled
+                } else {
+                    let idx = next_hwm;
+                    next_hwm += 1;
+                    idx
+                };
+                if idx >= capacity {
+                    return Err(BuildError::ModulePoolExhausted);
+                }
+                slot_map.insert(id, idx);
+            }
+        }
+
+        Ok(ModuleAllocDiff {
+            slot_map,
+            freelist,
+            next_hwm,
+            tombstoned,
+        })
     }
 }
 
@@ -403,7 +492,8 @@ pub fn build_patch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use patches_core::{NodeId, PortRef};
+    use std::collections::HashSet;
+    use patches_core::{Module, NodeId, PortRef};
     use patches_modules::{AudioOut, SineOscillator};
 
     fn p(name: &'static str) -> PortRef {
@@ -690,5 +780,125 @@ mod tests {
             build_patch(graph, None, &BufferAllocState::default(), 1),
             Err(BuildError::PoolExhausted)
         ));
+    }
+
+    // ── ModuleAllocState unit tests ───────────────────────────────────────────
+
+    fn make_ids(n: u64) -> Vec<InstanceId> {
+        // InstanceId is an opaque newtype wrapping a u64; we fabricate them via
+        // the atomic counter on a temporary module so they are genuine values.
+        (0..n)
+            .map(|_| SineOscillator::new(440.0).instance_id())
+            .collect()
+    }
+
+    fn ids_set(ids: &[InstanceId]) -> HashSet<InstanceId> {
+        ids.iter().copied().collect()
+    }
+
+    /// Fresh alloc: all modules are new; HWM advances from 0 to N.
+    #[test]
+    fn module_alloc_fresh_advances_hwm() {
+        let state = ModuleAllocState::default();
+        let ids = make_ids(3);
+        let new_ids = ids_set(&ids);
+        let diff = state.diff(&new_ids, 64).expect("diff should succeed");
+
+        assert_eq!(diff.next_hwm, 3, "hwm should advance by number of new modules");
+        assert_eq!(diff.slot_map.len(), 3);
+        assert!(diff.tombstoned.is_empty());
+        assert!(diff.freelist.is_empty());
+
+        // Each id should get a unique slot in [0, 3).
+        let mut slots: Vec<usize> = diff.slot_map.values().copied().collect();
+        slots.sort_unstable();
+        assert_eq!(slots, vec![0, 1, 2]);
+    }
+
+    /// Stable alloc: same InstanceIds across two builds reuse their indices.
+    #[test]
+    fn module_alloc_stable_reuses_slots() {
+        let ids = make_ids(2);
+        let new_ids = ids_set(&ids);
+
+        // First diff: assign slots.
+        let state0 = ModuleAllocState::default();
+        let diff0 = state0.diff(&new_ids, 64).unwrap();
+
+        // Promote to a new state.
+        let state1 = ModuleAllocState {
+            pool_map: diff0.slot_map.clone(),
+            freelist: diff0.freelist,
+            next_hwm: diff0.next_hwm,
+        };
+
+        // Second diff with the same ids: should reuse identical slots.
+        let diff1 = state1.diff(&new_ids, 64).unwrap();
+
+        for id in &ids {
+            assert_eq!(
+                diff0.slot_map[id], diff1.slot_map[id],
+                "slot for {id:?} must be identical across re-plan"
+            );
+        }
+
+        assert_eq!(diff1.next_hwm, diff0.next_hwm, "hwm must not grow");
+        assert!(diff1.tombstoned.is_empty());
+    }
+
+    /// Tombstone + recycle: removed module's slot goes to freelist; next build reuses it.
+    #[test]
+    fn module_alloc_tombstone_then_recycle() {
+        let ids = make_ids(2);
+        let id_a = ids[0];
+        let id_b = ids[1];
+
+        // Build 1: both modules.
+        let state0 = ModuleAllocState::default();
+        let diff0 = state0.diff(&ids_set(&ids), 64).unwrap();
+        let slot_b = diff0.slot_map[&id_b];
+
+        // Build 2: remove id_b → slot_b should be tombstoned.
+        let state1 = ModuleAllocState {
+            pool_map: diff0.slot_map,
+            freelist: diff0.freelist,
+            next_hwm: diff0.next_hwm,
+        };
+        let diff1 = state1.diff(&ids_set(&[id_a]), 64).unwrap();
+
+        assert!(
+            diff1.tombstoned.contains(&slot_b),
+            "slot {slot_b} must appear in tombstoned after id_b removed"
+        );
+        assert!(
+            diff1.freelist.contains(&slot_b),
+            "slot {slot_b} must be in freelist after tombstone"
+        );
+        let hwm_after_remove = diff1.next_hwm;
+
+        // Build 3: add a brand-new module → should recycle slot_b from freelist.
+        let id_c = make_ids(1)[0];
+        let state2 = ModuleAllocState {
+            pool_map: diff1.slot_map,
+            freelist: diff1.freelist,
+            next_hwm: diff1.next_hwm,
+        };
+        let diff2 = state2.diff(&ids_set(&[id_a, id_c]), 64).unwrap();
+
+        assert_eq!(diff2.slot_map[&id_c], slot_b, "new module must reuse the recycled slot");
+        assert_eq!(diff2.next_hwm, hwm_after_remove, "hwm must not grow when recycling");
+    }
+
+    /// ModulePoolExhausted is returned when capacity is exceeded.
+    #[test]
+    fn module_alloc_pool_exhausted() {
+        let state = ModuleAllocState::default();
+        let ids = make_ids(3);
+        // capacity=2 cannot fit 3 modules (slots 0 and 1 are the max).
+        let result = state.diff(&ids_set(&ids), 2);
+        assert!(
+            matches!(result, Err(BuildError::ModulePoolExhausted)),
+            "expected ModulePoolExhausted, got {result:?}"
+        );
     }
 }

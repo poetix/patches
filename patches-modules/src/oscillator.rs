@@ -28,7 +28,7 @@ impl SineOscillator {
             sample_rate: 44100.0,
             descriptor: ModuleDescriptor {
                 inputs: vec![],
-                outputs: vec![PortDescriptor { name: "out" }],
+                outputs: vec![PortDescriptor { name: "out", index: 0 }],
             },
         }
     }

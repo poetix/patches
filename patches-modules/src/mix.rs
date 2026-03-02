@@ -15,10 +15,10 @@ impl Mix {
             instance_id: InstanceId::next(),
             descriptor: ModuleDescriptor {
                 inputs: vec![
-                    PortDescriptor { name: "a" },
-                    PortDescriptor { name: "b" },
+                    PortDescriptor { name: "a", index: 0 },
+                    PortDescriptor { name: "b", index: 0 },
                 ],
-                outputs: vec![PortDescriptor { name: "out" }],
+                outputs: vec![PortDescriptor { name: "out", index: 0 }],
             },
         }
     }

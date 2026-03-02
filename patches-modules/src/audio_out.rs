@@ -23,8 +23,8 @@ impl AudioOut {
             last_right: 0.0,
             descriptor: ModuleDescriptor {
                 inputs: vec![
-                    PortDescriptor { name: "left" },
-                    PortDescriptor { name: "right" },
+                    PortDescriptor { name: "left", index: 0 },
+                    PortDescriptor { name: "right", index: 0 },
                 ],
                 outputs: vec![],
             },

@@ -41,6 +41,7 @@ use std::sync::Arc;
 
 use patches_core::{
     AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleGraph, NodeId, PortDescriptor,
+    PortRef,
 };
 use patches_engine::{ExecutionPlan, Planner};
 use patches_modules::{AudioOut, SineOscillator};
@@ -137,7 +138,7 @@ impl DropSpy {
             instance_id: InstanceId::next(),
             descriptor: ModuleDescriptor {
                 inputs: vec![],
-                outputs: vec![PortDescriptor { name: "out" }],
+                outputs: vec![PortDescriptor { name: "out", index: 0 }],
             },
             dropped: flag,
         }
@@ -182,6 +183,10 @@ const ENV: AudioEnvironment = AudioEnvironment { sample_rate: 48_000.0 };
 /// Buffer allocation (after `"out"` with 0 outputs, in execution order):
 ///   - `("sine", 0)` → pool slot 1
 ///   - `("spy",  0)` → pool slot 2
+fn p(name: &'static str) -> PortRef {
+    PortRef { name, index: 0 }
+}
+
 fn two_source_graph(spy: DropSpy) -> ModuleGraph {
     let mut graph = ModuleGraph::new();
     let spy_id = NodeId::from("spy");
@@ -190,8 +195,8 @@ fn two_source_graph(spy: DropSpy) -> ModuleGraph {
     graph.add_module(spy_id.clone(), Box::new(spy)).unwrap();
     graph.add_module(sine_id.clone(), Box::new(SineOscillator::new(440.0))).unwrap();
     graph.add_module(out_id.clone(), Box::new(AudioOut::new())).unwrap();
-    graph.connect(&spy_id, "out", &out_id, "left", 1.0).unwrap();
-    graph.connect(&sine_id, "out", &out_id, "right", 1.0).unwrap();
+    graph.connect(&spy_id, p("out"), &out_id, p("left"), 1.0).unwrap();
+    graph.connect(&sine_id, p("out"), &out_id, p("right"), 1.0).unwrap();
     graph
 }
 
@@ -206,8 +211,8 @@ fn one_source_graph() -> ModuleGraph {
     let out_id = NodeId::from("out");
     graph.add_module(sine_id.clone(), Box::new(SineOscillator::new(440.0))).unwrap();
     graph.add_module(out_id.clone(), Box::new(AudioOut::new())).unwrap();
-    graph.connect(&sine_id, "out", &out_id, "left", 1.0).unwrap();
-    graph.connect(&sine_id, "out", &out_id, "right", 1.0).unwrap();
+    graph.connect(&sine_id, p("out"), &out_id, p("left"), 1.0).unwrap();
+    graph.connect(&sine_id, p("out"), &out_id, p("right"), 1.0).unwrap();
     graph
 }
 

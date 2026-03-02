@@ -2,7 +2,7 @@ use std::process;
 use std::thread;
 use std::time::Duration;
 
-use patches_core::{ModuleGraph, NodeId};
+use patches_core::{ModuleGraph, NodeId, PortRef};
 use patches_engine::{PatchEngine, PatchEngineError};
 use patches_modules::{AudioOut, Mix, SineOscillator};
 
@@ -22,10 +22,11 @@ fn initial_graph() -> Result<ModuleGraph, Box<dyn std::error::Error>> {
     graph.add_module(osc_e4.clone(), Box::new(SineOscillator::new(FREQ_E4)))?;
     graph.add_module(mix.clone(), Box::new(Mix::new()))?;
     graph.add_module(out.clone(), Box::new(AudioOut::new()))?;
-    graph.connect(&osc_c4, "out", &mix, "a", 1.0)?;
-    graph.connect(&osc_e4, "out", &mix, "b", 1.0)?;
-    graph.connect(&mix, "out", &out, "left", 1.0)?;
-    graph.connect(&mix, "out", &out, "right", 1.0)?;
+    let p = |name| PortRef { name, index: 0 };
+    graph.connect(&osc_c4, p("out"), &mix, p("a"), 1.0)?;
+    graph.connect(&osc_e4, p("out"), &mix, p("b"), 1.0)?;
+    graph.connect(&mix, p("out"), &out, p("left"), 1.0)?;
+    graph.connect(&mix, p("out"), &out, p("right"), 1.0)?;
     Ok(graph)
 }
 
@@ -43,10 +44,11 @@ fn updated_graph() -> Result<ModuleGraph, Box<dyn std::error::Error>> {
     graph.add_module(osc_f4.clone(), Box::new(SineOscillator::new(FREQ_F4)))?;
     graph.add_module(mix.clone(), Box::new(Mix::new()))?;
     graph.add_module(out.clone(), Box::new(AudioOut::new()))?;
-    graph.connect(&osc_c4, "out", &mix, "a", 1.0)?;
-    graph.connect(&osc_f4, "out", &mix, "b", 1.0)?;
-    graph.connect(&mix, "out", &out, "left", 1.0)?;
-    graph.connect(&mix, "out", &out, "right", 1.0)?;
+    let p = |name| PortRef { name, index: 0 };
+    graph.connect(&osc_c4, p("out"), &mix, p("a"), 1.0)?;
+    graph.connect(&osc_f4, p("out"), &mix, p("b"), 1.0)?;
+    graph.connect(&mix, p("out"), &out, p("left"), 1.0)?;
+    graph.connect(&mix, p("out"), &out, p("right"), 1.0)?;
     Ok(graph)
 }
 

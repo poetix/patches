@@ -307,20 +307,23 @@ pub fn build_patch(
             .inputs
             .iter()
             .map(|port| {
-                // Find the edge that drives this input port.
+                // Find the edge that drives this input port (match on name AND index).
                 let (buf_idx, scale) = edges
                     .iter()
-                    .find(|(_, _, to, input, _)| *to == *id && input == port.name)
-                    .map(|(from, out_name, _, _, scale)| -> Result<(usize, f64), BuildError> {
+                    .find(|(_, _, _, to, in_name, in_idx, _)| {
+                        *to == *id && in_name == port.name && *in_idx == port.index
+                    })
+                    .map(|(from, out_name, out_idx, _, _, _, scale)| -> Result<(usize, f64), BuildError> {
                         // Resolve the driving output's buffer index.
                         let from_desc = &meta[from].descriptor;
                         let out_port_idx = from_desc
                             .outputs
                             .iter()
-                            .position(|p| p.name == out_name)
+                            .position(|p| p.name == out_name && p.index == *out_idx)
                             .ok_or_else(|| {
                                 BuildError::InternalError(format!(
-                                    "output port {out_name:?} not found on node {from:?}"
+                                    "output port {:?}/{} not found on node {from:?}",
+                                    out_name, out_idx
                                 ))
                             })?;
                         Ok((output_buf[&(from.clone(), out_port_idx)], *scale))
@@ -383,8 +386,12 @@ pub fn build_patch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use patches_core::NodeId;
+    use patches_core::{NodeId, PortRef};
     use patches_modules::{AudioOut, SineOscillator};
+
+    fn p(name: &'static str) -> PortRef {
+        PortRef { name, index: 0 }
+    }
 
     fn sine_to_audio_out_graph() -> (ModuleGraph, NodeId, NodeId) {
         let mut graph = ModuleGraph::new();
@@ -392,8 +399,8 @@ mod tests {
         let out_id = NodeId::from("b_out");
         graph.add_module(sine_id.clone(), Box::new(SineOscillator::new(440.0))).unwrap();
         graph.add_module(out_id.clone(), Box::new(AudioOut::new())).unwrap();
-        graph.connect(&sine_id, "out", &out_id, "left", 1.0).unwrap();
-        graph.connect(&sine_id, "out", &out_id, "right", 1.0).unwrap();
+        graph.connect(&sine_id, p("out"), &out_id, p("left"), 1.0).unwrap();
+        graph.connect(&sine_id, p("out"), &out_id, p("right"), 1.0).unwrap();
         (graph, sine_id, out_id)
     }
 
@@ -488,10 +495,10 @@ mod tests {
         graph.add_module(sine_id.clone(), Box::new(SineOscillator::new(440.0))).unwrap();
         graph.add_module(out1.clone(), Box::new(AudioOut::new())).unwrap();
         graph.add_module(out2.clone(), Box::new(AudioOut::new())).unwrap();
-        graph.connect(&sine_id, "out", &out1, "left", 1.0).unwrap();
-        graph.connect(&sine_id, "out", &out1, "right", 1.0).unwrap();
-        graph.connect(&sine_id, "out", &out2, "left", 1.0).unwrap();
-        graph.connect(&sine_id, "out", &out2, "right", 1.0).unwrap();
+        graph.connect(&sine_id, p("out"), &out1, p("left"), 1.0).unwrap();
+        graph.connect(&sine_id, p("out"), &out1, p("right"), 1.0).unwrap();
+        graph.connect(&sine_id, p("out"), &out2, p("left"), 1.0).unwrap();
+        graph.connect(&sine_id, p("out"), &out2, p("right"), 1.0).unwrap();
         assert!(matches!(
             build_patch(graph, None, &BufferAllocState::default(), 256),
             Err(BuildError::MultipleAudioOut)
@@ -507,16 +514,16 @@ mod tests {
         graph_half.add_module("out", Box::new(patches_modules::AudioOut::new())).unwrap();
         let sine_h = NodeId::from("sine");
         let out_h = NodeId::from("out");
-        graph_half.connect(&sine_h, "out", &out_h, "left", 0.5).unwrap();
-        graph_half.connect(&sine_h, "out", &out_h, "right", 0.5).unwrap();
+        graph_half.connect(&sine_h, p("out"), &out_h, p("left"), 0.5).unwrap();
+        graph_half.connect(&sine_h, p("out"), &out_h, p("right"), 0.5).unwrap();
 
         let mut graph_full = ModuleGraph::new();
         graph_full.add_module("sine", Box::new(SineOscillator::new(440.0))).unwrap();
         graph_full.add_module("out", Box::new(patches_modules::AudioOut::new())).unwrap();
         let sine_f = NodeId::from("sine");
         let out_f = NodeId::from("out");
-        graph_full.connect(&sine_f, "out", &out_f, "left", 1.0).unwrap();
-        graph_full.connect(&sine_f, "out", &out_f, "right", 1.0).unwrap();
+        graph_full.connect(&sine_f, p("out"), &out_f, p("left"), 1.0).unwrap();
+        graph_full.connect(&sine_f, p("out"), &out_f, p("right"), 1.0).unwrap();
 
         let env = patches_core::AudioEnvironment { sample_rate: 44100.0 };
         let (mut plan_half, _) = build_patch(graph_half, None, &BufferAllocState::default(), 256).unwrap();
@@ -563,8 +570,8 @@ mod tests {
         let sine_a = NodeId::from("sine_a");
         let sine_b = NodeId::from("sine_b");
         let out_a = NodeId::from("out");
-        graph_a.connect(&sine_a, "out", &out_a, "left", 1.0).unwrap();
-        graph_a.connect(&sine_b, "out", &out_a, "right", 1.0).unwrap();
+        graph_a.connect(&sine_a, p("out"), &out_a, p("left"), 1.0).unwrap();
+        graph_a.connect(&sine_b, p("out"), &out_a, p("right"), 1.0).unwrap();
 
         let (_plan_a, alloc_a) = build_patch(graph_a, None, &alloc0, pool_capacity).unwrap();
 
@@ -577,8 +584,8 @@ mod tests {
         graph_b.add_module("out", Box::new(AudioOut::new())).unwrap();
         let sine_a_b = NodeId::from("sine_a");
         let out_b = NodeId::from("out");
-        graph_b.connect(&sine_a_b, "out", &out_b, "left", 1.0).unwrap();
-        graph_b.connect(&sine_a_b, "out", &out_b, "right", 1.0).unwrap();
+        graph_b.connect(&sine_a_b, p("out"), &out_b, p("left"), 1.0).unwrap();
+        graph_b.connect(&sine_a_b, p("out"), &out_b, p("right"), 1.0).unwrap();
 
         let (plan_b, alloc_b) = build_patch(graph_b, None, &alloc_a, pool_capacity).unwrap();
 
@@ -617,8 +624,8 @@ mod tests {
             g.add_module(s1.clone(), Box::new(SineOscillator::new(440.0))).unwrap();
             g.add_module(s2.clone(), Box::new(SineOscillator::new(880.0))).unwrap();
             g.add_module(out.clone(), Box::new(AudioOut::new())).unwrap();
-            g.connect(&s1, "out", &out, "left", 1.0).unwrap();
-            g.connect(&s2, "out", &out, "right", 1.0).unwrap();
+            g.connect(&s1, p("out"), &out, p("left"), 1.0).unwrap();
+            g.connect(&s2, p("out"), &out, p("right"), 1.0).unwrap();
             build_patch(g, None, alloc, pool_capacity).unwrap().1
         };
 
@@ -628,8 +635,8 @@ mod tests {
             let out = NodeId::from("out");
             g.add_module(s.clone(), Box::new(SineOscillator::new(440.0))).unwrap();
             g.add_module(out.clone(), Box::new(AudioOut::new())).unwrap();
-            g.connect(&s, "out", &out, "left", 1.0).unwrap();
-            g.connect(&s, "out", &out, "right", 1.0).unwrap();
+            g.connect(&s, p("out"), &out, p("left"), 1.0).unwrap();
+            g.connect(&s, p("out"), &out, p("right"), 1.0).unwrap();
             build_patch(g, None, alloc, pool_capacity).unwrap().1
         };
 
@@ -658,8 +665,8 @@ mod tests {
         let out = NodeId::from("out");
         graph.add_module(sine.clone(), Box::new(SineOscillator::new(440.0))).unwrap();
         graph.add_module(out.clone(), Box::new(AudioOut::new())).unwrap();
-        graph.connect(&sine, "out", &out, "left", 1.0).unwrap();
-        graph.connect(&sine, "out", &out, "right", 1.0).unwrap();
+        graph.connect(&sine, p("out"), &out, p("left"), 1.0).unwrap();
+        graph.connect(&sine, p("out"), &out, p("right"), 1.0).unwrap();
 
         // capacity=1 means only the zero slot exists; any allocation will fail.
         assert!(matches!(

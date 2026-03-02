@@ -2,7 +2,7 @@ use std::process;
 use std::thread;
 use std::time::Duration;
 
-use patches_core::{ModuleGraph, NodeId};
+use patches_core::{ModuleGraph, NodeId, PortRef};
 use patches_engine::{build_patch, BufferAllocState, SoundEngine};
 use patches_modules::{AudioOut, Mix, SineOscillator};
 
@@ -20,10 +20,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     graph.add_module(sine_b.clone(), Box::new(SineOscillator::new(FREQ_CS5)))?;
     graph.add_module(mix.clone(), Box::new(Mix::new()))?;
     graph.add_module(out.clone(), Box::new(AudioOut::new()))?;
-    graph.connect(&sine_a, "out", &mix, "a", 1.0)?;
-    graph.connect(&sine_b, "out", &mix, "b", 1.0)?;
-    graph.connect(&mix, "out", &out, "left", 1.0)?;
-    graph.connect(&mix, "out", &out, "right", 1.0)?;
+    let p = |name| PortRef { name, index: 0 };
+    graph.connect(&sine_a, p("out"), &mix, p("a"), 1.0)?;
+    graph.connect(&sine_b, p("out"), &mix, p("b"), 1.0)?;
+    graph.connect(&mix, p("out"), &out, p("left"), 1.0)?;
+    graph.connect(&mix, p("out"), &out, p("right"), 1.0)?;
 
     let (plan, _) = build_patch(graph, None, &BufferAllocState::default(), 4096)?;
 

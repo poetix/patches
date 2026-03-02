@@ -1,10 +1,27 @@
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Describes a single port on a module by name.
+/// Describes a single port on a module by name and index.
+///
+/// The `index` field is the user-visible number in a multi-port group (e.g.
+/// `in/2` has `name = "in"` and `index = 2`). For modules with a single port
+/// of a given name, `index` is `0`. The position of a `PortDescriptor` in
+/// `ModuleDescriptor::inputs` / `outputs` determines the slice offset passed to
+/// `Module::process`; `index` is semantically distinct from that position.
 #[derive(Debug, Clone)]
 pub struct PortDescriptor {
     pub name: &'static str,
+    pub index: u32,
+}
+
+/// A reference to a named, indexed port used in `ModuleGraph::connect()`.
+///
+/// Port names are always `&'static str` (defined by module implementations at
+/// compile time), so producing a `PortRef` never allocates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PortRef {
+    pub name: &'static str,
+    pub index: u32,
 }
 
 /// Describes the full port layout of a module.
@@ -106,17 +123,18 @@ mod tests {
 
     #[test]
     fn port_descriptor_fields() {
-        let p = PortDescriptor { name: "freq" };
+        let p = PortDescriptor { name: "freq", index: 0 };
         assert_eq!(p.name, "freq");
+        assert_eq!(p.index, 0);
     }
 
     #[test]
     fn module_descriptor_port_counts() {
         let desc = ModuleDescriptor {
-            inputs: vec![PortDescriptor { name: "in" }],
+            inputs: vec![PortDescriptor { name: "in", index: 0 }],
             outputs: vec![
-                PortDescriptor { name: "out_l" },
-                PortDescriptor { name: "out_r" },
+                PortDescriptor { name: "out_l", index: 0 },
+                PortDescriptor { name: "out_r", index: 0 },
             ],
         };
         assert_eq!(desc.inputs.len(), 1);

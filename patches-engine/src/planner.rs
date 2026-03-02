@@ -216,20 +216,24 @@ impl PatchEngine {
 
 #[cfg(test)]
 mod tests {
-    use patches_core::{InstanceId, Module, ModuleDescriptor, ModuleGraph, NodeId, PortDescriptor};
+    use patches_core::{InstanceId, Module, ModuleDescriptor, ModuleGraph, NodeId, PortDescriptor, PortRef};
     use patches_modules::{AudioOut, SineOscillator};
 
     use super::*;
 
     /// Build a simple valid graph: one SineOscillator connected to an AudioOut.
+    fn p(name: &'static str) -> PortRef {
+        PortRef { name, index: 0 }
+    }
+
     fn simple_graph(freq: f64) -> ModuleGraph {
         let mut graph = ModuleGraph::new();
         let osc = NodeId::from("osc");
         let out = NodeId::from("out");
         graph.add_module(osc.clone(), Box::new(SineOscillator::new(freq))).unwrap();
         graph.add_module(out.clone(), Box::new(AudioOut::new())).unwrap();
-        graph.connect(&osc, "out", &out, "left", 1.0).unwrap();
-        graph.connect(&osc, "out", &out, "right", 1.0).unwrap();
+        graph.connect(&osc, p("out"), &out, p("left"), 1.0).unwrap();
+        graph.connect(&osc, p("out"), &out, p("right"), 1.0).unwrap();
         graph
     }
 
@@ -252,7 +256,7 @@ mod tests {
                 instance_id: id,
                 descriptor: ModuleDescriptor {
                     inputs: vec![],
-                    outputs: vec![PortDescriptor { name: "out" }],
+                    outputs: vec![PortDescriptor { name: "out", index: 0 }],
                 },
                 count: 0,
             }
@@ -287,8 +291,8 @@ mod tests {
         let out = NodeId::from("out");
         graph.add_module(c.clone(), Box::new(counter)).unwrap();
         graph.add_module(out.clone(), Box::new(AudioOut::new())).unwrap();
-        graph.connect(&c, "out", &out, "left", 1.0).unwrap();
-        graph.connect(&c, "out", &out, "right", 1.0).unwrap();
+        graph.connect(&c, p("out"), &out, p("left"), 1.0).unwrap();
+        graph.connect(&c, p("out"), &out, p("right"), 1.0).unwrap();
         (graph, id)
     }
 
@@ -319,8 +323,8 @@ mod tests {
         let out = NodeId::from("out");
         graph_b.add_module(c.clone(), Box::new(placeholder)).unwrap();
         graph_b.add_module(out.clone(), Box::new(AudioOut::new())).unwrap();
-        graph_b.connect(&c, "out", &out, "left", 1.0).unwrap();
-        graph_b.connect(&c, "out", &out, "right", 1.0).unwrap();
+        graph_b.connect(&c, p("out"), &out, p("left"), 1.0).unwrap();
+        graph_b.connect(&c, p("out"), &out, p("right"), 1.0).unwrap();
 
         let mut plan_b = planner.build(graph_b, Some(plan_a)).unwrap();
         let mut pool_b = make_pool(256);

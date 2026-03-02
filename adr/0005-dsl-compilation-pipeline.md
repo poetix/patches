@@ -19,18 +19,20 @@ with an optional scale factor. The DSL must ultimately produce a `ModuleGraph`.
 
 ## Decision
 
+### Compilation pipeline
+
 The DSL is compiled in three distinct stages:
 
 ```
 .patches source text
     │
-    ▼  Stage 1 — PEG parser
+    ▼  Stage 1 — PEG parser  (patches-dsl)
  AST  (preserves spans for error messages; no semantic analysis yet)
     │
-    ▼  Stage 2 — Expander
+    ▼  Stage 2 — Expander  (patches-dsl)
  Flat AST  (templates inlined, poly voices duplicated; only concrete instances remain)
     │
-    ▼  Stage 3 — Graph builder
+    ▼  Stage 3 — Graph builder  (patches-interpreter)
  ModuleGraph  (existing IR, unchanged)
 ```
 
@@ -52,62 +54,139 @@ both of which eliminate high-level constructs before the graph is built:
 
 - *Poly expansion.* Each `module voices[N] : T { ... }` declaration is
   expanded into N declarations: `voices_0 : T`, …, `voices_{N-1} : T`, each
-  fully expanded if `T` is a template. Edges that use `[*]` index syntax are
+  fully expanded if `T` is a template. Edges using `[*]` index syntax are
   expanded: `a[*] -> b[*]` (zip) becomes N individual edges; `mono -> b[*]`
-  (broadcast) becomes N edges from the same source; `a[*] -> sink` (collect)
-  becomes N edges to N ports on the destination.
+  (broadcast) becomes N edges from the same source. Fan-in from poly to a
+  single module requires an explicit mix module in the source — no implicit
+  fan-in sugar on first pass.
 
 After Stage 2 the flat AST contains only concrete module declarations (a type
 name, a `NodeId`, and an init-param map) and concrete edge declarations (two
-fully-resolved `(NodeId, port-name)` pairs and an optional scale factor). There
-are no templates or poly indices.
+fully-resolved `(NodeId, port-name, port-index)` triples and an optional scale
+factor). There are no templates or poly indices.
 
 **Stage 3 — Graph builder.**  The graph builder iterates the flat AST and
 populates a `ModuleGraph` using a *module factory registry* — a map from type
 name strings to factory closures `fn(&ParamMap) -> Result<Box<dyn Module>>`.
 Module factories receive the init-param map from the DSL and return a
-constructed module. Edges are added via `ModuleGraph::connect`. Port names are
-validated against the module's `ModuleDescriptor` at this stage.
+constructed module, whose `descriptor()` reflects the init params (including
+any factory-configured port counts). Edges are added via `ModuleGraph::connect`.
+Port labels, indices, and init-param keys are validated against the module's
+`ModuleDescriptor` and init-param schema at this stage. Error messages carry
+source spans from Stage 1.
 
-**Crate structure.**  The DSL lives in a new `patches-dsl` crate that depends
-on `patches-core` only (no audio-backend or CPAL dependencies). The module
-factory registry is populated by `patches-engine`, which registers the concrete
-module types from `patches-modules`. This keeps `patches-dsl` free of hardware
-dependencies and fully testable in isolation.
+### Crate structure
+
+```
+patches-core        Core types, Module trait, ModuleGraph, ExecutionPlan
+patches-modules     Module implementations (oscillators, filters, etc.)
+patches-dsl         PEG grammar, AST types, template expander — no module knowledge
+patches-interpreter Module factory registry; AST → ModuleGraph validation and build
+patches-runtime     File-watching, reload orchestration, wires interpreter to engine
+patches-engine      Planning, buffer allocation, audio execution — no DSL knowledge
+```
+
+`patches-dsl` depends only on `patches-core` (for AST value types). It has no
+knowledge of any concrete module type and no audio-backend dependencies.
+`patches-interpreter` depends on `patches-core`, `patches-dsl`, and
+`patches-modules`. `patches-runtime` depends on `patches-interpreter` and
+`patches-engine`; it is the only crate that knows about both sides.
+`patches-engine` has no dependency on `patches-dsl` or `patches-interpreter`.
+
+### ModuleDescriptor init-param schema
+
+`ModuleDescriptor` gains a list of `ParamDescriptor` entries, each declaring a
+parameter name and type (`scalar`, `array`, `table`). This allows
+`patches-interpreter` to validate the DSL init-param map against the schema
+before calling the factory, and to report errors with field-level granularity.
+
+### Port identity: label + index
+
+`PortDescriptor` currently carries only a `name: &'static str`. It is extended
+to carry an `index: usize` alongside the label:
+
+```
+PortDescriptor { label: &'static str, index: usize }
+```
+
+For modules with a fixed, compile-time-known port count, all ports have
+`index: 0` and are distinguished by distinct labels (`"freq"`, `"gate"`,
+`"out"`). For modules with a factory-configured port count — such as a mixer
+whose channel count is an init param — the factory produces multiple
+`PortDescriptor` entries sharing the same label and differing only by index:
+`("in", 0)`, `("in", 1)`, …, `("in", N-1)`.
+
+In the DSL, `mix.in[2]` addresses label `"in"` at index `2`. In the flat AST
+(and in `ModuleGraph` edge records), a port is identified by the pair
+`(label, index)`. The `ModuleGraph` API and `ExecutionPlan` are updated to use
+this pair in place of a bare string.
+
+### Signal scale factor
+
+The scale field on edges is relaxed from `[-1.0, 1.0]` to any finite `f64`.
+Values outside `[-1.0, 1.0]` represent amplification; the caller is
+responsible for ensuring the signal remains in a meaningful range. The
+`ModuleGraph::connect` validation is updated accordingly.
+
+### Factory-configured ports and internal polyphony
+
+Because the factory receives init params before returning a module, the
+resulting module's `descriptor()` can reflect those params — both port count
+and port layout. This enables two things:
+
+1. *Modules with variable port counts*, such as `Mixer { channels: N }` which
+   exposes `N` input channel groups (`("in", 0..N)`, `("pan", 0..N)`,
+   `("level", 0..N)`) and two outputs (`("out_l", 0)`, `("out_r", 0)`). The
+   DSL author wires individual voices to `mix.in[0]`, `mix.in[1]`, etc. The
+   module is a single instance in `ModuleGraph`.
+
+2. *Internally polyphonic modules*, where a single module instance manages N
+   voices in its own `process` implementation. Such a module declares `N`
+   indexed input sets and handles voice allocation internally. This is an
+   alternative to DSL-level poly expansion for modules where the internal
+   structure is tightly coupled (e.g. a reverb with shared diffusion network
+   across voices).
+
+Neither of these requires any change to the audio thread, execution plan, or
+buffer pool: the flat graph still contains a single node with a fixed (though
+factory-determined) port count, and the `Module` trait is unchanged.
 
 ## Consequences
 
-**`ModuleGraph` is unchanged.** The runtime IR has no knowledge of templates or
-polyphony; it only ever contains concrete module instances. All existing
-planner, buffer-pool, and execution-plan logic continues to work without
-modification.
+**`ModuleGraph` and the `Module` trait are largely unchanged.** The runtime IR
+has no knowledge of templates or polyphony. `PortDescriptor` gains an `index`
+field and edge records gain a port index; these are contained changes.
 
 **Templates are a compile-time construct only.** There is no runtime notion of
-a "template instance". Hot-reload re-runs the full three-stage pipeline and
-produces a new `ModuleGraph`. Module state is preserved across reloads via the
-existing `InstanceId`-based registry mechanism (ADR 0003), which requires that
-the `NodeId`s produced by template expansion are stable across reloads for
-unchanged modules — the namespacing scheme (`foo/osc`) provides this as long as
-the patch source uses stable module names.
+a "template instance". Hot-reload re-runs the full three-stage pipeline.
+Module state is preserved across reloads via the `InstanceId`-based registry
+mechanism (ADR 0003); the `foo/osc` namespacing scheme provides stable
+`NodeId`s as long as the patch source uses stable module names.
 
-**Poly voices are independent mono modules.** The audio thread, execution plan,
-and buffer pool have no notion of polyphony. Each voice is a set of ordinary
-module instances. Adding or removing voices requires a full re-plan; there is no
-partial hot-swap of voice count.
+**Poly voices expanded by the DSL are independent mono modules.** The audio
+thread, execution plan, and buffer pool have no notion of polyphony. Adding or
+removing voices requires a full re-plan.
 
-**Factory registry is the extension point for new module types.** Adding a new
+**Modules may alternatively implement polyphony internally.** A module with
+factory-configured `N`-indexed input groups is indistinguishable from any other
+module at the graph level. This is appropriate when internal coupling makes
+per-voice cloning inefficient or incorrect.
+
+**Fan-in of poly voices requires an explicit mix module.** There is no implicit
+reduction syntax on first pass. This keeps the language unambiguous; mixing
+semantics (sum, average, max) are explicit.
+
+**Factory registry is the extension point for new module types.**  Adding a new
 module type requires implementing `Module`, registering a factory closure, and
-documenting the init-param names and types. The DSL parser requires no changes.
+declaring a `ParamDescriptor` schema. The DSL parser requires no changes.
 
 **Init params are not signal ports.** Values in a module's `{ key: value }`
-block are passed to the factory at graph-build time. They cannot change at
-audio rate or be driven by other modules' outputs. Modules that need runtime
-variation expose a signal input port instead.
+block are passed to the factory at graph-build time; they cannot change at
+audio rate. Modules that need runtime variation expose a signal input port.
 
-**Error reporting spans Stage 1 and Stage 3.** The parser records source spans
-in the AST so that Stage 3 validation errors (unknown module type, bad port
-name, scale out of range) can be reported with line-and-column context from the
-original source.
+**`patches-engine` has no DSL dependency.** It receives a `ModuleGraph` from
+`patches-runtime` and knows nothing about how that graph was produced.
+`patches-dsl` similarly has no knowledge of concrete module types.
 
 ## Alternatives considered
 
@@ -117,14 +196,19 @@ the planner, and the execution plan. Rejected: the expander approach keeps all
 complexity in the DSL layer and leaves the runtime IR simple.
 
 **Compile directly to `ModuleGraph` in a single pass.** Eliminating the
-intermediate flat AST would make it harder to validate poly expansion (you need
-to know all N instances before wiring them) and would tangle parsing, expansion,
-and validation. The three-stage separation makes each stage testable in
-isolation.
+intermediate flat AST would tangle parsing, expansion, and validation, and
+would make poly expansion harder to validate (you need all N instances resolved
+before wiring). Rejected in favour of the three-stage separation, where each
+stage is independently testable.
 
-**Represent polyphony in the execution engine.** A dedicated poly-aware executor
-could run N voices with a single module descriptor. Rejected for now: it would
-require significant changes to the `Module` trait, buffer layout, and execution
-plan, and the benefits (cache locality, simpler voice management) can be pursued
-later as a contained optimisation without changing the DSL or the `ModuleGraph`
-IR.
+**Implicit fan-in sugar (`a[*] -> b.in` reduces to a mix automatically).**
+Deferred: the mixing semantics (sum vs average vs something else) would need to
+be specified, and the implicit mix node would appear in error messages without
+a user-visible name. An explicit `Mixer` module is unambiguous. Sugar can be
+added once there is practical experience with the verbose form.
+
+**Represent polyphony only in the execution engine.**  A poly-aware executor
+could run N voices with a single descriptor. Rejected for now: it would require
+significant changes to the `Module` trait, buffer layout, and execution plan.
+The factory-configured port approach achieves the same efficiency for tightly-
+coupled modules without touching the runtime.

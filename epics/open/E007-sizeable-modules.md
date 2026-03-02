@@ -1,9 +1,8 @@
 ---
-id: "0039"
-epic: "E007"
+id: "E007"
 title: Sizeable modules (indexed ports)
-priority: high
 created: 2026-03-02
+tickets: ["0035", "0036"]
 ---
 
 ## Summary
@@ -24,19 +23,19 @@ Indexed ports unlock a class of natively *poly* or *scalable* modules:
 - **Poly oscillators / filters** — a single graph node with N voice ports,
   enabling polyphonic patches without graph duplication.
 
-## Scope
-
-| Ticket | Title |
-|--------|-------|
-| 0035   | Add `PortRef` type and `PortDescriptor.index`; update graph and builder |
-| 0036   | Add `Sum` module; remove `Mix` |
-
 ## Acceptance criteria
 
-- [ ] All tickets in scope closed.
+- [ ] All tickets closed.
 - [ ] `cargo clippy` clean, `cargo test` green across the workspace.
 - [ ] No existing module's external behaviour changes (only call-site syntax at
       `connect()` changes; processing semantics are identical).
+
+## Tickets
+
+| ID   | Title                                                        | Priority |
+|------|--------------------------------------------------------------|----------|
+| 0035 | Add `PortRef` type and `PortDescriptor.index`; update graph and builder | high |
+| 0036 | Add `Sum` module; remove `Mix`                               | high     |
 
 ## Notes
 

@@ -1,9 +1,8 @@
 ---
-id: "0040"
-epic: "E008"
+id: "E008"
 title: Control-rate signalling
-priority: high
 created: 2026-03-02
+tickets: ["0037", "0038", "0041"]
 ---
 
 ## Summary
@@ -23,22 +22,22 @@ sample processing — the callback computes how many samples to the next control
 (or end of the CPAL buffer, whichever is smaller), runs that many samples in a
 tight inner loop, distributes signals, and repeats.
 
-## Scope
-
-| Ticket | Title |
-|--------|-------|
-| 0037   | Add `ControlSignal` enum and `Module::receive_signal` |
-| 0038   | Engine-level signal distribution with chunked control rate |
-| 0041   | Example: frequency sweep via control signals |
-
 ## Acceptance criteria
 
-- [ ] All tickets in scope closed.
+- [ ] All tickets closed.
 - [ ] `cargo clippy` clean, `cargo test` green across the workspace.
 - [ ] The audio thread acquires no locks and performs no heap allocation in the
       signal-distribution path.
 - [ ] The frequency-sweep example compiles and runs, demonstrating audible pitch
       change driven purely by `send_signal` calls from the control thread.
+
+## Tickets
+
+| ID   | Title                                                   | Priority |
+|------|---------------------------------------------------------|----------|
+| 0037 | Add `ControlSignal` enum and `Module::receive_signal`   | high     |
+| 0038 | Engine-level signal distribution with chunked control rate | high  |
+| 0041 | Example: frequency sweep via control signals            | medium   |
 
 ## Notes
 

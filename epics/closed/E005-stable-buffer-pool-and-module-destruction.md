@@ -2,13 +2,14 @@
 id: "E005"
 title: Stable buffer pool and module destruction
 created: 2026-03-01
+closed: 2026-03-02
 tickets: ["0024", "0025", "0026", "0028"]
 ---
 
 ## Summary
 
-Re-planning (hot-reload) currently zeroes all cable buffers because `ExecutionPlan`
-owns them and each build creates a fresh allocation. This causes a 1-sample
+Re-planning (hot-reload) previously zeroed all cable buffers because `ExecutionPlan`
+owned them and each build created a fresh allocation. This caused a 1-sample
 discontinuity per graph hop on every re-plan. For audio-rate cables the discontinuity
 is inaudible, but CV cables (slow-moving control signals modulating filter cutoffs,
 VCA gain, etc.) may produce an audible click.
@@ -19,27 +20,26 @@ requires the buffer pool to outlive any single plan — living in `SoundEngine`
 rather than inside `ExecutionPlan` — combined with a stable index-allocation
 scheme so that unchanged cables always map to the same pool slot across re-plans.
 
-This epic also introduces structured module destruction: modules removed from the
-graph are tombstoned by the planner and their `destroy()` method is called on a
-cleanup thread, giving them a hook for releasing resources that cannot safely run
-on the audio thread.
+T-0026 (module tombstoning and a `Module::destroy` hook) was investigated and
+closed as won't-implement. Analysis showed that removed modules always drop on
+the control thread via `Drop`, which is sufficient. See
+`adr/0007-no-module-destroy-hook.md` for the full reasoning.
 
 ## Acceptance criteria
 
-- [ ] All four tickets closed
-- [ ] `cargo build`, `cargo test`, `cargo clippy` all clean
-- [ ] Re-planning with an unchanged cable produces no zeroing of that cable's buffer
-- [ ] Re-planning with a new cable starts that cable from zero
-- [ ] Removed modules have `destroy()` called asynchronously after plan swap
+- [x] All four tickets resolved (T-0024, T-0025, T-0028 implemented; T-0026 won't-implement)
+- [x] `cargo build`, `cargo test`, `cargo clippy` all clean
+- [x] Re-planning with an unchanged cable produces no zeroing of that cable's buffer
+- [x] Re-planning with a new cable starts that cable from zero
 
 ## Tickets
 
-| ID   | Title                                         | Priority |
-|------|-----------------------------------------------|----------|
-| 0024 | Externalize buffer pool from ExecutionPlan    | high     |
-| 0025 | Stable buffer index allocation                | high     |
-| 0026 | Module::destroy and tombstoning               | medium   |
-| 0028 | Caller-assigned string NodeIds                | high     |
+| ID   | Title                                         | Priority | Outcome         |
+|------|-----------------------------------------------|----------|-----------------|
+| 0024 | Externalize buffer pool from ExecutionPlan    | high     | implemented     |
+| 0025 | Stable buffer index allocation                | high     | implemented     |
+| 0026 | Module::destroy and tombstoning               | medium   | won't-implement |
+| 0028 | Caller-assigned string NodeIds                | high     | implemented     |
 
 ## Architecture introduced
 
@@ -90,21 +90,16 @@ Zeroing happens at *release time* (when a connection is removed) rather than at
 *acquisition time* (when a slot is recycled), so slots are clean even if they sit
 in the freelist across multiple re-plans before being reused.
 
-### Module tombstoning and destroy()
+### Module destruction (won't-implement)
 
-`Module` trait gains `fn destroy(&mut self) {}` with a default no-op.
-
-`build_patch` returns the set of `InstanceId`s from the previous registry that
-were not claimed by any module in the new graph (i.e. modules that have been
-removed). `PatchEngine::update` removes these from the held plan immediately and
-schedules `destroy()` on a cleanup thread — after the audio thread has accepted
-the new plan — giving removed modules a safe place to release resources that
-cannot run on the audio thread (e.g. dropping large allocations, closing file
-handles).
+`Module::destroy` and a cleanup thread were not added. Removed modules are always
+extracted from the held plan (control thread) and drop there via `Drop`, which is
+safe and sufficient. See `adr/0007-no-module-destroy-hook.md`.
 
 ## Notes
 
-Trade-offs are documented in `adr/0004-stable-buffer-pool-and-module-lifecycle.md`.
+Trade-offs are documented in `adr/0004-stable-buffer-pool-and-module-lifecycle.md`
+and `adr/0007-no-module-destroy-hook.md`.
 
 **No new external crates.** All changes are within existing crates.
 

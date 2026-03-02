@@ -1,4 +1,4 @@
-use patches_core::ModuleGraph;
+use patches_core::{ControlSignal, InstanceId, ModuleGraph};
 
 use crate::builder::{build_patch, BufferAllocState, BuildError, ExecutionPlan};
 use crate::engine::{EngineError, SoundEngine};
@@ -9,6 +9,11 @@ use crate::engine::{EngineError, SoundEngine};
 /// than sufficient for all expected patch sizes. Each slot is 16 bytes
 /// (`[f64; 2]`), so the pool is 64 KiB.
 const DEFAULT_POOL_CAPACITY: usize = 4096;
+
+/// Default number of audio samples between control-rate ticks.
+///
+/// At 48 kHz this gives a control rate of 750 Hz (~1.3 ms per tick).
+const DEFAULT_CONTROL_PERIOD: usize = 64;
 
 /// Converts a [`ModuleGraph`] into an [`ExecutionPlan`] with stable buffer allocation.
 ///
@@ -163,13 +168,24 @@ impl From<EngineError> for PatchEngineError {
 impl PatchEngine {
     /// Create a `PatchEngine` from an initial graph.
     ///
-    /// Builds the first plan and constructs the underlying [`SoundEngine`], but
-    /// does not open the audio device. Call [`start`](Self::start) to begin
-    /// playback.
+    /// Builds the first plan and constructs the underlying [`SoundEngine`]
+    /// with the default control period (64 samples), but does not open the
+    /// audio device. Call [`start`](Self::start) to begin playback.
     pub fn new(graph: ModuleGraph) -> Result<Self, PatchEngineError> {
+        Self::with_control_period(graph, DEFAULT_CONTROL_PERIOD)
+    }
+
+    /// Create a `PatchEngine` from an initial graph with a specific control period.
+    ///
+    /// `control_period` is the number of audio samples between control-rate
+    /// ticks (signal dispatch). Must be greater than zero.
+    pub fn with_control_period(
+        graph: ModuleGraph,
+        control_period: usize,
+    ) -> Result<Self, PatchEngineError> {
         let mut planner = Planner::with_capacity(DEFAULT_POOL_CAPACITY);
         let plan = planner.build(graph, None)?;
-        let engine = SoundEngine::new(plan, DEFAULT_POOL_CAPACITY)?;
+        let engine = SoundEngine::new(plan, DEFAULT_POOL_CAPACITY, control_period)?;
         Ok(Self {
             planner,
             engine,
@@ -208,6 +224,18 @@ impl PatchEngine {
         }
     }
 
+    /// Enqueue a [`ControlSignal`] for delivery to the module identified by `id`.
+    ///
+    /// Delegates to [`SoundEngine::send_signal`]. Returns `Err(signal)` if the
+    /// ring buffer is full; the caller may drop or retry.
+    pub fn send_signal(
+        &mut self,
+        id: InstanceId,
+        signal: ControlSignal,
+    ) -> Result<(), ControlSignal> {
+        self.engine.send_signal(id, signal)
+    }
+
     /// Stop audio processing and close the device.
     pub fn stop(&mut self) {
         self.engine.stop();
@@ -216,7 +244,10 @@ impl PatchEngine {
 
 #[cfg(test)]
 mod tests {
-    use patches_core::{InstanceId, Module, ModuleDescriptor, ModuleGraph, NodeId, PortDescriptor, PortRef};
+    use patches_core::{
+        ControlSignal, InstanceId, Module, ModuleDescriptor, ModuleGraph, NodeId, PortDescriptor,
+        PortRef,
+    };
     use patches_modules::{AudioOut, SineOscillator};
 
     use super::*;
@@ -369,6 +400,159 @@ mod tests {
     fn planner_build_fails_for_empty_graph() {
         let mut planner = Planner::new();
         assert!(planner.build(ModuleGraph::new(), None).is_err());
+    }
+
+    // ── Signal dispatch tests (T-0038) ────────────────────────────────────────
+
+    /// A module stub that records every ControlSignal it receives.
+    struct SignalReceiver {
+        instance_id: InstanceId,
+        descriptor: ModuleDescriptor,
+        pub received: Vec<ControlSignal>,
+    }
+
+    impl SignalReceiver {
+        fn new() -> Self {
+            Self {
+                instance_id: InstanceId::next(),
+                descriptor: ModuleDescriptor {
+                    inputs: vec![],
+                    outputs: vec![PortDescriptor { name: "out", index: 0 }],
+                },
+                received: Vec::new(),
+            }
+        }
+    }
+
+    impl Module for SignalReceiver {
+        fn descriptor(&self) -> &ModuleDescriptor {
+            &self.descriptor
+        }
+        fn instance_id(&self) -> InstanceId {
+            self.instance_id
+        }
+        fn process(&mut self, _inputs: &[f64], outputs: &mut [f64]) {
+            outputs[0] = 0.0;
+        }
+        fn receive_signal(&mut self, signal: ControlSignal) {
+            self.received.push(signal);
+        }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    fn receiver_graph() -> (ModuleGraph, InstanceId) {
+        let receiver = SignalReceiver::new();
+        let id = receiver.instance_id();
+        let mut graph = ModuleGraph::new();
+        graph.add_module(NodeId::from("recv"), Box::new(receiver)).unwrap();
+        graph.add_module(NodeId::from("out"), Box::new(AudioOut::new())).unwrap();
+        graph
+            .connect(&NodeId::from("recv"), p("out"), &NodeId::from("out"), p("left"), 1.0)
+            .unwrap();
+        graph
+            .connect(&NodeId::from("recv"), p("out"), &NodeId::from("out"), p("right"), 1.0)
+            .unwrap();
+        (graph, id)
+    }
+
+    /// Helper: find the SignalReceiver slot in a plan and call receive_signal on it.
+    fn dispatch_signal(plan: &mut crate::builder::ExecutionPlan, id: InstanceId, signal: ControlSignal) -> bool {
+        match plan.signal_dispatch.binary_search_by_key(&id, |(k, _)| *k) {
+            Ok(idx) => {
+                let slot_idx = plan.signal_dispatch[idx].1;
+                plan.slots[slot_idx].module.receive_signal(signal);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// A signal is not delivered to the module until the control tick (drain);
+    /// after the drain it arrives exactly once.
+    #[test]
+    fn signal_delivered_at_control_tick_not_before() {
+        let mut planner = Planner::new();
+        let (graph, recv_id) = receiver_graph();
+        let mut plan = planner.build(graph, None).unwrap();
+        let mut pool = make_pool(256);
+
+        // Create a ring buffer and enqueue one signal.
+        let (mut producer, mut consumer) =
+            rtrb::RingBuffer::<(InstanceId, ControlSignal)>::new(64);
+        producer
+            .push((recv_id, ControlSignal::Float { name: "freq", value: 440.0 }))
+            .unwrap();
+
+        // Tick 3 times without draining — signal still in the queue.
+        for i in 0..3usize {
+            plan.tick(&mut pool, i % 2);
+        }
+
+        // Before the control tick: no signal received.
+        let recv = plan
+            .slots
+            .iter()
+            .find_map(|s| s.module.as_any().downcast_ref::<SignalReceiver>())
+            .expect("SignalReceiver not found");
+        assert!(recv.received.is_empty(), "signal must not arrive before the control tick");
+
+        // Simulate the control tick: drain the consumer and dispatch.
+        while let Ok((id, signal)) = consumer.pop() {
+            dispatch_signal(&mut plan, id, signal);
+        }
+
+        // After the control tick: signal received.
+        let recv = plan
+            .slots
+            .iter()
+            .find_map(|s| s.module.as_any().downcast_ref::<SignalReceiver>())
+            .expect("SignalReceiver not found");
+        assert_eq!(recv.received.len(), 1, "signal must arrive after the control tick");
+        match &recv.received[0] {
+            ControlSignal::Float { name, value } => {
+                assert_eq!(*name, "freq");
+                assert!((*value - 440.0).abs() < 1e-10);
+            }
+        }
+    }
+
+    /// A signal for an InstanceId not present in the plan is silently dropped.
+    #[test]
+    fn signal_for_unknown_id_is_silently_dropped() {
+        let mut planner = Planner::new();
+        let (graph, _recv_id) = receiver_graph();
+        let mut plan = planner.build(graph, None).unwrap();
+
+        let unknown_id = InstanceId::next(); // not in the plan
+        let signal = ControlSignal::Float { name: "freq", value: 440.0 };
+
+        // dispatch_signal must return false (not found) and must not panic.
+        let dispatched = dispatch_signal(&mut plan, unknown_id, signal);
+        assert!(!dispatched, "signal for unknown InstanceId must be silently dropped");
+    }
+
+    /// When the ring buffer is full, send_signal returns Err without panicking.
+    #[test]
+    fn send_signal_returns_err_on_full_buffer() {
+        let mut planner = Planner::new();
+        let (graph, recv_id) = receiver_graph();
+        let plan = planner.build(graph, None).unwrap();
+
+        let mut engine = SoundEngine::new(plan, 256, 64).expect("SoundEngine::new should succeed");
+
+        // The signal ring buffer has capacity 64. Fill it.
+        for i in 0..64u64 {
+            engine
+                .send_signal(recv_id, ControlSignal::Float { name: "freq", value: i as f64 })
+                .expect("push should succeed while buffer has space");
+        }
+
+        // The 65th push must fail.
+        let overflow = ControlSignal::Float { name: "freq", value: 999.0 };
+        let result = engine.send_signal(recv_id, overflow);
+        assert!(result.is_err(), "send_signal must return Err when the buffer is full");
     }
 
 }

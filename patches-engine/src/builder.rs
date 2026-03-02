@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use patches_core::{AudioEnvironment, Module, ModuleDescriptor, ModuleGraph, ModuleInstanceRegistry, NodeId};
+use patches_core::{AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleGraph, ModuleInstanceRegistry, NodeId};
 
 /// Errors that can occur when building an [`ExecutionPlan`].
 #[derive(Debug)]
@@ -94,6 +94,12 @@ pub struct ExecutionPlan {
     /// so the audio thread does not disturb their in-flight values.
     pub to_zero: Vec<usize>,
     pub audio_out_index: usize,
+    /// Sorted array mapping `InstanceId` to slot index, used for O(log M)
+    /// signal dispatch at control-rate ticks.
+    ///
+    /// Built at plan construction time (off the audio thread) so that the
+    /// audio callback can binary-search without allocating.
+    pub signal_dispatch: Box<[(InstanceId, usize)]>,
 }
 
 impl ExecutionPlan {
@@ -372,11 +378,22 @@ pub fn build_patch(
         next_hwm: new_hwm,
     };
 
+    // Build the signal_dispatch sorted array: (InstanceId → slot index).
+    // Sorted by InstanceId so the audio callback can binary-search in O(log M).
+    let mut dispatch: Vec<(InstanceId, usize)> = slots
+        .iter()
+        .enumerate()
+        .map(|(i, s)| (s.module.instance_id(), i))
+        .collect();
+    dispatch.sort_unstable_by_key(|(id, _)| *id);
+    let signal_dispatch = dispatch.into_boxed_slice();
+
     Ok((
         ExecutionPlan {
             slots,
             to_zero,
             audio_out_index,
+            signal_dispatch,
         },
         new_alloc,
     ))

@@ -49,8 +49,8 @@ using a chunked loop that avoids any branch in the per-sample hot path.
           if samples_until_next_control == 0:
               drain signal ring buffer
               for each (id, signal):
-                  find slot where slot.module.instance_id() == id
-                  call slot.module.receive_signal(signal)
+                  binary-search signal_dispatch for id → slot index
+                  if found: call plan.slots[index].module.receive_signal(signal)
               samples_until_next_control = control_period
       ```
       The signal drain and module lookup only happen at control ticks, never inside
@@ -59,6 +59,11 @@ using a chunked loop that avoids any branch in the per-sample hot path.
 - [ ] When a new plan is adopted (ring buffer pop in the callback), the
       `wi_counter` continues uninterrupted; `samples_until_next_control` is
       unchanged (the counter is shared across plan swaps).
+- [ ] `ExecutionPlan` includes a `signal_dispatch: Box<[(InstanceId, usize)]>` field
+      — a sorted array mapping `InstanceId` to slot index. Built by the `Planner`
+      at plan construction time (allocation happens off the audio thread). The
+      audio callback uses `signal_dispatch.binary_search_by_key(&id, |(k, _)| *k)`
+      to locate the target slot in O(log M) per message.
 - [ ] Tests (non-audio, using direct `ExecutionPlan` calls):
       - A signal sent via a mock producer is delivered to the correct module on the
         next control tick and not before.
@@ -74,9 +79,12 @@ control rate is 750 Hz (~1.3 ms per tick). An OSC controller at 100 messages/sec
 would produce at most 1 message every ~7 ticks, well within a 64-slot buffer.
 Increase if profiling shows saturation.
 
-**Module lookup at control rate:** Scanning `current_plan.slots` for a matching
-`InstanceId` is O(n) over the number of modules. At control rate this is harmless.
-If plans grow very large a sorted index could be added later; do not pre-optimise.
+**Module lookup at control rate:** The `signal_dispatch` sorted array is built by
+the `Planner` at plan construction time, so no allocation occurs on the audio
+thread. Binary search gives O(log M) per message — cache-friendly and
+branch-predictor-friendly at typical module counts (tens to low hundreds). A
+`HashMap` would give O(1) amortised but with worse constant factors at small M;
+revisit only if module counts reach thousands.
 
 **`send_signal` takes `&mut self`:** `rtrb::Producer::push` requires `&mut`. This
 means signal sending is not callable concurrently from multiple threads. If

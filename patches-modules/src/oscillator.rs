@@ -1,6 +1,6 @@
 use std::f64::consts::TAU;
 
-use patches_core::{AudioEnvironment, InstanceId, Module, ModuleDescriptor, PortDescriptor};
+use patches_core::{AudioEnvironment, ControlSignal, InstanceId, Module, ModuleDescriptor, PortDescriptor};
 
 /// A sine wave oscillator with fixed frequency set at construction time.
 ///
@@ -14,18 +14,25 @@ pub struct SineOscillator {
     instance_id: InstanceId,
     frequency: f64,
     phase: f64,
-    /// Stored from `initialise`. Defaults to 44100 Hz until initialised.
-    sample_rate: f64,
+    /// Reciprocal of the sample rate; updated in `initialise`.
+    /// Stored so `phase_increment` can be recalculated on frequency changes
+    /// without a division in the hot path.
+    sample_rate_reciprocal: f64,
+    /// `TAU * frequency * sample_rate_reciprocal`; recomputed whenever either
+    /// value changes. Used in `process` as a multiply-only phase step.
+    phase_increment: f64,
     descriptor: ModuleDescriptor,
 }
 
 impl SineOscillator {
     pub fn new(frequency: f64) -> Self {
+        let sample_rate_reciprocal = 1.0 / 44100.0;
         Self {
             instance_id: InstanceId::next(),
             frequency,
             phase: 0.0,
-            sample_rate: 44100.0,
+            sample_rate_reciprocal,
+            phase_increment: TAU * frequency * sample_rate_reciprocal,
             descriptor: ModuleDescriptor {
                 inputs: vec![],
                 outputs: vec![PortDescriptor { name: "out", index: 0 }],
@@ -44,12 +51,20 @@ impl Module for SineOscillator {
     }
 
     fn initialise(&mut self, env: &AudioEnvironment) {
-        self.sample_rate = env.sample_rate;
+        self.sample_rate_reciprocal = 1.0 / env.sample_rate;
+        self.phase_increment = TAU * self.frequency * self.sample_rate_reciprocal;
+    }
+
+    fn receive_signal(&mut self, signal: ControlSignal) {
+        if let ControlSignal::Float { name: "freq", value } = signal {
+            self.frequency = value;
+            self.phase_increment = TAU * value * self.sample_rate_reciprocal;
+        }
     }
 
     fn process(&mut self, _inputs: &[f64], outputs: &mut [f64]) {
         outputs[0] = self.phase.sin();
-        self.phase = (self.phase + TAU * self.frequency / self.sample_rate) % TAU;
+        self.phase = (self.phase + self.phase_increment) % TAU;
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -75,6 +90,34 @@ mod tests {
         let a = SineOscillator::new(440.0);
         let b = SineOscillator::new(440.0);
         assert_ne!(a.instance_id(), b.instance_id());
+    }
+
+    #[test]
+    fn receive_signal_freq_updates_frequency() {
+        let mut osc = SineOscillator::new(440.0);
+        osc.receive_signal(ControlSignal::Float { name: "freq", value: 880.0 });
+        // Confirm the frequency field changed by checking output diverges from 440 Hz.
+        osc.initialise(&AudioEnvironment { sample_rate: 44100.0 });
+        let mut out = [0.0_f64; 1];
+        osc.process(&[], &mut out);
+        // At sample 0, phase=0 so sin(0)=0 regardless of frequency.
+        // At sample 1, the phase step differs between 440 and 880 Hz.
+        osc.process(&[], &mut out);
+        let step_880 = TAU * 880.0 / 44100.0;
+        assert!((out[0] - step_880.sin()).abs() < 1e-10, "unexpected output: {}", out[0]);
+    }
+
+    #[test]
+    fn receive_signal_unknown_name_is_ignored() {
+        let mut osc = SineOscillator::new(440.0);
+        osc.receive_signal(ControlSignal::Float { name: "gain", value: 0.5 });
+        // frequency must remain 440 Hz
+        osc.initialise(&AudioEnvironment { sample_rate: 44100.0 });
+        let mut out = [0.0_f64; 1];
+        osc.process(&[], &mut out); // phase 0
+        osc.process(&[], &mut out); // phase after one step at 440 Hz
+        let step_440 = TAU * 440.0 / 44100.0;
+        assert!((out[0] - step_440.sin()).abs() < 1e-10, "unexpected output: {}", out[0]);
     }
 
     #[test]

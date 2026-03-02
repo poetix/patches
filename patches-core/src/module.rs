@@ -72,6 +72,20 @@ impl InstanceId {
     }
 }
 
+/// A non-audio-rate parameter update delivered to a module via [`Module::receive_signal`].
+///
+/// Signals are passed by value; modules that need to store the payload can do so directly.
+/// New variants may be added in future; module implementations should use a wildcard arm
+/// (`_ => {}`) to stay forward-compatible.
+///
+/// `ControlSignal` implements [`Send`] so it can be queued in the engine's ring buffer
+/// (see T-0038). All current variants use only `Send`-safe types (`&'static str`, `f64`).
+#[derive(Debug, Clone)]
+pub enum ControlSignal {
+    /// A single named float parameter update (e.g. frequency, gain).
+    Float { name: &'static str, value: f64 },
+}
+
 /// The core trait all audio modules implement.
 ///
 /// `initialise` is called once when a plan is activated (or re-activated after a
@@ -98,6 +112,12 @@ pub trait Module: Send {
     /// store what they need here. The default implementation is a no-op.
     fn initialise(&mut self, _env: &AudioEnvironment) {}
     fn process(&mut self, inputs: &[f64], outputs: &mut [f64]);
+    /// Deliver a non-audio-rate control signal to this module.
+    ///
+    /// The default implementation is a no-op; modules that respond to control signals
+    /// override this method. Unknown signal variants or parameter names should be
+    /// silently ignored.
+    fn receive_signal(&mut self, _signal: ControlSignal) {}
     fn as_any(&self) -> &dyn std::any::Any;
     /// Returns `Some(self)` if this module is a [`Sink`], `None` otherwise.
     fn as_sink(&self) -> Option<&dyn Sink> {

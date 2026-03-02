@@ -16,6 +16,10 @@ path = "tests/state_preservation.rs"
 name = "stable_buffer_indices"
 path = "tests/stable_buffer_indices.rs"
 
+[[test]]
+name = "multi_source_mixing"
+path = "tests/multi_source_mixing.rs"
+
 [dev-dependencies]
 patches-core = { path = "../patches-core" }
 patches-engine = { path = "../patches-engine" }

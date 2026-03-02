@@ -1,7 +1,7 @@
 use patches_core::{ControlSignal, InstanceId, ModuleGraph};
 
-use crate::builder::{build_patch, BufferAllocState, BuildError, ExecutionPlan};
-use crate::engine::{EngineError, SoundEngine};
+use crate::builder::{build_patch, BufferAllocState, BuildError, ExecutionPlan, ModuleAllocState};
+use crate::engine::{EngineError, SoundEngine, DEFAULT_MODULE_POOL_CAPACITY};
 
 /// Default cable buffer pool capacity.
 ///
@@ -15,28 +15,28 @@ const DEFAULT_POOL_CAPACITY: usize = 4096;
 /// At 48 kHz this gives a control rate of 750 Hz (~1.3 ms per tick).
 const DEFAULT_CONTROL_PERIOD: usize = 64;
 
-/// Converts a [`ModuleGraph`] into an [`ExecutionPlan`] with stable buffer allocation.
+/// Converts a [`ModuleGraph`] into an [`ExecutionPlan`] with stable buffer and
+/// module pool allocation.
 ///
-/// `Planner` carries [`BufferAllocState`] forward across successive [`build`](Self::build)
-/// calls so that cables that share a `(NodeId, output_port_index)` key across
-/// re-plans reuse the same buffer pool slot. The audio thread reads and writes
-/// the same memory before and after a plan swap, eliminating discontinuities for
-/// stable connections.
+/// `Planner` carries [`BufferAllocState`] and [`ModuleAllocState`] forward across
+/// successive [`build`](Self::build) calls so that:
+/// - Cables that share a `(NodeId, output_port_index)` key across re-plans reuse
+///   the same buffer pool slot.
+/// - Modules that share an [`InstanceId`](patches_core::InstanceId) across re-plans
+///   are assigned the same module pool slot. Surviving modules stay in the pool
+///   untouched; only new modules appear in `ExecutionPlan::new_modules`, and only
+///   removed modules appear in `ExecutionPlan::tombstones`.
 ///
-/// If a previous plan is supplied to [`build`](Self::build), module instances with
-/// matching [`InstanceId`](patches_core::InstanceId)s are reused — preserving any
-/// internal state (e.g. oscillator phase) accumulated since the plan was built.
+/// # State preservation
 ///
-/// # State freshness
-///
-/// The state preserved in the new plan reflects the module state *at the time
-/// the previous plan was built*, not the audio thread's live state at swap time.
-/// For live-coding use cases (re-plans every few seconds) this difference is
-/// negligible. See `adr/0003-planner-state-freshness.md` for the trade-off
-/// record.
+/// Module state (e.g. oscillator phase) is preserved across re-plans because
+/// surviving modules remain in the audio-thread module pool between swaps. The
+/// control thread does not need access to the running plan.
 pub struct Planner {
     alloc_state: BufferAllocState,
+    module_alloc_state: ModuleAllocState,
     pool_capacity: usize,
+    module_pool_capacity: usize,
 }
 
 impl Default for Planner {
@@ -46,7 +46,7 @@ impl Default for Planner {
 }
 
 impl Planner {
-    /// Create a new `Planner` with the default pool capacity (4096 slots).
+    /// Create a new `Planner` with the default pool capacities.
     pub fn new() -> Self {
         Self::default()
     }
@@ -56,71 +56,64 @@ impl Planner {
     /// `pool_capacity` must match the capacity of the [`SoundEngine`]'s buffer
     /// pool so that [`BuildError::PoolExhausted`] is detected at plan-build time
     /// rather than at index-access time.
+    ///
+    /// The module pool capacity defaults to [`DEFAULT_MODULE_POOL_CAPACITY`].
     pub fn with_capacity(pool_capacity: usize) -> Self {
         Self {
             alloc_state: BufferAllocState::default(),
+            module_alloc_state: ModuleAllocState::default(),
             pool_capacity,
+            module_pool_capacity: DEFAULT_MODULE_POOL_CAPACITY,
         }
     }
 
     /// Build an [`ExecutionPlan`] from `graph`, updating internal allocation state.
     ///
-    /// If `prev_plan` is `Some`, module instances with matching
-    /// [`InstanceId`](patches_core::InstanceId)s are reused, preserving their
-    /// internal state. Unmatched instances from the old plan are dropped.
+    /// Surviving modules (same [`InstanceId`](patches_core::InstanceId) in both the
+    /// old and new graph) reuse their module pool slot; their state is preserved by
+    /// the audio-thread pool without any `prev_plan` argument.
     ///
-    /// If `prev_plan` is `None`, all modules are taken fresh from `graph`.
-    pub fn build(
-        &mut self,
-        graph: ModuleGraph,
-        prev_plan: Option<ExecutionPlan>,
-    ) -> Result<ExecutionPlan, BuildError> {
-        let mut registry = prev_plan
-            .map(|p| p.into_registry())
-            .unwrap_or_default();
-        let (plan, new_alloc) =
-            build_patch(graph, Some(&mut registry), &self.alloc_state, self.pool_capacity)?;
+    /// New modules are placed in `ExecutionPlan::new_modules` for the engine to
+    /// install. Removed modules appear in `ExecutionPlan::tombstones` for the engine
+    /// to drop.
+    pub fn build(&mut self, graph: ModuleGraph) -> Result<ExecutionPlan, BuildError> {
+        let (plan, new_alloc, new_module_alloc) = build_patch(
+            graph,
+            &self.alloc_state,
+            &self.module_alloc_state,
+            self.pool_capacity,
+            self.module_pool_capacity,
+        )?;
         self.alloc_state = new_alloc;
+        self.module_alloc_state = new_module_alloc;
         Ok(plan)
     }
 }
 
 /// Coordinates patch planning (with state preservation) and audio execution.
 ///
-/// `PatchEngine` ties together a [`Planner`] and a [`SoundEngine`].  It keeps
-/// a *held plan* — the most recently built plan that has not yet been adopted by
-/// the audio thread — so that rapid consecutive calls to [`update`](Self::update)
-/// can preserve module state between rebuilds.
+/// `PatchEngine` ties together a [`Planner`] and a [`SoundEngine`]. It keeps
+/// a *held plan* — the most recently built plan that could not be sent because
+/// the engine's single-slot channel was full — so that the caller can retry.
 ///
 /// ## Normal flow
 ///
 /// 1. [`new`](Self::new) builds the initial plan and hands it to `SoundEngine`.
 /// 2. [`start`](Self::start) opens the audio device.
-/// 3. Each [`update`](Self::update) builds a new plan (optionally reusing state
-///    from the held plan) and pushes it to the engine via
-///    [`swap_plan`](SoundEngine::swap_plan).
+/// 3. Each [`update`](Self::update) builds a new plan and pushes it to the engine
+///    via [`swap_plan`](SoundEngine::swap_plan).
 ///
 /// ## Channel-full / retry flow
 ///
-/// [`SoundEngine::swap_plan`] uses a single-slot lock-free channel. If the
-/// audio thread has not yet consumed the previous plan, `swap_plan` returns
-/// the plan. In that case `update` stores the plan as the new held plan and
-/// returns [`PatchEngineError::ChannelFull`]. The caller may retry after one
-/// buffer period (~10 ms); the next `update` call will reuse the held plan's
-/// module instances for state preservation.
-///
-/// ## State freshness
-///
-/// State preserved in a rebuilt plan comes from the module instances at the
-/// time the *previous plan was built*, not from the engine's live audio state.
-/// See `adr/0003-planner-state-freshness.md`.
+/// If [`SoundEngine::swap_plan`] returns the plan (channel full), `update` stores
+/// it as the held plan and returns [`PatchEngineError::ChannelFull`]. The caller
+/// may retry after one buffer period (~10 ms). Module state is preserved by the
+/// audio-thread pool regardless of retries.
 pub struct PatchEngine {
     planner: Planner,
     engine: SoundEngine,
-    /// Most recently built plan that has not yet been consumed by a build or
-    /// sent to the engine. `None` in normal operation after each successful
-    /// `swap_plan`; `Some` when a swap was rejected (channel full) so that
-    /// the next `update` can reuse its module instances.
+    /// Most recently built plan that could not be sent (channel full).
+    /// `None` in normal operation after each successful `swap_plan`.
     held_plan: Option<ExecutionPlan>,
 }
 
@@ -184,8 +177,13 @@ impl PatchEngine {
         control_period: usize,
     ) -> Result<Self, PatchEngineError> {
         let mut planner = Planner::with_capacity(DEFAULT_POOL_CAPACITY);
-        let plan = planner.build(graph, None)?;
-        let engine = SoundEngine::new(plan, DEFAULT_POOL_CAPACITY, control_period)?;
+        let plan = planner.build(graph)?;
+        let engine = SoundEngine::new(
+            plan,
+            DEFAULT_POOL_CAPACITY,
+            DEFAULT_MODULE_POOL_CAPACITY,
+            control_period,
+        )?;
         Ok(Self {
             planner,
             engine,
@@ -200,24 +198,23 @@ impl PatchEngine {
         self.engine.start().map_err(PatchEngineError::Engine)
     }
 
-    /// Apply an updated graph, reusing module state from the held plan.
+    /// Apply an updated graph.
     ///
-    /// Builds a new [`ExecutionPlan`] from `graph`. If a held plan is present
-    /// (from a previous failed `update` or pre-start build), its module instances
-    /// are reused for state preservation. The new plan is then pushed to the
-    /// [`SoundEngine`] via [`swap_plan`](SoundEngine::swap_plan).
+    /// Builds a new [`ExecutionPlan`] from `graph` and pushes it to the
+    /// [`SoundEngine`] via [`swap_plan`](SoundEngine::swap_plan). Surviving
+    /// modules retain their state via the audio-thread pool.
     ///
     /// Returns [`PatchEngineError::ChannelFull`] if the engine's channel is
-    /// already occupied. The new plan is retained as the held plan in this case;
-    /// the caller may retry without losing the build result.
+    /// already occupied. The new plan is retained as the held plan; the caller
+    /// may retry without losing the build result.
     pub fn update(&mut self, graph: ModuleGraph) -> Result<(), PatchEngineError> {
-        let new_plan = self.planner.build(graph, self.held_plan.take())?;
+        let new_plan = self.planner.build(graph)?;
+        // Drop any previously held plan — it can no longer be sent.
+        self.held_plan = None;
 
         match self.engine.swap_plan(new_plan) {
             Ok(()) => Ok(()),
             Err(returned_plan) => {
-                // Channel full: stash the plan so the next update can reuse its
-                // module instances and the caller can retry.
                 self.held_plan = Some(returned_plan);
                 Err(PatchEngineError::ChannelFull)
             }
@@ -245,14 +242,13 @@ impl PatchEngine {
 #[cfg(test)]
 mod tests {
     use patches_core::{
-        ControlSignal, InstanceId, Module, ModuleDescriptor, ModuleGraph, NodeId, PortDescriptor,
-        PortRef,
+        AudioEnvironment, ControlSignal, InstanceId, Module, ModuleDescriptor, ModuleGraph, NodeId,
+        PortDescriptor, PortRef,
     };
     use patches_modules::{AudioOut, SineOscillator};
 
     use super::*;
 
-    /// Build a simple valid graph: one SineOscillator connected to an AudioOut.
     fn p(name: &'static str) -> PortRef {
         PortRef { name, index: 0 }
     }
@@ -280,8 +276,6 @@ mod tests {
             Self::with_id(InstanceId::next())
         }
 
-        /// Create a Counter with a predetermined InstanceId. Used in tests that
-        /// need to match an existing registry entry (same ID, different object).
         fn with_id(id: InstanceId) -> Self {
             Self {
                 instance_id: id,
@@ -313,10 +307,7 @@ mod tests {
         }
     }
 
-    /// Build a graph with a Counter driving AudioOut.
-    fn counter_graph() -> (ModuleGraph, InstanceId) {
-        let counter = Counter::new();
-        let id = counter.instance_id();
+    fn counter_graph(counter: Counter) -> ModuleGraph {
         let mut graph = ModuleGraph::new();
         let c = NodeId::from("counter");
         let out = NodeId::from("out");
@@ -324,68 +315,115 @@ mod tests {
         graph.add_module(out.clone(), Box::new(AudioOut::new())).unwrap();
         graph.connect(&c, p("out"), &out, p("left"), 1.0).unwrap();
         graph.connect(&c, p("out"), &out, p("right"), 1.0).unwrap();
-        (graph, id)
+        graph
     }
 
-    fn make_pool(pool_capacity: usize) -> Vec<[f64; 2]> {
-        vec![[0.0; 2]; pool_capacity]
+    fn make_buffer_pool(capacity: usize) -> Vec<[f64; 2]> {
+        vec![[0.0; 2]; capacity]
+    }
+
+    fn make_module_pool(capacity: usize) -> Vec<Option<Box<dyn Module>>> {
+        (0..capacity).map(|_| None).collect()
+    }
+
+    /// Install a plan's new_modules into `module_pool` and process tombstones,
+    /// simulating what SoundEngine does on plan adoption. Optionally initialises
+    /// new modules with `env`.
+    fn adopt_plan(
+        plan: &mut ExecutionPlan,
+        module_pool: &mut Vec<Option<Box<dyn Module>>>,
+        env: Option<&AudioEnvironment>,
+    ) {
+        for &idx in &plan.tombstones {
+            module_pool[idx].take();
+        }
+        for (idx, mut m) in plan.new_modules.drain(..) {
+            if let Some(e) = env {
+                m.initialise(e);
+            }
+            module_pool[idx] = Some(m);
+        }
     }
 
     #[test]
     fn planner_reuses_module_instance_across_rebuild() {
         let mut planner = Planner::new();
+        let pool_size = 64;
+        let mut module_pool = make_module_pool(pool_size);
+        let env = AudioEnvironment { sample_rate: 44100.0 };
 
-        let (graph_a, counter_id) = counter_graph();
-        let mut plan_a = planner.build(graph_a, None).unwrap();
-        let mut pool_a = make_pool(256);
+        let counter_a = Counter::new();
+        let counter_id = counter_a.instance_id();
+        let mut plan_a = planner.build(counter_graph(counter_a)).unwrap();
 
-        // Advance counter by ticking the plan.
+        // Find counter's pool index before draining new_modules.
+        let counter_pool_idx = plan_a
+            .new_modules
+            .iter()
+            .find(|(_, m)| m.as_any().downcast_ref::<Counter>().is_some())
+            .map(|(idx, _)| *idx)
+            .expect("Counter not in new_modules");
+
+        adopt_plan(&mut plan_a, &mut module_pool, Some(&env));
+
+        let mut buffer_pool = make_buffer_pool(256);
         for i in 0..5 {
-            plan_a.tick(&mut pool_a, i % 2);
+            plan_a.tick(&mut module_pool, &mut buffer_pool, i % 2);
         }
 
-        // Build graph_b with a fresh Counter that deliberately shares the same
-        // InstanceId as the one in plan_a. The Planner will find it in the
-        // registry extracted from plan_a and replace the graph_b placeholder
-        // with the old, stateful instance (count = 5).
-        let mut graph_b = ModuleGraph::new();
-        let placeholder = Counter::with_id(counter_id); // same ID, count = 0
-        let c = NodeId::from("counter");
-        let out = NodeId::from("out");
-        graph_b.add_module(c.clone(), Box::new(placeholder)).unwrap();
-        graph_b.add_module(out.clone(), Box::new(AudioOut::new())).unwrap();
-        graph_b.connect(&c, p("out"), &out, p("left"), 1.0).unwrap();
-        graph_b.connect(&c, p("out"), &out, p("right"), 1.0).unwrap();
+        // Build graph_b with same InstanceId — counter is a surviving module.
+        let placeholder = Counter::with_id(counter_id);
+        let graph_b = counter_graph(placeholder);
+        let mut plan_b = planner.build(graph_b).unwrap();
 
-        let mut plan_b = planner.build(graph_b, Some(plan_a)).unwrap();
-        let mut pool_b = make_pool(256);
+        // Counter must NOT appear in new_modules (it is surviving).
+        assert!(
+            plan_b.new_modules.iter().all(|(_, m)| m.as_any().downcast_ref::<Counter>().is_none()),
+            "surviving Counter must not appear in new_modules"
+        );
 
-        // The counter in plan_b is the old Counter with count=5; the next tick
-        // increments it to 6. wi=1 continues the alternating sequence (plan_a had 5 ticks).
-        plan_b.tick(&mut pool_b, 1);
+        adopt_plan(&mut plan_b, &mut module_pool, Some(&env));
 
-        let counter = plan_b
-            .slots
-            .iter()
-            .find_map(|s| s.module.as_any().downcast_ref::<Counter>())
-            .expect("Counter module not found in plan_b");
+        // wi=1 continues the alternating sequence (plan_a had 5 ticks, last wi=0).
+        plan_b.tick(&mut module_pool, &mut buffer_pool, 1);
 
-        assert_eq!(counter.count, 6, "state should be preserved: count was 5, ticked once → 6");
+        let counter = module_pool[counter_pool_idx]
+            .as_ref()
+            .expect("Counter must still be in pool")
+            .as_any()
+            .downcast_ref::<Counter>()
+            .expect("must be Counter");
+
+        assert_eq!(counter.count, 6, "state must be preserved: count was 5, ticked once → 6");
     }
 
     #[test]
     fn planner_uses_fresh_modules_when_no_prev_plan() {
         let mut planner = Planner::new();
-        let (graph, _) = counter_graph();
-        let mut plan = planner.build(graph, None).unwrap();
-        let mut pool = make_pool(256);
-        plan.tick(&mut pool, 0);
+        let mut module_pool = make_module_pool(64);
 
-        let counter = plan
-            .slots
+        let counter = Counter::new();
+        let mut plan = planner.build(counter_graph(counter)).unwrap();
+
+        // Find counter's pool index before adopting.
+        let counter_pool_idx = plan
+            .new_modules
             .iter()
-            .find_map(|s| s.module.as_any().downcast_ref::<Counter>())
-            .expect("Counter module not found");
+            .find(|(_, m)| m.as_any().downcast_ref::<Counter>().is_some())
+            .map(|(idx, _)| *idx)
+            .expect("Counter not in new_modules");
+
+        adopt_plan(&mut plan, &mut module_pool, None);
+
+        let mut buffer_pool = make_buffer_pool(256);
+        plan.tick(&mut module_pool, &mut buffer_pool, 0);
+
+        let counter = module_pool[counter_pool_idx]
+            .as_ref()
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Counter>()
+            .expect("Counter not found");
 
         assert_eq!(counter.count, 1, "fresh plan: count starts at 0, ticked once → 1");
     }
@@ -393,18 +431,17 @@ mod tests {
     #[test]
     fn planner_build_succeeds_for_valid_graph() {
         let mut planner = Planner::new();
-        assert!(planner.build(simple_graph(440.0), None).is_ok());
+        assert!(planner.build(simple_graph(440.0)).is_ok());
     }
 
     #[test]
     fn planner_build_fails_for_empty_graph() {
         let mut planner = Planner::new();
-        assert!(planner.build(ModuleGraph::new(), None).is_err());
+        assert!(planner.build(ModuleGraph::new()).is_err());
     }
 
     // ── Signal dispatch tests (T-0038) ────────────────────────────────────────
 
-    /// A module stub that records every ControlSignal it receives.
     struct SignalReceiver {
         instance_id: InstanceId,
         descriptor: ModuleDescriptor,
@@ -457,57 +494,70 @@ mod tests {
         (graph, id)
     }
 
-    /// Helper: find the SignalReceiver slot in a plan and call receive_signal on it.
-    fn dispatch_signal(plan: &mut crate::builder::ExecutionPlan, id: InstanceId, signal: ControlSignal) -> bool {
+    /// Dispatch a signal via signal_dispatch (using pool_index).
+    fn dispatch_signal(
+        plan: &ExecutionPlan,
+        module_pool: &mut [Option<Box<dyn Module>>],
+        id: InstanceId,
+        signal: ControlSignal,
+    ) -> bool {
         match plan.signal_dispatch.binary_search_by_key(&id, |(k, _)| *k) {
             Ok(idx) => {
-                let slot_idx = plan.signal_dispatch[idx].1;
-                plan.slots[slot_idx].module.receive_signal(signal);
+                let pool_idx = plan.signal_dispatch[idx].1;
+                if let Some(m) = module_pool[pool_idx].as_mut() {
+                    m.receive_signal(signal);
+                }
                 true
             }
             Err(_) => false,
         }
     }
 
-    /// A signal is not delivered to the module until the control tick (drain);
-    /// after the drain it arrives exactly once.
     #[test]
     fn signal_delivered_at_control_tick_not_before() {
         let mut planner = Planner::new();
         let (graph, recv_id) = receiver_graph();
-        let mut plan = planner.build(graph, None).unwrap();
-        let mut pool = make_pool(256);
+        let mut plan = planner.build(graph).unwrap();
 
-        // Create a ring buffer and enqueue one signal.
+        let mut module_pool = make_module_pool(64);
+        adopt_plan(&mut plan, &mut module_pool, None);
+
+        let mut buffer_pool = make_buffer_pool(256);
+
         let (mut producer, mut consumer) =
             rtrb::RingBuffer::<(InstanceId, ControlSignal)>::new(64);
         producer
             .push((recv_id, ControlSignal::Float { name: "freq", value: 440.0 }))
             .unwrap();
 
-        // Tick 3 times without draining — signal still in the queue.
         for i in 0..3usize {
-            plan.tick(&mut pool, i % 2);
+            plan.tick(&mut module_pool, &mut buffer_pool, i % 2);
         }
 
-        // Before the control tick: no signal received.
-        let recv = plan
-            .slots
+        // Find receiver's pool index.
+        let recv_pool_idx = plan.signal_dispatch
             .iter()
-            .find_map(|s| s.module.as_any().downcast_ref::<SignalReceiver>())
+            .find(|(id, _)| *id == recv_id)
+            .map(|(_, idx)| *idx)
+            .expect("recv not in signal_dispatch");
+
+        let recv = module_pool[recv_pool_idx]
+            .as_ref()
+            .unwrap()
+            .as_any()
+            .downcast_ref::<SignalReceiver>()
             .expect("SignalReceiver not found");
         assert!(recv.received.is_empty(), "signal must not arrive before the control tick");
 
-        // Simulate the control tick: drain the consumer and dispatch.
         while let Ok((id, signal)) = consumer.pop() {
-            dispatch_signal(&mut plan, id, signal);
+            dispatch_signal(&plan, &mut module_pool, id, signal);
         }
 
-        // After the control tick: signal received.
-        let recv = plan
-            .slots
-            .iter()
-            .find_map(|s| s.module.as_any().downcast_ref::<SignalReceiver>())
+        let recv = module_pool[recv_pool_idx]
+            .as_ref()
+            .unwrap()
+            .as_any()
+            .downcast_ref::<SignalReceiver>()
             .expect("SignalReceiver not found");
         assert_eq!(recv.received.len(), 1, "signal must arrive after the control tick");
         match &recv.received[0] {
@@ -518,41 +568,38 @@ mod tests {
         }
     }
 
-    /// A signal for an InstanceId not present in the plan is silently dropped.
     #[test]
     fn signal_for_unknown_id_is_silently_dropped() {
         let mut planner = Planner::new();
         let (graph, _recv_id) = receiver_graph();
-        let mut plan = planner.build(graph, None).unwrap();
+        let mut plan = planner.build(graph).unwrap();
+        let mut module_pool = make_module_pool(64);
+        adopt_plan(&mut plan, &mut module_pool, None);
 
-        let unknown_id = InstanceId::next(); // not in the plan
+        let unknown_id = InstanceId::next();
         let signal = ControlSignal::Float { name: "freq", value: 440.0 };
 
-        // dispatch_signal must return false (not found) and must not panic.
-        let dispatched = dispatch_signal(&mut plan, unknown_id, signal);
+        let dispatched = dispatch_signal(&plan, &mut module_pool, unknown_id, signal);
         assert!(!dispatched, "signal for unknown InstanceId must be silently dropped");
     }
 
-    /// When the ring buffer is full, send_signal returns Err without panicking.
     #[test]
     fn send_signal_returns_err_on_full_buffer() {
         let mut planner = Planner::new();
         let (graph, recv_id) = receiver_graph();
-        let plan = planner.build(graph, None).unwrap();
+        let plan = planner.build(graph).unwrap();
 
-        let mut engine = SoundEngine::new(plan, 256, 64).expect("SoundEngine::new should succeed");
+        let mut engine =
+            SoundEngine::new(plan, 256, 64, 64).expect("SoundEngine::new should succeed");
 
-        // The signal ring buffer has capacity 64. Fill it.
         for i in 0..64u64 {
             engine
                 .send_signal(recv_id, ControlSignal::Float { name: "freq", value: i as f64 })
                 .expect("push should succeed while buffer has space");
         }
 
-        // The 65th push must fail.
         let overflow = ControlSignal::Float { name: "freq", value: 999.0 };
         let result = engine.send_signal(recv_id, overflow);
         assert!(result.is_err(), "send_signal must return Err when the buffer is full");
     }
-
 }

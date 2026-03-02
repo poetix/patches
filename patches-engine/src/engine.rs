@@ -3,12 +3,17 @@ use std::fmt;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream, StreamConfig};
 
-use patches_core::{AudioEnvironment, ControlSignal, InstanceId};
+use patches_core::{AudioEnvironment, ControlSignal, InstanceId, Module};
 
 use crate::builder::ExecutionPlan;
 
+/// Default module pool capacity: number of `Option<Box<dyn Module>>` slots
+/// to pre-allocate on the audio thread.  1024 slots accommodates far more
+/// modules than any realistic patch.
+pub const DEFAULT_MODULE_POOL_CAPACITY: usize = 1024;
+
 /// Pre-start state: the plan channel consumer, the signal consumer, the
-/// initial plan, and the buffer pool.
+/// initial plan, the cable buffer pool, and the module pool.
 /// Stored in [`SoundEngine`] until [`start`](SoundEngine::start) moves them
 /// into the audio closure.
 type PendingState = (
@@ -16,6 +21,7 @@ type PendingState = (
     rtrb::Consumer<(InstanceId, ControlSignal)>,
     ExecutionPlan,
     Box<[[f64; 2]]>,
+    Box<[Option<Box<dyn Module>>]>,
 );
 
 /// Errors returned by [`SoundEngine`] operations.
@@ -67,41 +73,31 @@ impl std::error::Error for EngineError {}
 /// Drives an [`ExecutionPlan`] continuously, writing stereo output to the
 /// default hardware audio device via CPAL.
 ///
-/// The audio callback owns the [`ExecutionPlan`] directly — no `Arc`, no
-/// `Mutex`. A new plan can be swapped in at any time via
+/// The audio callback owns the module pool and cable buffer pool directly — no
+/// `Arc`, no `Mutex`. A new plan can be swapped in at any time via
 /// [`swap_plan`](Self::swap_plan), which sends it over a wait-free SPSC
 /// channel (`rtrb`).
 ///
-/// Plans are initialised (via [`ExecutionPlan::initialise`]) with the device's
-/// sample rate before being sent to the audio callback — either in
-/// [`start`](Self::start) for the initial plan, or in
-/// [`swap_plan`](Self::swap_plan) for subsequent hot-reloads. Calling
-/// `swap_plan` before `start` skips initialisation (sample rate not yet known);
-/// the plan will be initialised when adopted by the audio callback if the engine
-/// is later started.
+/// When the audio callback adopts a new plan it:
+///   1. Installs `new_modules` into the module pool.
+///   2. Takes tombstoned modules out of the pool (dropping them).
+///   3. Zeros `to_zero` cable buffer slots.
+///   4. Replaces `current_plan`.
+///
+/// New modules are initialised (via [`Module::initialise`]) with the device's
+/// sample rate in [`swap_plan`](Self::swap_plan) before being sent to the
+/// audio callback. The initial plan's modules are initialised in
+/// [`start`](Self::start).
 ///
 /// A `SoundEngine` can be started once. After [`stop`](Self::stop) the plan
 /// has been moved into (and dropped with) the audio closure; to run again
 /// with a new plan, create a fresh `SoundEngine`.
-///
-/// ```no_run
-/// # use patches_engine::{SoundEngine, EngineError};
-/// # fn example(plan: patches_engine::ExecutionPlan) -> Result<(), EngineError> {
-/// let mut engine = SoundEngine::new(plan, 4096, 64)?;
-/// engine.start()?;
-/// // … patch runs until stop() is called …
-/// engine.stop();
-/// # Ok(())
-/// # }
-/// ```
 pub struct SoundEngine {
-    /// Write end of the lock-free plan channel. Held here so that
-    /// [`swap_plan`](Self::swap_plan) can publish new plans at any time.
+    /// Write end of the lock-free plan channel.
     plan_tx: rtrb::Producer<ExecutionPlan>,
-    /// Write end of the lock-free signal channel. Held here so that
-    /// [`send_signal`](Self::send_signal) can enqueue signals at any time.
+    /// Write end of the lock-free signal channel.
     signal_tx: rtrb::Producer<(InstanceId, ControlSignal)>,
-    /// Consumer end, initial plan, and buffer pool — stashed here until
+    /// Consumer end, initial plan, and pools — stashed here until
     /// [`start`](Self::start) moves them into the audio closure.
     /// `None` after `start()` has been called.
     pending: Option<PendingState>,
@@ -115,12 +111,15 @@ pub struct SoundEngine {
 }
 
 impl SoundEngine {
-    /// Create a new `SoundEngine` owning the given [`ExecutionPlan`] and a
-    /// pre-allocated cable buffer pool.
+    /// Create a new `SoundEngine` owning the given [`ExecutionPlan`] and
+    /// pre-allocated cable buffer and module pools.
     ///
-    /// `pool_capacity` is the number of `[f64; 2]` slots to pre-allocate.
+    /// `buffer_pool_capacity` is the number of `[f64; 2]` cable buffer slots.
     /// Slot 0 is the permanent-zero slot; slots 1… are for cable buffers.
-    /// A capacity of 4096 accommodates up to 4096 concurrent output ports.
+    ///
+    /// `module_pool_capacity` is the number of `Option<Box<dyn Module>>` slots
+    /// in the audio-thread module pool. Must be at least as large as the value
+    /// used when building plans via [`build_patch`](crate::build_patch).
     ///
     /// `control_period` is the number of audio samples between control-rate
     /// ticks (signal dispatch). Must be greater than zero; 64 is a sensible
@@ -129,23 +128,22 @@ impl SoundEngine {
     /// No audio device is opened until [`start`](Self::start) is called.
     pub fn new(
         plan: ExecutionPlan,
-        pool_capacity: usize,
+        buffer_pool_capacity: usize,
+        module_pool_capacity: usize,
         control_period: usize,
     ) -> Result<Self, EngineError> {
         if control_period == 0 {
             return Err(EngineError::InvalidControlPeriod);
         }
-        let pool = vec![[0.0_f64; 2]; pool_capacity].into_boxed_slice();
-        // Capacity-1 ring buffer: one slot is sufficient to queue a single
-        // in-flight plan swap. Only the latest plan matters for hot-reload.
+        let buffer_pool = vec![[0.0_f64; 2]; buffer_pool_capacity].into_boxed_slice();
+        let module_pool: Box<[Option<Box<dyn Module>>]> =
+            (0..module_pool_capacity).map(|_| None).collect::<Vec<_>>().into_boxed_slice();
         let (plan_tx, plan_rx) = rtrb::RingBuffer::new(1);
-        // Signal ring buffer: capacity 64. At 64-sample control period and
-        // 48 kHz this gives headroom for ~64 messages per ~1.3 ms tick.
         let (signal_tx, signal_rx) = rtrb::RingBuffer::new(64);
         Ok(Self {
             plan_tx,
             signal_tx,
-            pending: Some((plan_rx, signal_rx, plan, pool)),
+            pending: Some((plan_rx, signal_rx, plan, buffer_pool, module_pool)),
             stream: None,
             sample_rate: None,
             control_period,
@@ -154,8 +152,8 @@ impl SoundEngine {
 
     /// Open the default output device and begin audio processing.
     ///
-    /// Initialises the pending plan with the device's sample rate before
-    /// starting the audio callback.
+    /// Initialises the initial plan's new modules with the device's sample rate,
+    /// installs them into the module pool, and starts the audio callback.
     ///
     /// Returns [`EngineError::AlreadyConsumed`] if called after the engine has
     /// already been started and stopped. Returns `Ok(())` if the engine is
@@ -165,7 +163,7 @@ impl SoundEngine {
             return Ok(());
         }
 
-        let (consumer, signal_rx, mut initial_plan, pool) = self
+        let (consumer, signal_rx, mut initial_plan, buffer_pool, mut module_pool) = self
             .pending
             .take()
             .ok_or(EngineError::AlreadyConsumed)?;
@@ -184,23 +182,26 @@ impl SoundEngine {
         let sample_rate = f64::from(config.sample_rate.0);
         let channels = usize::from(config.channels);
 
-        // Initialise plan before handing it to the audio callback.
+        // Initialise and install the initial plan's new modules into the pool.
         let env = AudioEnvironment { sample_rate };
-        initial_plan.initialise(&env);
+        for (idx, mut module) in initial_plan.new_modules.drain(..) {
+            module.initialise(&env);
+            module_pool[idx] = Some(module);
+        }
         self.sample_rate = Some(sample_rate);
 
         let stream = match sample_format {
             SampleFormat::F32 => build_stream::<f32>(
-                &device, &config, channels, consumer, signal_rx, initial_plan, pool,
-                self.control_period,
+                &device, &config, channels, consumer, signal_rx, initial_plan, buffer_pool,
+                module_pool, self.control_period,
             ),
             SampleFormat::I16 => build_stream::<i16>(
-                &device, &config, channels, consumer, signal_rx, initial_plan, pool,
-                self.control_period,
+                &device, &config, channels, consumer, signal_rx, initial_plan, buffer_pool,
+                module_pool, self.control_period,
             ),
             SampleFormat::U16 => build_stream::<u16>(
-                &device, &config, channels, consumer, signal_rx, initial_plan, pool,
-                self.control_period,
+                &device, &config, channels, consumer, signal_rx, initial_plan, buffer_pool,
+                module_pool, self.control_period,
             ),
             other => return Err(EngineError::UnsupportedSampleFormat(other)),
         }?;
@@ -211,44 +212,37 @@ impl SoundEngine {
     }
 
     /// Stop audio processing and close the device.
-    ///
-    /// Dropping the [`Stream`] causes CPAL to join the audio thread before
-    /// returning, so by the time `stop` returns the audio callback has
-    /// finished and the [`ExecutionPlan`] it owned has been dropped.
     pub fn stop(&mut self) {
         self.stream.take();
     }
 
     /// Send a new [`ExecutionPlan`] to the audio callback.
     ///
-    /// If the engine has been started, the plan is initialised with the
-    /// device's sample rate before being queued. If the engine has not yet
-    /// been started, initialisation is skipped (sample rate is unknown).
+    /// If the engine has been started, the plan's new modules are initialised
+    /// with the device's sample rate before being queued. If the engine has not
+    /// yet been started, initialisation is skipped (sample rate is unknown) —
+    /// the modules will be initialised when `start` is called.
     ///
-    /// The callback will adopt the new plan at the start of its next
-    /// invocation. If the single-slot channel is already full (i.e. a
-    /// previous plan has been queued but not yet consumed), the push is a
-    /// no-op and `new_plan` is returned as `Err`. In practice the audio
-    /// callback drains the slot within one buffer period (~10 ms), so
-    /// callers may simply retry.
+    /// The callback will adopt the new plan at the start of its next invocation,
+    /// installing new modules and tombstoning removed ones. If the single-slot
+    /// channel is already full, the push is a no-op and `new_plan` is returned
+    /// as `Err`. Callers may retry; the audio callback drains the slot within
+    /// one buffer period (~10 ms).
     ///
     /// This method is wait-free and safe to call from any thread.
     pub fn swap_plan(&mut self, mut new_plan: ExecutionPlan) -> Result<(), ExecutionPlan> {
         if let Some(sr) = self.sample_rate {
-            new_plan.initialise(&AudioEnvironment { sample_rate: sr });
+            let env = AudioEnvironment { sample_rate: sr };
+            for (_, module) in &mut new_plan.new_modules {
+                module.initialise(&env);
+            }
         }
         self.plan_tx.push(new_plan).map_err(|rtrb::PushError::Full(v)| v)
     }
 
     /// Enqueue a [`ControlSignal`] for delivery to the module identified by `id`.
     ///
-    /// The signal is pushed onto the lock-free ring buffer (capacity 64). The
-    /// audio callback drains the buffer at each control-rate tick and dispatches
-    /// signals to the appropriate module using a binary search on
-    /// `ExecutionPlan::signal_dispatch`.
-    ///
-    /// Returns `Err(signal)` if the ring buffer is full. The caller may drop
-    /// the signal or retry. This method never blocks.
+    /// Returns `Err(signal)` if the ring buffer is full. Never blocks.
     pub fn send_signal(
         &mut self,
         id: InstanceId,
@@ -268,14 +262,13 @@ fn build_stream<T>(
     mut consumer: rtrb::Consumer<ExecutionPlan>,
     mut signal_rx: rtrb::Consumer<(InstanceId, ControlSignal)>,
     mut current_plan: ExecutionPlan,
-    mut pool: Box<[[f64; 2]]>,
+    mut buffer_pool: Box<[[f64; 2]]>,
+    mut module_pool: Box<[Option<Box<dyn Module>>]>,
     control_period: usize,
 ) -> Result<Stream, EngineError>
 where
     T: cpal::SizedSample + cpal::FromSample<f32>,
 {
-    // Both counters are initialised once and persist across every callback
-    // invocation for the lifetime of this stream.
     let mut samples_until_next_control: usize = control_period;
     let mut wi_counter: usize = 0;
 
@@ -284,19 +277,28 @@ where
             config,
             move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
                 // Adopt a new plan if one has been published — wait-free, no allocation.
-                // wi_counter and samples_until_next_control continue uninterrupted.
-                if let Ok(new_plan) = consumer.pop() {
-                    // Zero freed/new slots before the first tick with the new plan.
-                    // The audio thread is the sole writer of the pool.
+                if let Ok(mut new_plan) = consumer.pop() {
+                    // Tombstone removed modules first: the freelist may have recycled
+                    // tombstoned slots for new modules, so we must clear old entries
+                    // before installing new ones.
+                    for &idx in &new_plan.tombstones {
+                        module_pool[idx].take();
+                    }
+                    // Install new modules (already initialised by swap_plan).
+                    for (idx, module) in new_plan.new_modules.drain(..) {
+                        module_pool[idx] = Some(module);
+                    }
+                    // Zero freed/new cable buffer slots.
                     for &i in &new_plan.to_zero {
-                        pool[i] = [0.0; 2];
+                        buffer_pool[i] = [0.0; 2];
                     }
                     current_plan = new_plan;
                 }
                 fill_buffer(
                     data,
                     &mut current_plan,
-                    &mut pool,
+                    &mut module_pool,
+                    &mut buffer_pool,
                     channels,
                     &mut signal_rx,
                     control_period,
@@ -312,21 +314,12 @@ where
         .map_err(EngineError::BuildStreamError)
 }
 
-/// Write one full CPAL output callback buffer without allocating or blocking.
-///
-/// Processes samples in chunks aligned to the control period. At each control
-/// tick (when `samples_until_next_control` reaches zero) the signal ring buffer
-/// is drained and any queued `(InstanceId, ControlSignal)` pairs are dispatched
-/// to the matching module via `ExecutionPlan::signal_dispatch`.
-///
-/// `wi_counter` increments monotonically; `wi_counter % 2` gives the write slot
-/// index for each sample, preserving the ping-pong semantics of the old fixed
-/// `[0, 1]` pair loop while allowing arbitrary chunk sizes.
 #[allow(clippy::too_many_arguments)]
 fn fill_buffer<T: cpal::SizedSample + cpal::FromSample<f32>>(
     data: &mut [T],
     plan: &mut ExecutionPlan,
-    pool: &mut [[f64; 2]],
+    module_pool: &mut [Option<Box<dyn Module>>],
+    buffer_pool: &mut [[f64; 2]],
     channels: usize,
     signal_rx: &mut rtrb::Consumer<(InstanceId, ControlSignal)>,
     control_period: usize,
@@ -340,19 +333,17 @@ fn fill_buffer<T: cpal::SizedSample + cpal::FromSample<f32>>(
     while remaining > 0 {
         let chunk = (*samples_until_next_control).min(remaining);
 
-        // Tight inner loop: no branches on control state.
         for _ in 0..chunk {
             let wi = *wi_counter % 2;
-            plan.tick(pool, wi);
-            let left = plan.last_left() as f32;
-            let right = plan.last_right() as f32;
+            plan.tick(module_pool, buffer_pool, wi);
+            let left = plan.last_left(module_pool) as f32;
+            let right = plan.last_right(module_pool) as f32;
 
             if channels == 1 {
                 data[out_i] = T::from_sample((left + right) * 0.5_f32);
             } else {
                 data[out_i * channels] = T::from_sample(left);
                 data[out_i * channels + 1] = T::from_sample(right);
-                // Any additional channels beyond stereo receive silence.
                 for c in 2..channels {
                     data[out_i * channels + c] = T::from_sample(0.0_f32);
                 }
@@ -365,15 +356,15 @@ fn fill_buffer<T: cpal::SizedSample + cpal::FromSample<f32>>(
         remaining -= chunk;
 
         if *samples_until_next_control == 0 {
-            // Control tick: drain the signal ring buffer and dispatch.
             while let Ok((id, signal)) = signal_rx.pop() {
                 if let Ok(idx) =
                     plan.signal_dispatch.binary_search_by_key(&id, |(k, _)| *k)
                 {
-                    let slot_idx = plan.signal_dispatch[idx].1;
-                    plan.slots[slot_idx].module.receive_signal(signal);
+                    let pool_idx = plan.signal_dispatch[idx].1;
+                    if let Some(module) = module_pool[pool_idx].as_mut() {
+                        module.receive_signal(signal);
+                    }
                 }
-                // Signals for unknown InstanceIds are silently dropped.
             }
             *samples_until_next_control = control_period;
         }

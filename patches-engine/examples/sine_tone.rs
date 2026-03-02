@@ -3,7 +3,7 @@ use std::thread;
 use std::time::Duration;
 
 use patches_core::{ModuleGraph, NodeId, PortRef};
-use patches_engine::{build_patch, BufferAllocState, SoundEngine};
+use patches_engine::{build_patch, BufferAllocState, ModuleAllocState, SoundEngine};
 use patches_modules::{AudioOut, Sum, SineOscillator};
 
 // A major third above 440 Hz: 440 * 2^(4/12)
@@ -26,9 +26,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     graph.connect(&mix, p("out"), &out, p("left"), 1.0)?;
     graph.connect(&mix, p("out"), &out, p("right"), 1.0)?;
 
-    let (plan, _) = build_patch(graph, None, &BufferAllocState::default(), 4096)?;
+    let (plan, _, _) = build_patch(
+        graph,
+        &BufferAllocState::default(),
+        &ModuleAllocState::default(),
+        4096,
+        1024,
+    )?;
 
-    let mut engine = SoundEngine::new(plan, 4096, 64)?;
+    let mut engine = SoundEngine::new(plan, 4096, 1024, 64)?;
     engine.start()?;
 
     println!("Playing A4 + C#5 (major third) for 3 seconds…");

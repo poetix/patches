@@ -3,11 +3,8 @@
 //! Validates three properties of the replanning lifecycle:
 //!
 //! 1. **Drop** — modules removed from the graph are dropped when the engine
-//!    *adopts* the new plan (i.e. when the old plan is replaced), not during
-//!    `Planner::build`.  In the real engine the old plan lives on the audio
-//!    thread and the control thread cannot reach it; `Planner::build` is
-//!    called with `prev_plan = None`.  DropSpy must therefore remain alive
-//!    until `adopt_plan` discards the old `ExecutionPlan`.
+//!    *adopts* the new plan (i.e. when `adopt_plan` processes tombstones),
+//!    not during `Planner::build`.
 //!
 //! 2. **Freed-slot zeroing** — buffer pool indices freed when a module is
 //!    removed appear in `ExecutionPlan::to_zero` and are zeroed by the engine
@@ -21,12 +18,12 @@
 //! ```text
 //! control thread                   audio thread
 //! ──────────────────────────────   ──────────────────────────────
-//! plan_a = Planner::build(g_a, None)
+//! plan_a = Planner::build(g_a)
 //! engine.adopt_plan(plan_a)   ──►  current_plan = plan_a
 //!                                  loop { tick() }
-//! plan_b = Planner::build(g_b, None)   ← old plan never leaves audio thread
-//! engine.adopt_plan(plan_b)   ──►  zero to_zero slots
-//!                                  drop(plan_a)   ← DropSpy freed HERE
+//! plan_b = Planner::build(g_b)   ← old plan never leaves audio thread
+//! engine.adopt_plan(plan_b)   ──►  install new_modules, tombstone removed
+//!                                  zero to_zero slots
 //!                                  current_plan = plan_b
 //!                                  loop { tick() }
 //! ```
@@ -52,28 +49,32 @@ use patches_modules::{AudioOut, SineOscillator};
 ///
 /// The CPAL callback does, in order:
 ///   1. Pop a new plan from the lock-free channel (if available).
-///   2. Zero every index in `new_plan.to_zero`.
-///   3. Set `current_plan = new_plan`, which **drops the old plan**.
-///   4. Tick all modules for each sample in the buffer.
+///   2. Install `new_modules` into the module pool.
+///   3. Tombstone removed modules (`pool[idx].take()`).
+///   4. Zero every index in `new_plan.to_zero`.
+///   5. Set `current_plan = new_plan`.
+///   6. Tick all modules for each sample in the buffer.
 ///
-/// `adopt_plan` replicates steps 2–3; `tick` replicates step 4.
-///
-/// There is intentionally no method to extract the active plan from the engine.
-/// In the real system the running plan lives on the audio thread and is never
-/// accessible to the control thread.
+/// `adopt_plan` replicates steps 2–5; `tick` replicates step 6.
 struct HeadlessEngine {
     plan: Option<ExecutionPlan>,
-    pool: Vec<[f64; 2]>,
-    /// Write index: alternates 0 / 1 on each call to `tick`.
+    buffer_pool: Vec<[f64; 2]>,
+    module_pool: Vec<Option<Box<dyn Module>>>,
     wi: usize,
     env: AudioEnvironment,
 }
 
 impl HeadlessEngine {
-    fn new(plan: ExecutionPlan, pool_capacity: usize, env: AudioEnvironment) -> Self {
+    fn new(
+        plan: ExecutionPlan,
+        buffer_pool_capacity: usize,
+        module_pool_capacity: usize,
+        env: AudioEnvironment,
+    ) -> Self {
         let mut engine = Self {
             plan: None,
-            pool: vec![[0.0; 2]; pool_capacity],
+            buffer_pool: vec![[0.0; 2]; buffer_pool_capacity],
+            module_pool: (0..module_pool_capacity).map(|_| None).collect(),
             wi: 0,
             env,
         };
@@ -83,49 +84,51 @@ impl HeadlessEngine {
 
     /// Adopt a new execution plan, mirroring the audio-callback plan-swap sequence:
     ///
-    ///   1. Zero every slot in `plan.to_zero` (freed and newly allocated indices).
-    ///   2. Initialise all modules in the new plan.
-    ///   3. Replace `self.plan` — **this drops the old plan**, and with it any
-    ///      module instances that are no longer in the new graph.
+    ///   1. Tombstone removed modules (`module_pool[idx].take()`).
+    ///   2. Install `plan.new_modules` into the module pool (initialising first).
+    ///   3. Zero every slot in `plan.to_zero`.
+    ///   4. Replace `self.plan`.
     ///
-    /// Drop of the old plan occurs at step 3, after zeroing but before the first
-    /// `tick` with the new plan.
+    /// Tombstones are processed before new modules because the freelist may
+    /// recycle tombstoned slots for new modules.
     fn adopt_plan(&mut self, mut plan: ExecutionPlan) {
-        for &i in &plan.to_zero {
-            self.pool[i] = [0.0; 2];
+        // Tombstone removed modules first — drop happens here.
+        for &idx in &plan.tombstones {
+            self.module_pool[idx].take();
         }
-        plan.initialise(&self.env);
-        self.plan = Some(plan); // ← old plan (and its modules) dropped here
+        // Install new modules (initialise before inserting).
+        for (idx, mut m) in plan.new_modules.drain(..) {
+            m.initialise(&self.env);
+            self.module_pool[idx] = Some(m);
+        }
+        // Zero freed/new cable buffer slots.
+        for &i in &plan.to_zero {
+            self.buffer_pool[i] = [0.0; 2];
+        }
+        self.plan = Some(plan);
     }
 
-    /// Process one sample, alternating `wi` each call.
     fn tick(&mut self) {
         let plan = self.plan.as_mut().expect("HeadlessEngine::tick: no current plan");
-        plan.tick(&mut self.pool, self.wi);
+        plan.tick(&mut self.module_pool, &mut self.buffer_pool, self.wi);
         self.wi = 1 - self.wi;
     }
 
     fn last_left(&self) -> f64 {
-        self.plan.as_ref().map_or(0.0, |p| p.last_left())
+        self.plan.as_ref().map_or(0.0, |p| p.last_left(&self.module_pool))
     }
 
     fn last_right(&self) -> f64 {
-        self.plan.as_ref().map_or(0.0, |p| p.last_right())
+        self.plan.as_ref().map_or(0.0, |p| p.last_right(&self.module_pool))
     }
 
-    /// Read both double-buffer halves for a given pool slot index.
     fn pool_slot(&self, idx: usize) -> [f64; 2] {
-        self.pool[idx]
+        self.buffer_pool[idx]
     }
 }
 
 // ── DropSpy ──────────────────────────────────────────────────────────────────
 
-/// A module that outputs a constant `1.0` and sets an `Arc<AtomicBool>` flag
-/// when it is dropped.
-///
-/// The flag lets tests observe the exact moment a module instance is freed,
-/// independent of any other side-channel.
 struct DropSpy {
     instance_id: InstanceId,
     descriptor: ModuleDescriptor,
@@ -161,7 +164,6 @@ impl Module for DropSpy {
     }
 
     fn process(&mut self, _inputs: &[f64], outputs: &mut [f64]) {
-        // Constant output so the pool slot is predictably non-zero after ticking.
         outputs[0] = 1.0;
     }
 
@@ -172,17 +174,10 @@ impl Module for DropSpy {
 
 // ── Graph builders ────────────────────────────────────────────────────────────
 
-const POOL_CAPACITY: usize = 256;
+const BUFFER_POOL_CAPACITY: usize = 256;
+const MODULE_POOL_CAPACITY: usize = 64;
 const ENV: AudioEnvironment = AudioEnvironment { sample_rate: 48_000.0 };
 
-/// Two sources → stereo out: `DropSpy` on left, `SineOscillator` on right.
-///
-/// NodeId sort order: `"out"` < `"sine"` < `"spy"` (ascending, per builder
-/// convention).  The 1-sample cable delay makes any execution order valid.
-///
-/// Buffer allocation (after `"out"` with 0 outputs, in execution order):
-///   - `("sine", 0)` → pool slot 1
-///   - `("spy",  0)` → pool slot 2
 fn p(name: &'static str) -> PortRef {
     PortRef { name, index: 0 }
 }
@@ -200,11 +195,6 @@ fn two_source_graph(spy: DropSpy) -> ModuleGraph {
     graph
 }
 
-/// Single source → stereo out: `SineOscillator` on both channels.
-///
-/// Buffer allocation:
-///   - `("sine", 0)` → pool slot 1  (stable when transitioning from/to
-///     `two_source_graph`, where `"sine"` uses the same slot)
 fn one_source_graph() -> ModuleGraph {
     let mut graph = ModuleGraph::new();
     let sine_id = NodeId::from("sine");
@@ -219,24 +209,19 @@ fn one_source_graph() -> ModuleGraph {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 /// Modules removed from the graph must be dropped when the engine adopts the
-/// new plan, not earlier.
-///
-/// In the real engine the old plan is owned by the audio callback and the
-/// control thread never touches it.  `Planner::build` is therefore called with
-/// `prev_plan = None`; plan A (with DropSpy) stays in the engine until
-/// `adopt_plan` replaces `current_plan` with plan B.
+/// new plan (tombstone processing), not earlier.
 ///
 /// Checkpoints:
-///   - After `Planner::build(graph_b, None)` returns: DropSpy is **alive**
-///     (the build did not touch the old plan).
+///   - After `Planner::build(graph_b)` returns: DropSpy is **alive**
+///     (the build did not touch the module pool).
 ///   - After `engine.adopt_plan(plan_b)` returns: DropSpy is **dead**
-///     (the old plan was dropped inside `adopt_plan`).
+///     (tombstone processing called `module_pool[idx].take()`).
 #[test]
 fn replan_drops_removed_module() {
     let flag = Arc::new(AtomicBool::new(false));
-    let mut planner = Planner::with_capacity(POOL_CAPACITY);
-    let plan_a = planner.build(two_source_graph(DropSpy::new(flag.clone())), None).unwrap();
-    let mut engine = HeadlessEngine::new(plan_a, POOL_CAPACITY, ENV);
+    let mut planner = Planner::with_capacity(BUFFER_POOL_CAPACITY);
+    let plan_a = planner.build(two_source_graph(DropSpy::new(flag.clone()))).unwrap();
+    let mut engine = HeadlessEngine::new(plan_a, BUFFER_POOL_CAPACITY, MODULE_POOL_CAPACITY, ENV);
 
     for _ in 0..10 {
         engine.tick();
@@ -244,18 +229,14 @@ fn replan_drops_removed_module() {
 
     assert!(!flag.load(Ordering::SeqCst), "spy must not be dropped while plan A is active");
 
-    // Build plan B on the control thread — plan A remains in the engine.
-    // The Planner's internal alloc_state handles buffer stability without
-    // needing a reference to the running plan.
-    let plan_b = planner.build(one_source_graph(), None).unwrap();
+    let plan_b = planner.build(one_source_graph()).unwrap();
 
     assert!(
         !flag.load(Ordering::SeqCst),
-        "spy must still be alive after Planner::build — the old plan has not been replaced yet"
+        "spy must still be alive after Planner::build — the module pool has not been updated yet"
     );
 
-    // Adopt plan B: self.plan = Some(plan_b) drops the old Some(plan_a),
-    // which drops every ModuleSlot in plan_a, which drops DropSpy.
+    // adopt_plan processes tombstones: module_pool[spy_slot].take() drops DropSpy.
     engine.adopt_plan(plan_b);
 
     assert!(
@@ -272,51 +253,47 @@ fn replan_drops_removed_module() {
 /// Buffer pool slots freed when a module is removed must appear in
 /// `ExecutionPlan::to_zero` and be zeroed by `HeadlessEngine::adopt_plan`.
 ///
-/// The `Planner`'s internal `alloc_state` tracks which slots are in use
-/// across builds regardless of whether the old plan is passed as `prev_plan`,
-/// so this test mirrors the real engine flow (no `take_plan`).
-///
 /// Timeline:
 ///   1. Plan A (`spy` + `sine`) runs for several ticks → spy's pool slot is
 ///      non-zero (DropSpy writes `1.0` every sample).
-///   2. Plan B (`sine` only) is built with `prev_plan = None` — spy's slot
-///      is freed by `Planner` and listed in `plan_b.to_zero`.
-///   3. Pool is inspected *before* adoption: slot is still dirty (the old
-///      plan is still active in the engine).
-///   4. `adopt_plan(plan_b)` is called: slot must be `[0.0; 2]` afterwards.
+///   2. Plan B (`sine` only) is built — spy's slot is freed by Planner and
+///      listed in `plan_b.to_zero`.
+///   3. Pool is inspected *before* adoption: slot is still dirty.
+///   4. `adopt_plan(plan_b)` zeroes the slot and tombstones DropSpy.
 #[test]
 fn replan_zeroes_freed_buffer_slot() {
     let flag = Arc::new(AtomicBool::new(false));
-    let mut planner = Planner::with_capacity(POOL_CAPACITY);
-    let plan_a = planner.build(two_source_graph(DropSpy::new(flag.clone())), None).unwrap();
+    let mut planner = Planner::with_capacity(BUFFER_POOL_CAPACITY);
+    let plan_a = planner.build(two_source_graph(DropSpy::new(flag.clone()))).unwrap();
 
-    // Record spy's output buffer index before moving plan_a into the engine.
+    // Find spy's output buffer index from new_modules before adopting.
+    let spy_pool_idx = plan_a
+        .new_modules
+        .iter()
+        .find(|(_, m)| m.as_any().downcast_ref::<DropSpy>().is_some())
+        .map(|(idx, _)| *idx)
+        .expect("DropSpy not found in plan_a.new_modules");
     let spy_buf = plan_a
         .slots
         .iter()
-        .find(|s| s.module.as_any().downcast_ref::<DropSpy>().is_some())
-        .expect("DropSpy slot not found in plan A")
+        .find(|s| s.pool_index == spy_pool_idx)
+        .expect("no slot with spy's pool_index")
         .output_buffers[0];
 
-    let mut engine = HeadlessEngine::new(plan_a, POOL_CAPACITY, ENV);
+    let mut engine =
+        HeadlessEngine::new(plan_a, BUFFER_POOL_CAPACITY, MODULE_POOL_CAPACITY, ENV);
 
-    // Two ticks write both double-buffer halves; use four for clarity.
     for _ in 0..4 {
         engine.tick();
     }
 
-    // DropSpy always outputs 1.0; both halves of the double buffer must be
-    // non-zero at this point.
     let dirty = engine.pool_slot(spy_buf);
     assert!(
         dirty != [0.0; 2],
-        "spy's pool slot must be non-zero after ticking (got {dirty:?})"
+        "spy's buffer slot must be non-zero after ticking (got {dirty:?})"
     );
 
-    // Build plan B on the control thread, mirroring the real engine flow.
-    // Plan A is still running in the engine; its spy slot is freed in the
-    // Planner's alloc_state and appears in plan_b.to_zero.
-    let plan_b = planner.build(one_source_graph(), None).unwrap();
+    let plan_b = planner.build(one_source_graph()).unwrap();
 
     assert!(
         plan_b.to_zero.contains(&spy_buf),
@@ -324,13 +301,11 @@ fn replan_zeroes_freed_buffer_slot() {
         plan_b.to_zero
     );
 
-    // Plan A is still active: the pool slot is still dirty.
     assert!(
         engine.pool_slot(spy_buf) != [0.0; 2],
         "pool must still be dirty before adopt_plan is called"
     );
 
-    // adopt_plan zeros the freed slot, then drops plan A (and DropSpy).
     engine.adopt_plan(plan_b);
 
     assert_eq!(
@@ -342,31 +317,31 @@ fn replan_zeroes_freed_buffer_slot() {
 
 /// Buffer pool slots allocated for a *newly added* module must also appear in
 /// `to_zero` and be zeroed on adoption.
-///
-/// To make zeroing observable the test pre-contaminates the target pool slot
-/// with a sentinel value before calling `adopt_plan`, ruling out the
-/// possibility that the slot appears zero only because it was never written.
 #[test]
 fn replan_zeroes_newly_allocated_slot() {
-    let mut planner = Planner::with_capacity(POOL_CAPACITY);
-    let plan_a = planner.build(one_source_graph(), None).unwrap();
-    let mut engine = HeadlessEngine::new(plan_a, POOL_CAPACITY, ENV);
+    let mut planner = Planner::with_capacity(BUFFER_POOL_CAPACITY);
+    let plan_a = planner.build(one_source_graph()).unwrap();
+    let mut engine = HeadlessEngine::new(plan_a, BUFFER_POOL_CAPACITY, MODULE_POOL_CAPACITY, ENV);
 
     for _ in 0..10 {
         engine.tick();
     }
 
-    // Build plan B which adds spy. Spy gets a freshly allocated pool slot
-    // (the planner's alloc_state had no entry for NodeId "spy").
-    // Plan A is still in the engine — this mirrors normal replanning.
     let flag = Arc::new(AtomicBool::new(false));
-    let plan_b = planner.build(two_source_graph(DropSpy::new(flag.clone())), None).unwrap();
+    let plan_b = planner.build(two_source_graph(DropSpy::new(flag.clone()))).unwrap();
 
+    // Find spy's buffer slot from new_modules before adopting.
+    let spy_pool_idx = plan_b
+        .new_modules
+        .iter()
+        .find(|(_, m)| m.as_any().downcast_ref::<DropSpy>().is_some())
+        .map(|(idx, _)| *idx)
+        .expect("DropSpy not found in plan_b.new_modules");
     let spy_buf = plan_b
         .slots
         .iter()
-        .find(|s| s.module.as_any().downcast_ref::<DropSpy>().is_some())
-        .expect("DropSpy slot not found in plan B")
+        .find(|s| s.pool_index == spy_pool_idx)
+        .expect("no slot with spy's pool_index")
         .output_buffers[0];
 
     assert!(
@@ -375,22 +350,16 @@ fn replan_zeroes_newly_allocated_slot() {
         plan_b.to_zero
     );
 
-    // Contaminate the pool slot to prove zeroing is performed by adopt_plan,
-    // not by the initial `vec![[0.0; 2]; capacity]` at engine construction.
-    engine.pool[spy_buf] = [99.0; 2];
+    engine.buffer_pool[spy_buf] = [99.0; 2];
 
     engine.adopt_plan(plan_b);
 
     assert_eq!(
-        engine.pool[spy_buf],
+        engine.pool_slot(spy_buf),
         [0.0; 2],
         "newly allocated slot {spy_buf} must be zeroed on plan adoption"
     );
 
-    // The engine must produce correct output after the replan.
-    // DropSpy outputs a constant 1.0; the 1-sample cable delay means the
-    // first tick after adoption reads zero (zeroed slot), but by tick 3 the
-    // value has propagated through both double-buffer halves.
     for _ in 0..100 {
         engine.tick();
     }

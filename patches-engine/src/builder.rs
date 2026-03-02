@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-use patches_core::{AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleGraph, ModuleInstanceRegistry, NodeId};
+use patches_core::{InstanceId, Module, ModuleDescriptor, ModuleGraph, NodeId};
 
 /// Errors that can occur when building an [`ExecutionPlan`].
 #[derive(Debug)]
@@ -148,10 +148,11 @@ impl ModuleAllocState {
     }
 }
 
-/// One entry in the execution plan: a module together with its pre-resolved
+/// One entry in the execution plan: a module pool reference together with its pre-resolved
 /// input and output buffer indices and pre-allocated scratch storage.
 pub struct ModuleSlot {
-    pub module: Box<dyn Module>,
+    /// Index into the audio-thread-owned module pool (`[Option<Box<dyn Module>>]`).
+    pub pool_index: usize,
     /// Indices into the [`ExecutionPlan`] buffer pool — one per input port.
     pub input_buffers: Vec<usize>,
     /// Scaling factors applied to each input at read-time — one per input port.
@@ -168,9 +169,13 @@ pub struct ModuleSlot {
 
 /// A fully resolved, allocation-free execution structure produced by [`build_patch`].
 ///
+/// Modules are **not** owned by the plan; they live in an externally-owned module pool
+/// (a `[Option<Box<dyn Module>>]` slice managed by [`SoundEngine`]). Each
+/// [`ModuleSlot`] holds a `pool_index` pointing into that pool.
+///
 /// Call [`tick`](ExecutionPlan::tick) once per sample on the audio thread,
-/// passing the externally-owned buffer pool and alternating `wi = 0` and `wi = 1`
-/// on successive calls.
+/// passing both the module pool and the cable buffer pool, alternating `wi = 0`
+/// and `wi = 1` on successive calls.
 /// After each tick, retrieve the stereo output via [`last_left`](ExecutionPlan::last_left)
 /// and [`last_right`](ExecutionPlan::last_right).
 pub struct ExecutionPlan {
@@ -183,87 +188,83 @@ pub struct ExecutionPlan {
     /// so the audio thread does not disturb their in-flight values.
     pub to_zero: Vec<usize>,
     pub audio_out_index: usize,
-    /// Sorted array mapping `InstanceId` to slot index, used for O(log M)
+    /// Sorted array mapping `InstanceId` to pool index, used for O(log M)
     /// signal dispatch at control-rate ticks.
     ///
     /// Built at plan construction time (off the audio thread) so that the
     /// audio callback can binary-search without allocating.
     pub signal_dispatch: Box<[(InstanceId, usize)]>,
+    /// New modules to install into the audio-thread module pool when this plan
+    /// is adopted. Each entry is `(pool_index, Box<dyn Module>)`.
+    ///
+    /// The audio callback drains this vec into the pool on plan adoption. Modules
+    /// are initialised (via [`Module::initialise`]) in [`SoundEngine::swap_plan`]
+    /// before the plan is pushed to the channel.
+    pub new_modules: Vec<(usize, Box<dyn Module>)>,
+    /// Pool indices of modules removed from the graph.
+    ///
+    /// The audio callback calls `pool[idx].take()` for each entry, dropping the
+    /// `Box<dyn Module>` and freeing the slot.
+    pub tombstones: Vec<usize>,
 }
 
 impl ExecutionPlan {
-    /// Call `initialise` on every module in this plan with the given environment.
-    ///
-    /// Must be called once before the first [`tick`](Self::tick), and again
-    /// whenever the plan is swapped into a running engine (e.g. after a hot-reload).
-    pub fn initialise(&mut self, env: &AudioEnvironment) {
-        for slot in &mut self.slots {
-            slot.module.initialise(env);
-        }
-    }
-
     /// Process one sample across all modules in execution order.
     ///
-    /// `pool` is the externally-owned cable buffer pool (see [`SoundEngine`]).
+    /// `module_pool` is the audio-thread-owned module pool.
+    /// `buffer_pool` is the externally-owned cable buffer pool (see [`SoundEngine`]).
     /// `wi` is the write slot index (0 or 1); the read slot is `1 - wi`.
     /// Callers must alternate between `wi = 0` and `wi = 1` on successive calls.
     ///
     /// Does not allocate.
-    pub fn tick(&mut self, pool: &mut [[f64; 2]], wi: usize) {
+    pub fn tick(
+        &mut self,
+        module_pool: &mut [Option<Box<dyn Module>>],
+        buffer_pool: &mut [[f64; 2]],
+        wi: usize,
+    ) {
         let ri = 1 - wi;
 
-        // Per slot: read inputs → process → write outputs.
-        // Reading uses `ri` (previous tick's slot); writing uses `wi` (this tick's slot).
-        // Because ri ≠ wi, reads and writes never alias within a tick.
         for slot in self.slots.iter_mut() {
             for (j, &buf_idx) in slot.input_buffers.iter().enumerate() {
-                slot.input_scratch[j] = pool[buf_idx][ri] * slot.input_scales[j];
+                slot.input_scratch[j] = buffer_pool[buf_idx][ri] * slot.input_scales[j];
             }
-            slot.module
+            module_pool[slot.pool_index]
+                .as_mut()
+                .unwrap()
                 .process(&slot.input_scratch, &mut slot.output_scratch);
             for (j, &buf_idx) in slot.output_buffers.iter().enumerate() {
-                pool[buf_idx][wi] = slot.output_scratch[j];
+                buffer_pool[buf_idx][wi] = slot.output_scratch[j];
             }
         }
-    }
-
-    /// Consume this plan and move all module instances into a [`ModuleInstanceRegistry`].
-    ///
-    /// The registry can be passed to [`build_patch`] for the next plan so that
-    /// module state (e.g. oscillator phase) is preserved across re-plans.
-    pub fn into_registry(self) -> ModuleInstanceRegistry {
-        let mut registry = ModuleInstanceRegistry::new();
-        for slot in self.slots {
-            registry.insert(slot.module);
-        }
-        registry
     }
 
     /// Left-channel sample produced during the most recent [`tick`](Self::tick).
-    pub fn last_left(&self) -> f64 {
-        self.slots[self.audio_out_index]
-            .module
-            .as_sink()
+    pub fn last_left(&self, pool: &[Option<Box<dyn Module>>]) -> f64 {
+        pool[self.slots[self.audio_out_index].pool_index]
+            .as_ref()
+            .and_then(|m| m.as_sink())
             .map_or(0.0, |s| s.last_left())
     }
 
     /// Right-channel sample produced during the most recent [`tick`](Self::tick).
-    pub fn last_right(&self) -> f64 {
-        self.slots[self.audio_out_index]
-            .module
-            .as_sink()
+    pub fn last_right(&self, pool: &[Option<Box<dyn Module>>]) -> f64 {
+        pool[self.slots[self.audio_out_index].pool_index]
+            .as_ref()
+            .and_then(|m| m.as_sink())
             .map_or(0.0, |s| s.last_right())
     }
 }
 
-/// Consume a [`ModuleGraph`] and produce an [`ExecutionPlan`] with updated [`BufferAllocState`].
+/// Consume a [`ModuleGraph`] and produce an [`ExecutionPlan`] with updated
+/// [`BufferAllocState`] and [`ModuleAllocState`].
 ///
 /// Validates that exactly one `AudioOut` node is present, orders modules by
 /// ascending [`NodeId`], and resolves per-module input/output buffer assignments.
 /// Unconnected input ports are assigned the permanent-zero buffer (index 0);
 /// output ports get a dedicated buffer from the pool.
 ///
-/// ## Stable allocation
+/// ## Stable buffer allocation
 ///
 /// Buffer indices are assigned via `alloc`:
 /// - If the `(NodeId, output_port_index)` key already exists in `alloc.output_buf`,
@@ -274,24 +275,29 @@ impl ExecutionPlan {
 /// - Output ports present in `alloc.output_buf` but absent from the new graph have
 ///   their indices pushed onto the returned freelist and appended to `to_zero`.
 ///
-/// ## Module instance reuse
+/// ## Module pool allocation
 ///
-/// If `registry` is `Some`, for each module in the new graph the registry is
-/// checked for an existing instance with the same [`InstanceId`]. If found, the
-/// old (stateful) instance is used instead of the graph's fresh instance.
+/// Module pool slots are assigned via `module_alloc`:
+/// - Surviving modules (same [`InstanceId`] in both old and new graph) reuse their
+///   existing pool slot and appear in neither `new_modules` nor `tombstones`.
+/// - New modules receive a slot from the freelist or high-water mark and are placed
+///   in `ExecutionPlan::new_modules` for installation by the audio callback.
+/// - Removed modules have their slots tombstoned; indices appear in
+///   `ExecutionPlan::tombstones` for the audio callback to free.
 pub fn build_patch(
     graph: ModuleGraph,
-    mut registry: Option<&mut ModuleInstanceRegistry>,
     alloc: &BufferAllocState,
+    module_alloc: &ModuleAllocState,
     pool_capacity: usize,
-) -> Result<(ExecutionPlan, BufferAllocState), BuildError> {
+    module_pool_capacity: usize,
+) -> Result<(ExecutionPlan, BufferAllocState, ModuleAllocState), BuildError> {
     let node_ids = graph.node_ids();
     let edges = graph.edge_list();
 
     // Snapshot descriptors and instance IDs before consuming the graph.
     struct NodeMeta {
         descriptor: ModuleDescriptor,
-        instance_id: patches_core::InstanceId,
+        instance_id: InstanceId,
         is_sink: bool,
     }
     let meta: HashMap<NodeId, NodeMeta> = node_ids
@@ -344,18 +350,10 @@ pub fn build_patch(
     let mut modules = graph.into_modules();
 
     // Stable buffer index allocation.
-    //
-    // Index 0: permanent-zero slot (never written to, used for unconnected inputs).
-    // Indices 1..: cable buffers, allocated stably so that cables surviving a re-plan
-    // keep the same index and require no zeroing.
-    //
-    // `new_freelist` begins as whatever was left over in `alloc.freelist` from
-    // previous plans; indices freed in this plan are appended at the end.
     let mut new_freelist: Vec<usize> = alloc.freelist.clone();
     let mut new_hwm: usize = alloc.next_hwm;
     let mut to_zero: Vec<usize> = Vec::new();
 
-    // Map (NodeId, output_port_index) → buffer pool index for this plan.
     let mut output_buf: HashMap<(NodeId, usize), usize> = HashMap::new();
 
     for id in &order {
@@ -363,10 +361,8 @@ pub fn build_patch(
         for (port_idx, _) in desc.outputs.iter().enumerate() {
             let key = (id.clone(), port_idx);
             if let Some(&existing) = alloc.output_buf.get(&key) {
-                // Stable connection: reuse the same buffer index — no zeroing needed.
                 output_buf.insert(key, existing);
             } else {
-                // New output port: try the freelist first (LIFO), then the hwm.
                 let idx = if let Some(recycled) = new_freelist.pop() {
                     recycled
                 } else {
@@ -391,25 +387,27 @@ pub fn build_patch(
         }
     }
 
-    // Build the module slots in execution order.
+    // Stable module pool allocation.
+    let new_ids: HashSet<InstanceId> = node_ids.iter().map(|id| meta[id].instance_id).collect();
+    let module_diff = module_alloc.diff(&new_ids, module_pool_capacity)?;
+
+    // Build the module slots in execution order, collecting new module instances.
     let mut slots: Vec<ModuleSlot> = Vec::with_capacity(order.len());
+    let mut new_modules: Vec<(usize, Box<dyn Module>)> = Vec::new();
 
     for id in &order {
         let desc = &meta[id].descriptor;
 
-        // Resolve (buffer_index, scale) for each input port.
         let (input_buffers, input_scales): (Vec<usize>, Vec<f64>) = desc
             .inputs
             .iter()
             .map(|port| {
-                // Find the edge that drives this input port (match on name AND index).
                 let (buf_idx, scale) = edges
                     .iter()
                     .find(|(_, _, _, to, in_name, in_idx, _)| {
                         *to == *id && in_name == port.name && *in_idx == port.index
                     })
                     .map(|(from, out_name, out_idx, _, _, _, scale)| -> Result<(usize, f64), BuildError> {
-                        // Resolve the driving output's buffer index.
                         let from_desc = &meta[from].descriptor;
                         let out_port_idx = from_desc
                             .outputs
@@ -424,7 +422,7 @@ pub fn build_patch(
                         Ok((output_buf[&(from.clone(), out_port_idx)], *scale))
                     })
                     .transpose()?
-                    .unwrap_or((0, 1.0)); // 0 = zero buffer, 1.0 = no scale for unconnected inputs
+                    .unwrap_or((0, 1.0));
                 Ok((buf_idx, scale))
             })
             .collect::<Result<Vec<_>, BuildError>>()?
@@ -441,18 +439,23 @@ pub fn build_patch(
         let n_in = desc.inputs.len();
         let n_out = desc.outputs.len();
 
-        // Prefer an old (stateful) instance from the registry when available.
+        let instance_id = meta[id].instance_id;
+        let pool_index = module_diff.slot_map[&instance_id];
+
+        // Take the fresh module from the graph.
         let fresh = modules.remove(id).ok_or_else(|| {
             BuildError::InternalError(format!("module {id:?} missing from map"))
         })?;
-        let module = if let Some(reg) = registry.as_deref_mut() {
-            reg.take(meta[id].instance_id).unwrap_or(fresh)
-        } else {
-            fresh
-        };
+
+        // New modules go into new_modules; surviving modules stay in the pool untouched
+        // (the fresh instance from the graph is dropped).
+        if !module_alloc.pool_map.contains_key(&instance_id) {
+            new_modules.push((pool_index, fresh));
+        }
+        // If surviving, `fresh` is dropped here — the stateful instance remains in the pool.
 
         slots.push(ModuleSlot {
-            module,
+            pool_index,
             input_buffers,
             input_scales,
             output_buffers,
@@ -461,18 +464,26 @@ pub fn build_patch(
         });
     }
 
+    let tombstones = module_diff.tombstoned;
+
     let new_alloc = BufferAllocState {
         output_buf,
         freelist: new_freelist,
         next_hwm: new_hwm,
     };
 
-    // Build the signal_dispatch sorted array: (InstanceId → slot index).
+    let new_module_alloc = ModuleAllocState {
+        pool_map: module_diff.slot_map,
+        freelist: module_diff.freelist,
+        next_hwm: module_diff.next_hwm,
+    };
+
+    // Build the signal_dispatch sorted array: (InstanceId → pool_index).
     // Sorted by InstanceId so the audio callback can binary-search in O(log M).
     let mut dispatch: Vec<(InstanceId, usize)> = slots
         .iter()
-        .enumerate()
-        .map(|(i, s)| (s.module.instance_id(), i))
+        .zip(order.iter())
+        .map(|(slot, id)| (meta[id].instance_id, slot.pool_index))
         .collect();
     dispatch.sort_unstable_by_key(|(id, _)| *id);
     let signal_dispatch = dispatch.into_boxed_slice();
@@ -483,8 +494,11 @@ pub fn build_patch(
             to_zero,
             audio_out_index,
             signal_dispatch,
+            new_modules,
+            tombstones,
         },
         new_alloc,
+        new_module_alloc,
     ))
 }
 
@@ -493,7 +507,7 @@ pub fn build_patch(
 mod tests {
     use super::*;
     use std::collections::HashSet;
-    use patches_core::{Module, NodeId, PortRef};
+    use patches_core::{AudioEnvironment, Module, NodeId, PortRef};
     use patches_modules::{AudioOut, SineOscillator};
 
     fn p(name: &'static str) -> PortRef {
@@ -511,28 +525,51 @@ mod tests {
         (graph, sine_id, out_id)
     }
 
-    fn make_pool(pool_capacity: usize) -> Vec<[f64; 2]> {
-        vec![[0.0; 2]; pool_capacity]
+    fn make_buffer_pool(capacity: usize) -> Vec<[f64; 2]> {
+        vec![[0.0; 2]; capacity]
     }
 
-    fn default_build(graph: ModuleGraph) -> (ExecutionPlan, BufferAllocState) {
-        build_patch(graph, None, &BufferAllocState::default(), 256).expect("build should succeed")
+    fn make_module_pool(capacity: usize) -> Vec<Option<Box<dyn Module>>> {
+        (0..capacity).map(|_| None).collect()
+    }
+
+    /// Build a plan from scratch (no prior alloc state) and install its modules.
+    fn default_build(
+        graph: ModuleGraph,
+    ) -> (ExecutionPlan, BufferAllocState, ModuleAllocState, Vec<Option<Box<dyn Module>>>) {
+        let mut plan = build_patch(
+            graph,
+            &BufferAllocState::default(),
+            &ModuleAllocState::default(),
+            256,
+            256,
+        )
+        .expect("build should succeed");
+
+        // Simulate SoundEngine: install new_modules into module pool and initialise.
+        let mut module_pool = make_module_pool(256);
+        let env = AudioEnvironment { sample_rate: 44100.0 };
+        for (idx, mut m) in plan.0.new_modules.drain(..) {
+            m.initialise(&env);
+            module_pool[idx] = Some(m);
+        }
+
+        (plan.0, plan.1, plan.2, module_pool)
     }
 
     #[test]
     fn builds_minimal_plan_with_correct_order() {
         let (graph, _, _) = sine_to_audio_out_graph();
-        let (plan, _) = default_build(graph);
+        let (plan, _, _, module_pool) = default_build(graph);
 
-        // AudioOut must be last (after the sine oscillator).
         let audio_out_idx = plan.audio_out_index;
         let sine_idx = plan
             .slots
             .iter()
             .position(|s| {
-                s.module
-                    .as_any()
-                    .downcast_ref::<SineOscillator>()
+                module_pool[s.pool_index]
+                    .as_ref()
+                    .and_then(|m| m.as_any().downcast_ref::<SineOscillator>())
                     .is_some()
             })
             .expect("sine slot not found");
@@ -543,21 +580,19 @@ mod tests {
     #[test]
     fn fanout_buffer_shared_between_both_inputs() {
         let (graph, _, _) = sine_to_audio_out_graph();
-        let (plan, _) = default_build(graph);
+        let (plan, _, _, _) = default_build(graph);
 
         let audio_out_idx = plan.audio_out_index;
         let sine_idx = plan
             .slots
             .iter()
             .position(|s| {
-                s.module
-                    .as_any()
-                    .downcast_ref::<SineOscillator>()
-                    .is_some()
+                // Find by pool_index: sine is not AudioOut, check by slot position
+                // (sine is at lower index than AudioOut per ascending-NodeId order)
+                s.pool_index != plan.slots[audio_out_idx].pool_index
             })
             .unwrap();
 
-        // Both AudioOut inputs must share the same buffer as SineOscillator's output.
         let sine_out_buf = plan.slots[sine_idx].output_buffers[0];
         let left_buf = plan.slots[audio_out_idx].input_buffers[0];
         let right_buf = plan.slots[audio_out_idx].input_buffers[1];
@@ -569,18 +604,16 @@ mod tests {
     #[test]
     fn tick_produces_bounded_audio_output() {
         let (graph, _, _) = sine_to_audio_out_graph();
-        let (mut plan, _) = default_build(graph);
-        plan.initialise(&patches_core::AudioEnvironment { sample_rate: 44100.0 });
-        let mut pool = make_pool(256);
+        let (mut plan, _, _, mut module_pool) = default_build(graph);
+        let mut buffer_pool = make_buffer_pool(256);
 
         for i in 0..1000 {
-            plan.tick(&mut pool, i % 2);
+            plan.tick(&mut module_pool, &mut buffer_pool, i % 2);
         }
 
-        assert!(plan.last_left().abs() <= 1.0);
-        assert!(plan.last_right().abs() <= 1.0);
-        // After enough samples a 440 Hz sine will have produced non-zero output.
-        assert!(plan.last_left().abs() > 0.0);
+        assert!(plan.last_left(&module_pool).abs() <= 1.0);
+        assert!(plan.last_right(&module_pool).abs() <= 1.0);
+        assert!(plan.last_left(&module_pool).abs() > 0.0);
     }
 
     #[test]
@@ -588,7 +621,7 @@ mod tests {
         let mut graph = ModuleGraph::new();
         graph.add_module("sine", Box::new(SineOscillator::new(440.0))).unwrap();
         assert!(matches!(
-            build_patch(graph, None, &BufferAllocState::default(), 256),
+            build_patch(graph, &BufferAllocState::default(), &ModuleAllocState::default(), 256, 256),
             Err(BuildError::NoAudioOut)
         ));
     }
@@ -607,15 +640,13 @@ mod tests {
         graph.connect(&sine_id, p("out"), &out2, p("left"), 1.0).unwrap();
         graph.connect(&sine_id, p("out"), &out2, p("right"), 1.0).unwrap();
         assert!(matches!(
-            build_patch(graph, None, &BufferAllocState::default(), 256),
+            build_patch(graph, &BufferAllocState::default(), &ModuleAllocState::default(), 256, 256),
             Err(BuildError::MultipleAudioOut)
         ));
     }
 
     #[test]
     fn input_scale_is_applied_at_tick_time() {
-        // Build a graph with scale = 0.5 on both connections from the sine oscillator
-        // to AudioOut. The output should be half what it would be with scale = 1.0.
         let mut graph_half = ModuleGraph::new();
         graph_half.add_module("sine", Box::new(SineOscillator::new(440.0))).unwrap();
         graph_half.add_module("out", Box::new(patches_modules::AudioOut::new())).unwrap();
@@ -632,24 +663,19 @@ mod tests {
         graph_full.connect(&sine_f, p("out"), &out_f, p("left"), 1.0).unwrap();
         graph_full.connect(&sine_f, p("out"), &out_f, p("right"), 1.0).unwrap();
 
-        let env = patches_core::AudioEnvironment { sample_rate: 44100.0 };
-        let (mut plan_half, _) = build_patch(graph_half, None, &BufferAllocState::default(), 256).unwrap();
-        let (mut plan_full, _) = build_patch(graph_full, None, &BufferAllocState::default(), 256).unwrap();
-        plan_half.initialise(&env);
-        plan_full.initialise(&env);
-        let mut pool_half = make_pool(256);
-        let mut pool_full = make_pool(256);
+        let (mut plan_half, _, _, mut pool_half) = default_build(graph_half);
+        let (mut plan_full, _, _, mut pool_full) = default_build(graph_full);
+        let mut buffer_half = make_buffer_pool(256);
+        let mut buffer_full = make_buffer_pool(256);
 
-        // Tick both plans the same number of times so they are in phase.
         for i in 0..100 {
-            plan_half.tick(&mut pool_half, i % 2);
-            plan_full.tick(&mut pool_full, i % 2);
+            plan_half.tick(&mut pool_half, &mut buffer_half, i % 2);
+            plan_full.tick(&mut pool_full, &mut buffer_full, i % 2);
         }
 
-        let half = plan_half.last_left();
-        let full = plan_full.last_left();
+        let half = plan_half.last_left(&pool_half);
+        let full = plan_full.last_left(&pool_full);
 
-        // Both should be non-zero (avoid testing at a zero crossing).
         if full.abs() > 1e-6 {
             let ratio = half / full;
             assert!(
@@ -661,15 +687,12 @@ mod tests {
 
     // ── Acceptance criteria: T-0025 ──────────────────────────────────────────
 
-    /// Build plan A then plan B (one module removed, one unchanged); assert:
-    /// - The unchanged module's buffer index is identical in both plans.
-    /// - The removed module's freed buffer index appears in plan B's `to_zero`.
     #[test]
     fn stable_buffer_index_for_unchanged_module_across_replan() {
         let pool_capacity = 256;
         let alloc0 = BufferAllocState::default();
+        let module_alloc0 = ModuleAllocState::default();
 
-        // Plan A: sine_a + sine_b + AudioOut.
         let mut graph_a = ModuleGraph::new();
         graph_a.add_module("sine_a", Box::new(SineOscillator::new(440.0))).unwrap();
         graph_a.add_module("sine_b", Box::new(SineOscillator::new(880.0))).unwrap();
@@ -680,12 +703,11 @@ mod tests {
         graph_a.connect(&sine_a, p("out"), &out_a, p("left"), 1.0).unwrap();
         graph_a.connect(&sine_b, p("out"), &out_a, p("right"), 1.0).unwrap();
 
-        let (_plan_a, alloc_a) = build_patch(graph_a, None, &alloc0, pool_capacity).unwrap();
+        let (_plan_a, alloc_a, module_alloc_a) =
+            build_patch(graph_a, &alloc0, &module_alloc0, pool_capacity, pool_capacity).unwrap();
 
-        // Find sine_a's buffer index in plan A via the alloc state.
         let buf_a = alloc_a.output_buf[&(NodeId::from("sine_a"), 0)];
 
-        // Plan B: same sine_a (same NodeId) + AudioOut, but sine_b is gone.
         let mut graph_b = ModuleGraph::new();
         graph_b.add_module("sine_a", Box::new(SineOscillator::new(440.0))).unwrap();
         graph_b.add_module("out", Box::new(AudioOut::new())).unwrap();
@@ -694,36 +716,26 @@ mod tests {
         graph_b.connect(&sine_a_b, p("out"), &out_b, p("left"), 1.0).unwrap();
         graph_b.connect(&sine_a_b, p("out"), &out_b, p("right"), 1.0).unwrap();
 
-        let (plan_b, alloc_b) = build_patch(graph_b, None, &alloc_a, pool_capacity).unwrap();
+        let (plan_b, alloc_b, _) =
+            build_patch(graph_b, &alloc_a, &module_alloc_a, pool_capacity, pool_capacity).unwrap();
 
         let buf_b = alloc_b.output_buf[&(NodeId::from("sine_a"), 0)];
 
-        assert_eq!(
-            buf_a, buf_b,
-            "sine_a output buffer must be identical across re-plan (stable allocation)"
-        );
+        assert_eq!(buf_a, buf_b, "sine_a output buffer must be identical across re-plan");
 
-        // sine_b's buffer should be freed and appear in plan_b.to_zero.
         let freed_buf = alloc_a.output_buf[&(NodeId::from("sine_b"), 0)];
         assert!(
             plan_b.to_zero.contains(&freed_buf),
-            "freed buffer index {freed_buf} must appear in plan_b.to_zero (got {:?})",
-            plan_b.to_zero
+            "freed buffer index {freed_buf} must appear in plan_b.to_zero"
         );
     }
 
-    /// Run many re-plans that alternate between adding and removing a module.
-    /// Assert that `next_hwm` does not grow unboundedly — the freelist recycles
-    /// freed indices before the hwm is ever incremented.
     #[test]
     fn freelist_recycles_indices_preventing_hwm_growth() {
         let pool_capacity = 256;
+        let module_alloc0 = ModuleAllocState::default();
 
-        // Plan type A: two oscillators + AudioOut  → allocates 2 buffer indices.
-        // Plan type B: one oscillator  + AudioOut  → one buffer freed to freelist.
-        // Cycling A → B → A → B … must keep hwm constant after the first A.
-
-        let build_two = |alloc: &BufferAllocState| {
+        let build_two = |alloc: &BufferAllocState, module_alloc: &ModuleAllocState| {
             let mut g = ModuleGraph::new();
             let s1 = NodeId::from("s1");
             let s2 = NodeId::from("s2");
@@ -733,10 +745,11 @@ mod tests {
             g.add_module(out.clone(), Box::new(AudioOut::new())).unwrap();
             g.connect(&s1, p("out"), &out, p("left"), 1.0).unwrap();
             g.connect(&s2, p("out"), &out, p("right"), 1.0).unwrap();
-            build_patch(g, None, alloc, pool_capacity).unwrap().1
+            let (_, a, ma) = build_patch(g, alloc, module_alloc, pool_capacity, pool_capacity).unwrap();
+            (a, ma)
         };
 
-        let build_one = |alloc: &BufferAllocState| {
+        let build_one = |alloc: &BufferAllocState, module_alloc: &ModuleAllocState| {
             let mut g = ModuleGraph::new();
             let s = NodeId::from("s1");
             let out = NodeId::from("out");
@@ -744,29 +757,33 @@ mod tests {
             g.add_module(out.clone(), Box::new(AudioOut::new())).unwrap();
             g.connect(&s, p("out"), &out, p("left"), 1.0).unwrap();
             g.connect(&s, p("out"), &out, p("right"), 1.0).unwrap();
-            build_patch(g, None, alloc, pool_capacity).unwrap().1
+            let (_, a, ma) = build_patch(g, alloc, module_alloc, pool_capacity, pool_capacity).unwrap();
+            (a, ma)
         };
 
-        let alloc_a = build_two(&BufferAllocState::default());
-        let hwm_after_first_two = alloc_a.next_hwm; // should be 3
+        let (alloc_a, module_alloc_a) = build_two(&BufferAllocState::default(), &module_alloc0);
+        let hwm_after_first_two = alloc_a.next_hwm;
 
-        let mut current = alloc_a;
+        let mut current_alloc = alloc_a;
+        let mut current_module_alloc = module_alloc_a;
         for _ in 0..20 {
-            current = build_one(&current);  // free one index → freelist grows
-            current = build_two(&current);  // reuse from freelist → hwm stays
+            let (a, ma) = build_one(&current_alloc, &current_module_alloc);
+            current_alloc = a;
+            current_module_alloc = ma;
+            let (a, ma) = build_two(&current_alloc, &current_module_alloc);
+            current_alloc = a;
+            current_module_alloc = ma;
         }
 
         assert_eq!(
-            current.next_hwm, hwm_after_first_two,
+            current_alloc.next_hwm, hwm_after_first_two,
             "hwm grew from {hwm_after_first_two} to {}: freelist should have prevented new allocations",
-            current.next_hwm
+            current_alloc.next_hwm
         );
     }
 
     #[test]
     fn pool_exhausted_error_when_capacity_exceeded() {
-        // Pool capacity of 2 leaves only index 1 (index 0 is the zero slot).
-        // Building a graph with any output ports should exhaust it.
         let mut graph = ModuleGraph::new();
         let sine = NodeId::from("sine");
         let out = NodeId::from("out");
@@ -775,9 +792,8 @@ mod tests {
         graph.connect(&sine, p("out"), &out, p("left"), 1.0).unwrap();
         graph.connect(&sine, p("out"), &out, p("right"), 1.0).unwrap();
 
-        // capacity=1 means only the zero slot exists; any allocation will fail.
         assert!(matches!(
-            build_patch(graph, None, &BufferAllocState::default(), 1),
+            build_patch(graph, &BufferAllocState::default(), &ModuleAllocState::default(), 1, 256),
             Err(BuildError::PoolExhausted)
         ));
     }
@@ -785,8 +801,6 @@ mod tests {
     // ── ModuleAllocState unit tests ───────────────────────────────────────────
 
     fn make_ids(n: u64) -> Vec<InstanceId> {
-        // InstanceId is an opaque newtype wrapping a u64; we fabricate them via
-        // the atomic counter on a temporary module so they are genuine values.
         (0..n)
             .map(|_| SineOscillator::new(440.0).instance_id())
             .collect()
@@ -796,7 +810,6 @@ mod tests {
         ids.iter().copied().collect()
     }
 
-    /// Fresh alloc: all modules are new; HWM advances from 0 to N.
     #[test]
     fn module_alloc_fresh_advances_hwm() {
         let state = ModuleAllocState::default();
@@ -809,30 +822,25 @@ mod tests {
         assert!(diff.tombstoned.is_empty());
         assert!(diff.freelist.is_empty());
 
-        // Each id should get a unique slot in [0, 3).
         let mut slots: Vec<usize> = diff.slot_map.values().copied().collect();
         slots.sort_unstable();
         assert_eq!(slots, vec![0, 1, 2]);
     }
 
-    /// Stable alloc: same InstanceIds across two builds reuse their indices.
     #[test]
     fn module_alloc_stable_reuses_slots() {
         let ids = make_ids(2);
         let new_ids = ids_set(&ids);
 
-        // First diff: assign slots.
         let state0 = ModuleAllocState::default();
         let diff0 = state0.diff(&new_ids, 64).unwrap();
 
-        // Promote to a new state.
         let state1 = ModuleAllocState {
             pool_map: diff0.slot_map.clone(),
             freelist: diff0.freelist,
             next_hwm: diff0.next_hwm,
         };
 
-        // Second diff with the same ids: should reuse identical slots.
         let diff1 = state1.diff(&new_ids, 64).unwrap();
 
         for id in &ids {
@@ -846,19 +854,16 @@ mod tests {
         assert!(diff1.tombstoned.is_empty());
     }
 
-    /// Tombstone + recycle: removed module's slot goes to freelist; next build reuses it.
     #[test]
     fn module_alloc_tombstone_then_recycle() {
         let ids = make_ids(2);
         let id_a = ids[0];
         let id_b = ids[1];
 
-        // Build 1: both modules.
         let state0 = ModuleAllocState::default();
         let diff0 = state0.diff(&ids_set(&ids), 64).unwrap();
         let slot_b = diff0.slot_map[&id_b];
 
-        // Build 2: remove id_b → slot_b should be tombstoned.
         let state1 = ModuleAllocState {
             pool_map: diff0.slot_map,
             freelist: diff0.freelist,
@@ -866,17 +871,10 @@ mod tests {
         };
         let diff1 = state1.diff(&ids_set(&[id_a]), 64).unwrap();
 
-        assert!(
-            diff1.tombstoned.contains(&slot_b),
-            "slot {slot_b} must appear in tombstoned after id_b removed"
-        );
-        assert!(
-            diff1.freelist.contains(&slot_b),
-            "slot {slot_b} must be in freelist after tombstone"
-        );
+        assert!(diff1.tombstoned.contains(&slot_b));
+        assert!(diff1.freelist.contains(&slot_b));
         let hwm_after_remove = diff1.next_hwm;
 
-        // Build 3: add a brand-new module → should recycle slot_b from freelist.
         let id_c = make_ids(1)[0];
         let state2 = ModuleAllocState {
             pool_map: diff1.slot_map,
@@ -889,12 +887,10 @@ mod tests {
         assert_eq!(diff2.next_hwm, hwm_after_remove, "hwm must not grow when recycling");
     }
 
-    /// ModulePoolExhausted is returned when capacity is exceeded.
     #[test]
     fn module_alloc_pool_exhausted() {
         let state = ModuleAllocState::default();
         let ids = make_ids(3);
-        // capacity=2 cannot fit 3 modules (slots 0 and 1 are the max).
         let result = state.diff(&ids_set(&ids), 2);
         assert!(
             matches!(result, Err(BuildError::ModulePoolExhausted)),

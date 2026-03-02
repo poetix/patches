@@ -8,6 +8,10 @@ publish = false
 name = "replan_integration"
 path = "tests/replan_integration.rs"
 
+[[test]]
+name = "state_preservation"
+path = "tests/state_preservation.rs"
+
 [dev-dependencies]
 patches-core = { path = "../patches-core" }
 patches-engine = { path = "../patches-engine" }

@@ -12,6 +12,10 @@ path = "tests/replan_integration.rs"
 name = "state_preservation"
 path = "tests/state_preservation.rs"
 
+[[test]]
+name = "stable_buffer_indices"
+path = "tests/stable_buffer_indices.rs"
+
 [dev-dependencies]
 patches-core = { path = "../patches-core" }
 patches-engine = { path = "../patches-engine" }

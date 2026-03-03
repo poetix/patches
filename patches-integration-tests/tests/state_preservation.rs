@@ -23,7 +23,7 @@ use patches_core::{
     AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleGraph, NodeId, PortDescriptor,
     PortRef,
 };
-use patches_engine::{ExecutionPlan, Planner};
+use patches_engine::{ExecutionPlan, ModulePool, Planner};
 use patches_modules::AudioOut;
 
 // ── StatefulCounter ───────────────────────────────────────────────────────────
@@ -80,50 +80,56 @@ impl Module for StatefulCounter {
 // ── HeadlessEngine ────────────────────────────────────────────────────────────
 
 struct HeadlessEngine {
-    plan: Option<ExecutionPlan>,
-    buffer_pool: Vec<[f64; 2]>,
-    module_pool: Vec<Option<Box<dyn Module>>>,
+    plan: ExecutionPlan,
+    buffer_pool: Box<[[f64; 2]]>,
+    module_pool: ModulePool,
     wi: usize,
     env: AudioEnvironment,
 }
 
 impl HeadlessEngine {
     fn new(
-        plan: ExecutionPlan,
+        mut plan: ExecutionPlan,
         buffer_pool_capacity: usize,
         module_pool_capacity: usize,
         env: AudioEnvironment,
     ) -> Self {
-        let mut engine = Self {
-            plan: None,
-            buffer_pool: vec![[0.0; 2]; buffer_pool_capacity],
-            module_pool: (0..module_pool_capacity).map(|_| None).collect(),
-            wi: 0,
-            env,
-        };
-        engine.adopt_plan(plan);
-        engine
+        let mut buffer_pool = vec![[0.0_f64; 2]; buffer_pool_capacity].into_boxed_slice();
+        let mut module_pool = ModulePool::new(module_pool_capacity);
+        for &idx in &plan.tombstones {
+            module_pool.tombstone(idx);
+        }
+        for (idx, mut m) in plan.new_modules.drain(..) {
+            m.initialise(&env);
+            module_pool.install(idx, m);
+        }
+        for &i in &plan.to_zero {
+            buffer_pool[i] = [0.0; 2];
+        }
+        Self { plan, buffer_pool, module_pool, wi: 0, env }
     }
 
     fn adopt_plan(&mut self, mut plan: ExecutionPlan) {
-        // Tombstone first: the freelist may recycle tombstoned slots for new modules.
         for &idx in &plan.tombstones {
-            self.module_pool[idx].take();
+            self.module_pool.tombstone(idx);
         }
         for (idx, mut m) in plan.new_modules.drain(..) {
             m.initialise(&self.env);
-            self.module_pool[idx] = Some(m);
+            self.module_pool.install(idx, m);
         }
         for &i in &plan.to_zero {
             self.buffer_pool[i] = [0.0; 2];
         }
-        self.plan = Some(plan);
+        self.plan = plan;
     }
 
     fn tick(&mut self) {
-        let plan = self.plan.as_mut().expect("HeadlessEngine::tick: no current plan");
-        plan.tick(&mut self.module_pool, &mut self.buffer_pool, self.wi);
+        self.plan.tick(&mut self.module_pool, &mut self.buffer_pool, self.wi);
         self.wi = 1 - self.wi;
+    }
+
+    fn last_left(&self) -> f64 {
+        self.module_pool.read_sink_left()
     }
 }
 
@@ -167,15 +173,6 @@ fn replan_preserves_state_for_surviving_instance() {
     let counter_id = counter_a.instance_id();
 
     let plan_a = planner.build(counter_graph(counter_a)).unwrap();
-
-    // Find counter's pool index before adoption drains new_modules.
-    let counter_pool_idx = plan_a
-        .new_modules
-        .iter()
-        .find(|(_, m)| m.as_any().downcast_ref::<StatefulCounter>().is_some())
-        .map(|(idx, _)| *idx)
-        .expect("StatefulCounter not in plan_a.new_modules");
-
     let mut engine = HeadlessEngine::new(plan_a, BUFFER_POOL_CAPACITY, MODULE_POOL_CAPACITY, ENV);
 
     for _ in 0..10 {
@@ -193,17 +190,17 @@ fn replan_preserves_state_for_surviving_instance() {
     );
 
     engine.adopt_plan(plan_b);
+    // Two ticks needed: the counter's output reaches the sink one tick later (1-sample
+    // cable delay). Tick N+1 increments count to 11 and writes it to the cable buffer;
+    // tick N+2 the sink reads that value and caches it.
+    engine.tick();
     engine.tick();
 
-    let count = engine.module_pool[counter_pool_idx]
-        .as_ref()
-        .expect("counter must still be in pool")
-        .as_any()
-        .downcast_ref::<StatefulCounter>()
-        .expect("must be StatefulCounter")
-        .count;
-
-    assert_eq!(count, 11, "state must be preserved: count was 10, ticked once → 11");
+    assert_eq!(
+        engine.last_left(),
+        11.0,
+        "state must be preserved: count was 10, two ticks later sink sees 11"
+    );
 }
 
 /// A module replaced by a fresh instance of the same type must start from its
@@ -229,24 +226,20 @@ fn replan_fresh_instance_starts_from_default_state() {
     // Build plan B with a completely fresh StatefulCounter (new InstanceId).
     let plan_b = planner.build(counter_graph(StatefulCounter::new())).unwrap();
 
-    // Find the new counter's pool index.
-    let new_counter_pool_idx = plan_b
-        .new_modules
-        .iter()
-        .find(|(_, m)| m.as_any().downcast_ref::<StatefulCounter>().is_some())
-        .map(|(idx, _)| *idx)
-        .expect("fresh StatefulCounter must be in plan_b.new_modules");
+    assert!(
+        plan_b.new_modules.iter().any(|(_, m)| m.as_any().downcast_ref::<StatefulCounter>().is_some()),
+        "fresh StatefulCounter must appear in plan_b.new_modules"
+    );
 
     engine.adopt_plan(plan_b);
+    // Two ticks needed: the new cable buffer is zeroed on adoption; tick N+1 the fresh
+    // counter writes count=1 into it; tick N+2 the sink reads 1 and caches it.
+    engine.tick();
     engine.tick();
 
-    let count = engine.module_pool[new_counter_pool_idx]
-        .as_ref()
-        .expect("counter must be in pool")
-        .as_any()
-        .downcast_ref::<StatefulCounter>()
-        .expect("must be StatefulCounter")
-        .count;
-
-    assert_eq!(count, 1, "fresh replacement instance must start from count=0, ticked once → 1");
+    assert_eq!(
+        engine.last_left(),
+        1.0,
+        "fresh replacement instance must start from count=0, two ticks later sink sees 1"
+    );
 }

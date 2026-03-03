@@ -40,86 +40,75 @@ use patches_core::{
     AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleGraph, NodeId, PortDescriptor,
     PortRef,
 };
-use patches_engine::{ExecutionPlan, Planner};
+use patches_engine::{ExecutionPlan, ModulePool, Planner};
 use patches_modules::{AudioOut, SineOscillator};
 
 // ── HeadlessEngine ────────────────────────────────────────────────────────────
 
 /// Synchronous, device-free engine fixture that mirrors the real audio callback.
 ///
-/// The CPAL callback does, in order:
-///   1. Pop a new plan from the lock-free channel (if available).
-///   2. Install `new_modules` into the module pool.
-///   3. Tombstone removed modules (`pool[idx].take()`).
-///   4. Zero every index in `new_plan.to_zero`.
-///   5. Set `current_plan = new_plan`.
-///   6. Tick all modules for each sample in the buffer.
+/// `adopt_plan` replicates the callback plan-swap sequence:
+///   1. Tombstone removed modules.
+///   2. Install and initialise new modules.
+///   3. Zero cable buffer slots listed in `to_zero`.
+///   4. Replace the current plan.
 ///
-/// `adopt_plan` replicates steps 2–5; `tick` replicates step 6.
+/// `tick` advances the plan by one sample.
 struct HeadlessEngine {
-    plan: Option<ExecutionPlan>,
-    buffer_pool: Vec<[f64; 2]>,
-    module_pool: Vec<Option<Box<dyn Module>>>,
+    plan: ExecutionPlan,
+    buffer_pool: Box<[[f64; 2]]>,
+    module_pool: ModulePool,
     wi: usize,
     env: AudioEnvironment,
 }
 
 impl HeadlessEngine {
     fn new(
-        plan: ExecutionPlan,
+        mut plan: ExecutionPlan,
         buffer_pool_capacity: usize,
         module_pool_capacity: usize,
         env: AudioEnvironment,
     ) -> Self {
-        let mut engine = Self {
-            plan: None,
-            buffer_pool: vec![[0.0; 2]; buffer_pool_capacity],
-            module_pool: (0..module_pool_capacity).map(|_| None).collect(),
-            wi: 0,
-            env,
-        };
-        engine.adopt_plan(plan);
-        engine
+        let mut buffer_pool = vec![[0.0_f64; 2]; buffer_pool_capacity].into_boxed_slice();
+        let mut module_pool = ModulePool::new(module_pool_capacity);
+        for &idx in &plan.tombstones {
+            module_pool.tombstone(idx);
+        }
+        for (idx, mut m) in plan.new_modules.drain(..) {
+            m.initialise(&env);
+            module_pool.install(idx, m);
+        }
+        for &i in &plan.to_zero {
+            buffer_pool[i] = [0.0; 2];
+        }
+        Self { plan, buffer_pool, module_pool, wi: 0, env }
     }
 
-    /// Adopt a new execution plan, mirroring the audio-callback plan-swap sequence:
-    ///
-    ///   1. Tombstone removed modules (`module_pool[idx].take()`).
-    ///   2. Install `plan.new_modules` into the module pool (initialising first).
-    ///   3. Zero every slot in `plan.to_zero`.
-    ///   4. Replace `self.plan`.
-    ///
-    /// Tombstones are processed before new modules because the freelist may
-    /// recycle tombstoned slots for new modules.
     fn adopt_plan(&mut self, mut plan: ExecutionPlan) {
-        // Tombstone removed modules first — drop happens here.
         for &idx in &plan.tombstones {
-            self.module_pool[idx].take();
+            self.module_pool.tombstone(idx);
         }
-        // Install new modules (initialise before inserting).
         for (idx, mut m) in plan.new_modules.drain(..) {
             m.initialise(&self.env);
-            self.module_pool[idx] = Some(m);
+            self.module_pool.install(idx, m);
         }
-        // Zero freed/new cable buffer slots.
         for &i in &plan.to_zero {
             self.buffer_pool[i] = [0.0; 2];
         }
-        self.plan = Some(plan);
+        self.plan = plan;
     }
 
     fn tick(&mut self) {
-        let plan = self.plan.as_mut().expect("HeadlessEngine::tick: no current plan");
-        plan.tick(&mut self.module_pool, &mut self.buffer_pool, self.wi);
+        self.plan.tick(&mut self.module_pool, &mut self.buffer_pool, self.wi);
         self.wi = 1 - self.wi;
     }
 
     fn last_left(&self) -> f64 {
-        self.plan.as_ref().map_or(0.0, |p| p.last_left(&self.module_pool))
+        self.module_pool.read_sink_left()
     }
 
     fn last_right(&self) -> f64 {
-        self.plan.as_ref().map_or(0.0, |p| p.last_right(&self.module_pool))
+        self.module_pool.read_sink_right()
     }
 
     fn pool_slot(&self, idx: usize) -> [f64; 2] {

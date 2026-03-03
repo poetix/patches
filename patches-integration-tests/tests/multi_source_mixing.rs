@@ -5,64 +5,66 @@ use patches_core::{
     AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleGraph, NodeId, PortDescriptor,
     PortRef,
 };
-use patches_engine::{build_patch, BufferAllocState, ExecutionPlan, ModuleAllocState};
+use patches_engine::{build_patch, BufferAllocState, ExecutionPlan, ModuleAllocState, ModulePool};
 use patches_modules::{AudioOut, Sum};
 
 // ── HeadlessEngine ────────────────────────────────────────────────────────────
 
 struct HeadlessEngine {
-    plan: Option<ExecutionPlan>,
-    pub pool: Vec<[f64; 2]>,
-    module_pool: Vec<Option<Box<dyn Module>>>,
+    plan: ExecutionPlan,
+    buffer_pool: Box<[[f64; 2]]>,
+    module_pool: ModulePool,
     wi: usize,
     env: AudioEnvironment,
 }
 
 impl HeadlessEngine {
     fn new(
-        plan: ExecutionPlan,
+        mut plan: ExecutionPlan,
         buffer_pool_capacity: usize,
         module_pool_capacity: usize,
         env: AudioEnvironment,
     ) -> Self {
-        let mut engine = Self {
-            plan: None,
-            pool: vec![[0.0; 2]; buffer_pool_capacity],
-            module_pool: (0..module_pool_capacity).map(|_| None).collect(),
-            wi: 0,
-            env,
-        };
-        engine.adopt_plan(plan);
-        engine
+        let mut buffer_pool = vec![[0.0_f64; 2]; buffer_pool_capacity].into_boxed_slice();
+        let mut module_pool = ModulePool::new(module_pool_capacity);
+        for &idx in &plan.tombstones {
+            module_pool.tombstone(idx);
+        }
+        for (idx, mut m) in plan.new_modules.drain(..) {
+            m.initialise(&env);
+            module_pool.install(idx, m);
+        }
+        for &i in &plan.to_zero {
+            buffer_pool[i] = [0.0; 2];
+        }
+        Self { plan, buffer_pool, module_pool, wi: 0, env }
     }
 
     fn adopt_plan(&mut self, mut plan: ExecutionPlan) {
-        // Tombstone first: the freelist may recycle tombstoned slots for new modules.
         for &idx in &plan.tombstones {
-            self.module_pool[idx].take();
+            self.module_pool.tombstone(idx);
         }
         for (idx, mut m) in plan.new_modules.drain(..) {
             m.initialise(&self.env);
-            self.module_pool[idx] = Some(m);
+            self.module_pool.install(idx, m);
         }
         for &i in &plan.to_zero {
-            self.pool[i] = [0.0; 2];
+            self.buffer_pool[i] = [0.0; 2];
         }
-        self.plan = Some(plan);
+        self.plan = plan;
     }
 
     fn tick(&mut self) {
-        let plan = self.plan.as_mut().expect("HeadlessEngine::tick: no current plan");
-        plan.tick(&mut self.module_pool, &mut self.pool, self.wi);
+        self.plan.tick(&mut self.module_pool, &mut self.buffer_pool, self.wi);
         self.wi = 1 - self.wi;
     }
 
     fn last_left(&self) -> f64 {
-        self.plan.as_ref().map_or(0.0, |p| p.last_left(&self.module_pool))
+        self.module_pool.read_sink_left()
     }
 
     fn last_right(&self) -> f64 {
-        self.plan.as_ref().map_or(0.0, |p| p.last_right(&self.module_pool))
+        self.module_pool.read_sink_right()
     }
 }
 

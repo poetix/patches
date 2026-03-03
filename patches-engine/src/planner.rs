@@ -92,9 +92,7 @@ impl Planner {
 
 /// Coordinates patch planning (with state preservation) and audio execution.
 ///
-/// `PatchEngine` ties together a [`Planner`] and a [`SoundEngine`]. It keeps
-/// a *held plan* — the most recently built plan that could not be sent because
-/// the engine's single-slot channel was full — so that the caller can retry.
+/// `PatchEngine` ties together a [`Planner`] and a [`SoundEngine`].
 ///
 /// ## Normal flow
 ///
@@ -103,18 +101,15 @@ impl Planner {
 /// 3. Each [`update`](Self::update) builds a new plan and pushes it to the engine
 ///    via [`swap_plan`](SoundEngine::swap_plan).
 ///
-/// ## Channel-full / retry flow
+/// ## Channel-full path
 ///
-/// If [`SoundEngine::swap_plan`] returns the plan (channel full), `update` stores
-/// it as the held plan and returns [`PatchEngineError::ChannelFull`]. The caller
-/// may retry after one buffer period (~10 ms). Module state is preserved by the
+/// If [`SoundEngine::swap_plan`] returns `Err` (channel full), `update` returns
+/// [`PatchEngineError::ChannelFull`] immediately. The caller is responsible for
+/// retrying with the same or an updated graph. Module state is preserved by the
 /// audio-thread pool regardless of retries.
 pub struct PatchEngine {
     planner: Planner,
     engine: SoundEngine,
-    /// Most recently built plan that could not be sent (channel full).
-    /// `None` in normal operation after each successful `swap_plan`.
-    held_plan: Option<ExecutionPlan>,
 }
 
 /// Errors returned by [`PatchEngine`] operations.
@@ -127,8 +122,7 @@ pub enum PatchEngineError {
     /// The new plan could not be sent because the engine's single-slot channel
     /// is already full.
     ///
-    /// The plan has been stored internally as the held plan. Retry
-    /// [`update`](PatchEngine::update) after one buffer period (~10 ms).
+    /// Retry [`update`](PatchEngine::update) after one buffer period (~10 ms).
     ChannelFull,
 }
 
@@ -187,7 +181,6 @@ impl PatchEngine {
         Ok(Self {
             planner,
             engine,
-            held_plan: None,
         })
     }
 
@@ -205,19 +198,13 @@ impl PatchEngine {
     /// modules retain their state via the audio-thread pool.
     ///
     /// Returns [`PatchEngineError::ChannelFull`] if the engine's channel is
-    /// already occupied. The new plan is retained as the held plan; the caller
-    /// may retry without losing the build result.
+    /// already occupied. The caller is responsible for retrying with the same
+    /// or an updated graph.
     pub fn update(&mut self, graph: ModuleGraph) -> Result<(), PatchEngineError> {
         let new_plan = self.planner.build(graph)?;
-        // Drop any previously held plan — it can no longer be sent.
-        self.held_plan = None;
-
         match self.engine.swap_plan(new_plan) {
             Ok(()) => Ok(()),
-            Err(returned_plan) => {
-                self.held_plan = Some(returned_plan);
-                Err(PatchEngineError::ChannelFull)
-            }
+            Err(_returned_plan) => Err(PatchEngineError::ChannelFull),
         }
     }
 

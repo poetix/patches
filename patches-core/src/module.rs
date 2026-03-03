@@ -49,8 +49,8 @@ pub struct AudioEnvironment {
 /// A stable, unique identifier assigned to a module instance at construction time.
 ///
 /// `InstanceId` is immutable for the lifetime of the module and survives across
-/// plan rebuilds, enabling the [`ModuleInstanceRegistry`](crate::ModuleInstanceRegistry)
-/// to match old instances to their counterparts in a new plan.
+/// plan rebuilds, allowing the planner to match surviving modules to their pool
+/// slots in a new plan.
 ///
 /// IDs are generated from a global atomic counter; no two independently constructed
 /// modules will share an `InstanceId` within a single process run.

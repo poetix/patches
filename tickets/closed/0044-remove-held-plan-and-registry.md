@@ -16,31 +16,31 @@ Close the open tickets whose designs are replaced by E007.
 ## Acceptance criteria
 
 ### `patches-core`
-- [ ] `ModuleInstanceRegistry` struct removed from `patches-core/src/registry.rs`
+- [x] `ModuleInstanceRegistry` struct removed from `patches-core/src/registry.rs`
       (or the file removed if it contains nothing else)
-- [ ] `ModuleInstanceRegistry` removed from `patches-core/src/lib.rs` re-exports
-- [ ] No remaining use of `ModuleInstanceRegistry` anywhere in the workspace
+- [x] `ModuleInstanceRegistry` removed from `patches-core/src/lib.rs` re-exports
+- [x] No remaining use of `ModuleInstanceRegistry` anywhere in the workspace
 
 ### `patches-engine`
-- [ ] `PatchEngine::held_plan: Option<ExecutionPlan>` field removed
-- [ ] `PatchEngine::update()` simplified: on `swap_plan` returning `Err`, return
+- [x] `PatchEngine::held_plan: Option<ExecutionPlan>` field removed
+- [x] `PatchEngine::update()` simplified: on `swap_plan` returning `Err`, return
       `PatchEngineError::ChannelFull` immediately without stashing anything
-- [ ] `PatchEngine::new()` / `with_control_period()` no longer initialise `held_plan`
-- [ ] Any dead imports cleaned up
+- [x] `PatchEngine::new()` / `with_control_period()` no longer initialise `held_plan`
+- [x] Any dead imports cleaned up
 
 ### `adr/`
-- [ ] `adr/0003-planner-state-freshness.md` status updated to `Superseded by ADR-0009`
+- [x] `adr/0003-planner-state-freshness.md` status updated to `Superseded by ADR-0009`
       with a brief note explaining what replaced it
 
 ### Open tickets
-- [ ] `tickets/open/0031-state-preservation-across-replans.md` moved to `closed/` with
+- [x] `tickets/open/0031-state-preservation-across-replans.md` moved to `closed/` with
       a note that it is resolved by E007
-- [ ] `tickets/open/0034-held-plan-channel-full-path.md` moved to `closed/` with a note
+- [x] `tickets/open/0034-held-plan-channel-full-path.md` moved to `closed/` with a note
       that the design is superseded by E007 (no implementation needed)
 
 ### General
-- [ ] `cargo build`, `cargo test`, `cargo clippy` all clean
-- [ ] No references to `ModuleInstanceRegistry`, `held_plan`, `into_registry`, or
+- [x] `cargo build`, `cargo test`, `cargo clippy` all clean
+- [x] No references to `ModuleInstanceRegistry`, `held_plan`, `into_registry`, or
       `ExecutionPlan::initialise` remain (search the workspace to confirm)
 
 ## Notes

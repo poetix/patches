@@ -2,7 +2,14 @@
 
 ## Status
 
-Accepted (ticket 0019)
+Superseded by ADR-0009 (ticket 0044)
+
+The audio-thread-owned module pool introduced in ADR-0009 makes the
+`ModuleInstanceRegistry` / `held_plan` / `into_registry` mechanism described
+here unnecessary. Surviving modules remain in the pool across plan swaps, so
+state preservation is automatic and requires no explicit cross-thread transfer.
+`PatchEngine::held_plan`, `ExecutionPlan::into_registry`, and
+`ModuleInstanceRegistry` have been removed.
 
 ## Context
 

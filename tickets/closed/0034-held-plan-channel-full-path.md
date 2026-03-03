@@ -32,3 +32,11 @@ The held-plan path in `PatchEngine` is documented in
 `adr/0003-planner-state-freshness.md`. The test seam should be the minimal change
 needed to make the channel-full condition controllable from a test; prefer a
 constructor parameter or wrapper type over modifying production logic.
+
+## Closure note
+
+Superseded by E007 (ADR-0009). The `held_plan` field and the associated
+channel-full retry logic have been removed from `PatchEngine` (T-0044).
+Module state preservation is now handled automatically by the audio-thread-owned
+module pool, making `held_plan` and this test seam unnecessary. No implementation
+of this ticket is required.

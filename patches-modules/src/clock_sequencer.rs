@@ -32,9 +32,9 @@ impl ClockSequencer {
                 inputs: vec![],
                 outputs: vec![
                     PortDescriptor { name: "bar", index: 0 },
-                    PortDescriptor { name: "beat", index: 1 },
-                    PortDescriptor { name: "quaver", index: 2 },
-                    PortDescriptor { name: "semiquaver", index: 3 },
+                    PortDescriptor { name: "beat", index: 0 },
+                    PortDescriptor { name: "quaver", index: 0 },
+                    PortDescriptor { name: "semiquaver", index: 0 },
                 ],
             },
             bpm,

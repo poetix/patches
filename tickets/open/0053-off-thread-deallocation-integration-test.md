@@ -1,5 +1,5 @@
 ---
-id: "T-0048"
+id: "T-0053"
 title: "Integration test: tombstoned modules dropped off the audio thread"
 priority: medium
 created: 2026-03-03

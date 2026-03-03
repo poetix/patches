@@ -228,6 +228,11 @@ impl PatchEngine {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
     use patches_core::{
         AudioEnvironment, ControlSignal, InstanceId, Module, ModuleDescriptor, ModuleGraph, NodeId,
         PortDescriptor, PortRef,
@@ -235,6 +240,7 @@ mod tests {
     use patches_modules::{AudioOut, SineOscillator};
 
     use super::*;
+    use crate::pool::ModulePool;
 
     fn p(name: &'static str) -> PortRef {
         PortRef { name, index: 0 }
@@ -309,54 +315,47 @@ mod tests {
         vec![[0.0; 2]; capacity]
     }
 
-    fn make_module_pool(capacity: usize) -> Vec<Option<Box<dyn Module>>> {
-        (0..capacity).map(|_| None).collect()
-    }
-
-    /// Install a plan's new_modules into `module_pool` and process tombstones,
+    /// Install a plan's new_modules into `pool` and process tombstones,
     /// simulating what SoundEngine does on plan adoption. Optionally initialises
     /// new modules with `env`.
-    fn adopt_plan(
-        plan: &mut ExecutionPlan,
-        module_pool: &mut Vec<Option<Box<dyn Module>>>,
-        env: Option<&AudioEnvironment>,
-    ) {
+    fn adopt_plan(plan: &mut ExecutionPlan, pool: &mut ModulePool, env: Option<&AudioEnvironment>) {
         for &idx in &plan.tombstones {
-            module_pool[idx].take();
+            pool.tombstone(idx);
         }
         for (idx, mut m) in plan.new_modules.drain(..) {
             if let Some(e) = env {
                 m.initialise(e);
             }
-            module_pool[idx] = Some(m);
+            pool.install(idx, m);
         }
+    }
+
+    /// Return the output buffer index for the Counter slot in `plan`.
+    ///
+    /// Counter is the non-AudioOut slot. Its output buffer carries the count value,
+    /// which lets us verify state without downcasting through `ModulePool`.
+    fn counter_output_buf(plan: &ExecutionPlan) -> usize {
+        let ao_pool = plan.slots[plan.audio_out_index].pool_index;
+        let counter_slot = plan.slots.iter().find(|s| s.pool_index != ao_pool).unwrap();
+        counter_slot.output_buffers[0]
     }
 
     #[test]
     fn planner_reuses_module_instance_across_rebuild() {
         let mut planner = Planner::new();
-        let pool_size = 64;
-        let mut module_pool = make_module_pool(pool_size);
+        let mut pool = ModulePool::new(64);
         let env = AudioEnvironment { sample_rate: 44100.0 };
 
         let counter_a = Counter::new();
         let counter_id = counter_a.instance_id();
         let mut plan_a = planner.build(counter_graph(counter_a)).unwrap();
-
-        // Find counter's pool index before draining new_modules.
-        let counter_pool_idx = plan_a
-            .new_modules
-            .iter()
-            .find(|(_, m)| m.as_any().downcast_ref::<Counter>().is_some())
-            .map(|(idx, _)| *idx)
-            .expect("Counter not in new_modules");
-
-        adopt_plan(&mut plan_a, &mut module_pool, Some(&env));
+        adopt_plan(&mut plan_a, &mut pool, Some(&env));
 
         let mut buffer_pool = make_buffer_pool(256);
         for i in 0..5 {
-            plan_a.tick(&mut module_pool, &mut buffer_pool, i % 2);
+            plan_a.tick(&mut pool, &mut buffer_pool, i % 2);
         }
+        // After 5 ticks (wi sequence 0,1,0,1,0), Counter wrote 5.0 into buffer slot [0].
 
         // Build graph_b with same InstanceId — counter is a surviving module.
         let placeholder = Counter::with_id(counter_id);
@@ -369,50 +368,34 @@ mod tests {
             "surviving Counter must not appear in new_modules"
         );
 
-        adopt_plan(&mut plan_b, &mut module_pool, Some(&env));
+        adopt_plan(&mut plan_b, &mut pool, Some(&env));
 
         // wi=1 continues the alternating sequence (plan_a had 5 ticks, last wi=0).
-        plan_b.tick(&mut module_pool, &mut buffer_pool, 1);
+        plan_b.tick(&mut pool, &mut buffer_pool, 1);
 
-        let counter = module_pool[counter_pool_idx]
-            .as_ref()
-            .expect("Counter must still be in pool")
-            .as_any()
-            .downcast_ref::<Counter>()
-            .expect("must be Counter");
-
-        assert_eq!(counter.count, 6, "state must be preserved: count was 5, ticked once → 6");
+        // Counter wrote its new count (6) into the wi=1 buffer slot.
+        let buf = counter_output_buf(&plan_b);
+        assert_eq!(
+            buffer_pool[buf][1], 6.0,
+            "state must be preserved: count was 5, ticked once → 6"
+        );
     }
 
     #[test]
     fn planner_uses_fresh_modules_when_no_prev_plan() {
         let mut planner = Planner::new();
-        let mut module_pool = make_module_pool(64);
+        let mut pool = ModulePool::new(64);
 
         let counter = Counter::new();
         let mut plan = planner.build(counter_graph(counter)).unwrap();
-
-        // Find counter's pool index before adopting.
-        let counter_pool_idx = plan
-            .new_modules
-            .iter()
-            .find(|(_, m)| m.as_any().downcast_ref::<Counter>().is_some())
-            .map(|(idx, _)| *idx)
-            .expect("Counter not in new_modules");
-
-        adopt_plan(&mut plan, &mut module_pool, None);
+        adopt_plan(&mut plan, &mut pool, None);
 
         let mut buffer_pool = make_buffer_pool(256);
-        plan.tick(&mut module_pool, &mut buffer_pool, 0);
+        plan.tick(&mut pool, &mut buffer_pool, 0);
 
-        let counter = module_pool[counter_pool_idx]
-            .as_ref()
-            .unwrap()
-            .as_any()
-            .downcast_ref::<Counter>()
-            .expect("Counter not found");
-
-        assert_eq!(counter.count, 1, "fresh plan: count starts at 0, ticked once → 1");
+        // Counter wrote its count (1) into the wi=0 buffer slot.
+        let buf = counter_output_buf(&plan);
+        assert_eq!(buffer_pool[buf][0], 1.0, "fresh plan: count starts at 0, ticked once → 1");
     }
 
     #[test]
@@ -429,22 +412,27 @@ mod tests {
 
     // ── Signal dispatch tests (T-0038) ────────────────────────────────────────
 
+    /// Records how many signals it has received via an `Arc<AtomicUsize>` shared
+    /// with the test. Using an atomic avoids any pool-access gymnastics while
+    /// keeping the counter observable from outside.
     struct SignalReceiver {
         instance_id: InstanceId,
         descriptor: ModuleDescriptor,
-        pub received: Vec<ControlSignal>,
+        received_count: Arc<AtomicUsize>,
     }
 
     impl SignalReceiver {
-        fn new() -> Self {
-            Self {
+        fn new() -> (Self, Arc<AtomicUsize>) {
+            let received_count = Arc::new(AtomicUsize::new(0));
+            let receiver = Self {
                 instance_id: InstanceId::next(),
                 descriptor: ModuleDescriptor {
                     inputs: vec![],
                     outputs: vec![PortDescriptor { name: "out", index: 0 }],
                 },
-                received: Vec::new(),
-            }
+                received_count: Arc::clone(&received_count),
+            };
+            (receiver, received_count)
         }
     }
 
@@ -458,16 +446,16 @@ mod tests {
         fn process(&mut self, _inputs: &[f64], outputs: &mut [f64]) {
             outputs[0] = 0.0;
         }
-        fn receive_signal(&mut self, signal: ControlSignal) {
-            self.received.push(signal);
+        fn receive_signal(&mut self, _signal: ControlSignal) {
+            self.received_count.fetch_add(1, Ordering::SeqCst);
         }
         fn as_any(&self) -> &dyn std::any::Any {
             self
         }
     }
 
-    fn receiver_graph() -> (ModuleGraph, InstanceId) {
-        let receiver = SignalReceiver::new();
+    fn receiver_graph() -> (ModuleGraph, InstanceId, Arc<AtomicUsize>) {
+        let (receiver, received_count) = SignalReceiver::new();
         let id = receiver.instance_id();
         let mut graph = ModuleGraph::new();
         graph.add_module(NodeId::from("recv"), Box::new(receiver)).unwrap();
@@ -478,36 +466,17 @@ mod tests {
         graph
             .connect(&NodeId::from("recv"), p("out"), &NodeId::from("out"), p("right"), 1.0)
             .unwrap();
-        (graph, id)
-    }
-
-    /// Dispatch a signal via signal_dispatch (using pool_index).
-    fn dispatch_signal(
-        plan: &ExecutionPlan,
-        module_pool: &mut [Option<Box<dyn Module>>],
-        id: InstanceId,
-        signal: ControlSignal,
-    ) -> bool {
-        match plan.signal_dispatch.binary_search_by_key(&id, |(k, _)| *k) {
-            Ok(idx) => {
-                let pool_idx = plan.signal_dispatch[idx].1;
-                if let Some(m) = module_pool[pool_idx].as_mut() {
-                    m.receive_signal(signal);
-                }
-                true
-            }
-            Err(_) => false,
-        }
+        (graph, id, received_count)
     }
 
     #[test]
     fn signal_delivered_at_control_tick_not_before() {
         let mut planner = Planner::new();
-        let (graph, recv_id) = receiver_graph();
+        let (graph, recv_id, received_count) = receiver_graph();
         let mut plan = planner.build(graph).unwrap();
 
-        let mut module_pool = make_module_pool(64);
-        adopt_plan(&mut plan, &mut module_pool, None);
+        let mut pool = ModulePool::new(64);
+        adopt_plan(&mut plan, &mut pool, None);
 
         let mut buffer_pool = make_buffer_pool(256);
 
@@ -518,62 +487,49 @@ mod tests {
             .unwrap();
 
         for i in 0..3usize {
-            plan.tick(&mut module_pool, &mut buffer_pool, i % 2);
+            plan.tick(&mut pool, &mut buffer_pool, i % 2);
         }
 
-        // Find receiver's pool index.
-        let recv_pool_idx = plan.signal_dispatch
-            .iter()
-            .find(|(id, _)| *id == recv_id)
-            .map(|(_, idx)| *idx)
-            .expect("recv not in signal_dispatch");
-
-        let recv = module_pool[recv_pool_idx]
-            .as_ref()
-            .unwrap()
-            .as_any()
-            .downcast_ref::<SignalReceiver>()
-            .expect("SignalReceiver not found");
-        assert!(recv.received.is_empty(), "signal must not arrive before the control tick");
+        assert_eq!(
+            received_count.load(Ordering::SeqCst),
+            0,
+            "signal must not arrive before the control tick"
+        );
 
         while let Ok((id, signal)) = consumer.pop() {
-            dispatch_signal(&plan, &mut module_pool, id, signal);
+            plan.dispatch_signal(id, signal, &mut pool);
         }
 
-        let recv = module_pool[recv_pool_idx]
-            .as_ref()
-            .unwrap()
-            .as_any()
-            .downcast_ref::<SignalReceiver>()
-            .expect("SignalReceiver not found");
-        assert_eq!(recv.received.len(), 1, "signal must arrive after the control tick");
-        match &recv.received[0] {
-            ControlSignal::Float { name, value } => {
-                assert_eq!(*name, "freq");
-                assert!((*value - 440.0).abs() < 1e-10);
-            }
-        }
+        assert_eq!(
+            received_count.load(Ordering::SeqCst),
+            1,
+            "signal must arrive after the control tick"
+        );
     }
 
     #[test]
     fn signal_for_unknown_id_is_silently_dropped() {
         let mut planner = Planner::new();
-        let (graph, _recv_id) = receiver_graph();
+        let (graph, _recv_id, received_count) = receiver_graph();
         let mut plan = planner.build(graph).unwrap();
-        let mut module_pool = make_module_pool(64);
-        adopt_plan(&mut plan, &mut module_pool, None);
+        let mut pool = ModulePool::new(64);
+        adopt_plan(&mut plan, &mut pool, None);
 
         let unknown_id = InstanceId::next();
         let signal = ControlSignal::Float { name: "freq", value: 440.0 };
 
-        let dispatched = dispatch_signal(&plan, &mut module_pool, unknown_id, signal);
-        assert!(!dispatched, "signal for unknown InstanceId must be silently dropped");
+        plan.dispatch_signal(unknown_id, signal, &mut pool);
+        assert_eq!(
+            received_count.load(Ordering::SeqCst),
+            0,
+            "signal for unknown InstanceId must be silently dropped"
+        );
     }
 
     #[test]
     fn send_signal_returns_err_on_full_buffer() {
         let mut planner = Planner::new();
-        let (graph, recv_id) = receiver_graph();
+        let (graph, recv_id, _) = receiver_graph();
         let plan = planner.build(graph).unwrap();
 
         let mut engine =

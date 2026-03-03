@@ -1,5 +1,5 @@
 ---
-id: "T-0047"
+id: "T-0052"
 title: Redirect tombstone drops to cleanup channel
 priority: medium
 created: 2026-03-03

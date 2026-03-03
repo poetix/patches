@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-use patches_core::{InstanceId, Module, ModuleDescriptor, ModuleGraph, NodeId};
+use patches_core::{ControlSignal, InstanceId, Module, ModuleDescriptor, ModuleGraph, NodeId};
+
+use crate::pool::ModulePool;
 
 /// Errors that can occur when building an [`ExecutionPlan`].
 #[derive(Debug)]
@@ -193,7 +195,7 @@ pub struct ExecutionPlan {
     ///
     /// Built at plan construction time (off the audio thread) so that the
     /// audio callback can binary-search without allocating.
-    pub signal_dispatch: Box<[(InstanceId, usize)]>,
+    signal_dispatch: Box<[(InstanceId, usize)]>,
     /// New modules to install into the audio-thread module pool when this plan
     /// is adopted. Each entry is `(pool_index, Box<dyn Module>)`.
     ///
@@ -211,48 +213,36 @@ pub struct ExecutionPlan {
 impl ExecutionPlan {
     /// Process one sample across all modules in execution order.
     ///
-    /// `module_pool` is the audio-thread-owned module pool.
+    /// `pool` is the audio-thread-owned [`ModulePool`].
     /// `buffer_pool` is the externally-owned cable buffer pool (see [`SoundEngine`]).
     /// `wi` is the write slot index (0 or 1); the read slot is `1 - wi`.
     /// Callers must alternate between `wi = 0` and `wi = 1` on successive calls.
     ///
     /// Does not allocate.
-    pub fn tick(
-        &mut self,
-        module_pool: &mut [Option<Box<dyn Module>>],
-        buffer_pool: &mut [[f64; 2]],
-        wi: usize,
-    ) {
+    pub fn tick(&mut self, pool: &mut ModulePool, buffer_pool: &mut [[f64; 2]], wi: usize) {
         let ri = 1 - wi;
 
         for slot in self.slots.iter_mut() {
             for (j, &buf_idx) in slot.input_buffers.iter().enumerate() {
                 slot.input_scratch[j] = buffer_pool[buf_idx][ri] * slot.input_scales[j];
             }
-            module_pool[slot.pool_index]
-                .as_mut()
-                .unwrap()
-                .process(&slot.input_scratch, &mut slot.output_scratch);
+            pool.process(slot.pool_index, &slot.input_scratch, &mut slot.output_scratch);
             for (j, &buf_idx) in slot.output_buffers.iter().enumerate() {
                 buffer_pool[buf_idx][wi] = slot.output_scratch[j];
             }
         }
     }
 
-    /// Left-channel sample produced during the most recent [`tick`](Self::tick).
-    pub fn last_left(&self, pool: &[Option<Box<dyn Module>>]) -> f64 {
-        pool[self.slots[self.audio_out_index].pool_index]
-            .as_ref()
-            .and_then(|m| m.as_sink())
-            .map_or(0.0, |s| s.last_left())
-    }
-
-    /// Right-channel sample produced during the most recent [`tick`](Self::tick).
-    pub fn last_right(&self, pool: &[Option<Box<dyn Module>>]) -> f64 {
-        pool[self.slots[self.audio_out_index].pool_index]
-            .as_ref()
-            .and_then(|m| m.as_sink())
-            .map_or(0.0, |s| s.last_right())
+    /// Deliver `signal` to the module identified by `id`, if it is present in this plan.
+    ///
+    /// Performs a binary search on `signal_dispatch` (O(log M)) and calls
+    /// [`ModulePool::receive_signal`] on the resolved pool slot. Does nothing if
+    /// `id` is not in this plan.
+    pub fn dispatch_signal(&self, id: InstanceId, signal: ControlSignal, pool: &mut ModulePool) {
+        if let Ok(idx) = self.signal_dispatch.binary_search_by_key(&id, |(k, _)| *k) {
+            let pool_idx = self.signal_dispatch[idx].1;
+            pool.receive_signal(pool_idx, signal);
+        }
     }
 }
 
@@ -529,14 +519,10 @@ mod tests {
         vec![[0.0; 2]; capacity]
     }
 
-    fn make_module_pool(capacity: usize) -> Vec<Option<Box<dyn Module>>> {
-        (0..capacity).map(|_| None).collect()
-    }
-
     /// Build a plan from scratch (no prior alloc state) and install its modules.
     fn default_build(
         graph: ModuleGraph,
-    ) -> (ExecutionPlan, BufferAllocState, ModuleAllocState, Vec<Option<Box<dyn Module>>>) {
+    ) -> (ExecutionPlan, BufferAllocState, ModuleAllocState, ModulePool) {
         let mut plan = build_patch(
             graph,
             &BufferAllocState::default(),
@@ -547,11 +533,11 @@ mod tests {
         .expect("build should succeed");
 
         // Simulate SoundEngine: install new_modules into module pool and initialise.
-        let mut module_pool = make_module_pool(256);
+        let mut module_pool = ModulePool::new(256);
         let env = AudioEnvironment { sample_rate: 44100.0 };
         for (idx, mut m) in plan.0.new_modules.drain(..) {
             m.initialise(&env);
-            module_pool[idx] = Some(m);
+            module_pool.install(idx, m);
         }
 
         (plan.0, plan.1, plan.2, module_pool)
@@ -560,18 +546,14 @@ mod tests {
     #[test]
     fn builds_minimal_plan_with_correct_order() {
         let (graph, _, _) = sine_to_audio_out_graph();
-        let (plan, _, _, module_pool) = default_build(graph);
+        let (plan, _, _, _) = default_build(graph);
 
         let audio_out_idx = plan.audio_out_index;
+        // Find the sine slot by exclusion: the only slot that isn't AudioOut.
         let sine_idx = plan
             .slots
             .iter()
-            .position(|s| {
-                module_pool[s.pool_index]
-                    .as_ref()
-                    .and_then(|m| m.as_any().downcast_ref::<SineOscillator>())
-                    .is_some()
-            })
+            .position(|s| s.pool_index != plan.slots[audio_out_idx].pool_index)
             .expect("sine slot not found");
 
         assert!(sine_idx < audio_out_idx, "sine must execute before AudioOut");
@@ -611,9 +593,9 @@ mod tests {
             plan.tick(&mut module_pool, &mut buffer_pool, i % 2);
         }
 
-        assert!(plan.last_left(&module_pool).abs() <= 1.0);
-        assert!(plan.last_right(&module_pool).abs() <= 1.0);
-        assert!(plan.last_left(&module_pool).abs() > 0.0);
+        assert!(module_pool.read_sink_left().abs() <= 1.0);
+        assert!(module_pool.read_sink_right().abs() <= 1.0);
+        assert!(module_pool.read_sink_left().abs() > 0.0);
     }
 
     #[test]
@@ -673,8 +655,8 @@ mod tests {
             plan_full.tick(&mut pool_full, &mut buffer_full, i % 2);
         }
 
-        let half = plan_half.last_left(&pool_half);
-        let full = plan_full.last_left(&pool_full);
+        let half = pool_half.read_sink_left();
+        let full = pool_full.read_sink_left();
 
         if full.abs() > 1e-6 {
             let ratio = half / full;

@@ -1,4 +1,6 @@
 use std::fmt;
+use std::thread;
+use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream, StreamConfig};
@@ -6,6 +8,8 @@ use cpal::{SampleFormat, Stream, StreamConfig};
 use patches_core::{AudioEnvironment, ControlSignal, InstanceId, Module};
 
 use crate::builder::ExecutionPlan;
+use crate::callback::{build_stream, AudioCallback};
+use crate::pool::ModulePool;
 
 /// Default module pool capacity: number of `Option<Box<dyn Module>>` slots
 /// to pre-allocate on the audio thread.  1024 slots accommodates far more
@@ -16,13 +20,13 @@ pub const DEFAULT_MODULE_POOL_CAPACITY: usize = 1024;
 /// initial plan, the cable buffer pool, and the module pool.
 /// Stored in [`SoundEngine`] until [`start`](SoundEngine::start) moves them
 /// into the audio closure.
-type PendingState = (
-    rtrb::Consumer<ExecutionPlan>,
-    rtrb::Consumer<(InstanceId, ControlSignal)>,
-    ExecutionPlan,
-    Box<[[f64; 2]]>,
-    Box<[Option<Box<dyn Module>>]>,
-);
+struct PendingState {
+    plan_rx: rtrb::Consumer<ExecutionPlan>,
+    signal_rx: rtrb::Consumer<(InstanceId, ControlSignal)>,
+    initial_plan: ExecutionPlan,
+    buffer_pool: Box<[[f64; 2]]>,
+    module_pool: ModulePool,
+}
 
 /// Errors returned by [`SoundEngine`] operations.
 #[derive(Debug)]
@@ -43,6 +47,8 @@ pub enum EngineError {
     AlreadyConsumed,
     /// `control_period` of zero was passed to [`SoundEngine::new`].
     InvalidControlPeriod,
+    /// The OS refused to spawn the cleanup thread.
+    ThreadSpawnError(std::io::Error),
 }
 
 impl fmt::Display for EngineError {
@@ -64,6 +70,7 @@ impl fmt::Display for EngineError {
             EngineError::InvalidControlPeriod => {
                 write!(f, "control_period must be greater than zero")
             }
+            EngineError::ThreadSpawnError(e) => write!(f, "failed to spawn cleanup thread: {e}"),
         }
     }
 }
@@ -108,6 +115,10 @@ pub struct SoundEngine {
     sample_rate: Option<f64>,
     /// Number of samples between control-rate ticks (signal dispatch).
     control_period: usize,
+    /// Capacity of the module pool; used to size the cleanup ring buffer.
+    module_pool_capacity: usize,
+    /// Join handle for the cleanup thread spawned in [`start`](Self::start).
+    cleanup_thread: Option<thread::JoinHandle<()>>,
 }
 
 impl SoundEngine {
@@ -136,17 +147,18 @@ impl SoundEngine {
             return Err(EngineError::InvalidControlPeriod);
         }
         let buffer_pool = vec![[0.0_f64; 2]; buffer_pool_capacity].into_boxed_slice();
-        let module_pool: Box<[Option<Box<dyn Module>>]> =
-            (0..module_pool_capacity).map(|_| None).collect::<Vec<_>>().into_boxed_slice();
+        let module_pool = ModulePool::new(module_pool_capacity);
         let (plan_tx, plan_rx) = rtrb::RingBuffer::new(1);
         let (signal_tx, signal_rx) = rtrb::RingBuffer::new(64);
         Ok(Self {
             plan_tx,
             signal_tx,
-            pending: Some((plan_rx, signal_rx, plan, buffer_pool, module_pool)),
+            pending: Some(PendingState { plan_rx, signal_rx, initial_plan: plan, buffer_pool, module_pool }),
             stream: None,
             sample_rate: None,
             control_period,
+            module_pool_capacity,
+            cleanup_thread: None,
         })
     }
 
@@ -163,10 +175,8 @@ impl SoundEngine {
             return Ok(());
         }
 
-        let (consumer, signal_rx, mut initial_plan, buffer_pool, mut module_pool) = self
-            .pending
-            .take()
-            .ok_or(EngineError::AlreadyConsumed)?;
+        let PendingState { plan_rx, signal_rx, mut initial_plan, buffer_pool, mut module_pool } =
+            self.pending.take().ok_or(EngineError::AlreadyConsumed)?;
 
         let host = cpal::default_host();
         let device = host
@@ -186,23 +196,36 @@ impl SoundEngine {
         let env = AudioEnvironment { sample_rate };
         for (idx, mut module) in initial_plan.new_modules.drain(..) {
             module.initialise(&env);
-            module_pool[idx] = Some(module);
+            module_pool.install(idx, module);
         }
         self.sample_rate = Some(sample_rate);
 
+        let (cleanup_tx, mut cleanup_rx) =
+            rtrb::RingBuffer::<Box<dyn Module>>::new(self.module_pool_capacity);
+
+        let cleanup_handle = thread::Builder::new()
+            .name("patches-cleanup".to_owned())
+            .spawn(move || loop {
+                while cleanup_rx.pop().is_ok() {
+                    // Module is dropped here, off the audio thread.
+                }
+                if cleanup_rx.is_abandoned() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(1));
+            })
+            .map_err(EngineError::ThreadSpawnError)?;
+
+        self.cleanup_thread = Some(cleanup_handle);
+
+        let callback = AudioCallback::new(
+            plan_rx, signal_rx, initial_plan, buffer_pool, module_pool, channels,
+            self.control_period, cleanup_tx,
+        );
         let stream = match sample_format {
-            SampleFormat::F32 => build_stream::<f32>(
-                &device, &config, channels, consumer, signal_rx, initial_plan, buffer_pool,
-                module_pool, self.control_period,
-            ),
-            SampleFormat::I16 => build_stream::<i16>(
-                &device, &config, channels, consumer, signal_rx, initial_plan, buffer_pool,
-                module_pool, self.control_period,
-            ),
-            SampleFormat::U16 => build_stream::<u16>(
-                &device, &config, channels, consumer, signal_rx, initial_plan, buffer_pool,
-                module_pool, self.control_period,
-            ),
+            SampleFormat::F32 => build_stream::<f32>(&device, &config, callback),
+            SampleFormat::I16 => build_stream::<i16>(&device, &config, callback),
+            SampleFormat::U16 => build_stream::<u16>(&device, &config, callback),
             other => return Err(EngineError::UnsupportedSampleFormat(other)),
         }?;
 
@@ -212,8 +235,18 @@ impl SoundEngine {
     }
 
     /// Stop audio processing and close the device.
+    ///
+    /// Drops the CPAL stream first (which drops the audio callback and its
+    /// `cleanup_tx` producer, signalling the cleanup thread to exit), then
+    /// joins the cleanup thread so all tombstoned modules are guaranteed to
+    /// have been dropped before this method returns.
+    ///
+    /// Idempotent: safe to call multiple times or if the engine was never started.
     pub fn stop(&mut self) {
         self.stream.take();
+        if let Some(handle) = self.cleanup_thread.take() {
+            let _ = handle.join();
+        }
     }
 
     /// Send a new [`ExecutionPlan`] to the audio callback.
@@ -251,122 +284,5 @@ impl SoundEngine {
         self.signal_tx
             .push((id, signal))
             .map_err(|rtrb::PushError::Full((_, s))| s)
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn build_stream<T>(
-    device: &cpal::Device,
-    config: &StreamConfig,
-    channels: usize,
-    mut consumer: rtrb::Consumer<ExecutionPlan>,
-    mut signal_rx: rtrb::Consumer<(InstanceId, ControlSignal)>,
-    mut current_plan: ExecutionPlan,
-    mut buffer_pool: Box<[[f64; 2]]>,
-    mut module_pool: Box<[Option<Box<dyn Module>>]>,
-    control_period: usize,
-) -> Result<Stream, EngineError>
-where
-    T: cpal::SizedSample + cpal::FromSample<f32>,
-{
-    let mut samples_until_next_control: usize = control_period;
-    let mut wi_counter: usize = 0;
-
-    device
-        .build_output_stream(
-            config,
-            move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
-                // Adopt a new plan if one has been published — wait-free, no allocation.
-                if let Ok(mut new_plan) = consumer.pop() {
-                    // Tombstone removed modules first: the freelist may have recycled
-                    // tombstoned slots for new modules, so we must clear old entries
-                    // before installing new ones.
-                    for &idx in &new_plan.tombstones {
-                        module_pool[idx].take();
-                    }
-                    // Install new modules (already initialised by swap_plan).
-                    for (idx, module) in new_plan.new_modules.drain(..) {
-                        module_pool[idx] = Some(module);
-                    }
-                    // Zero freed/new cable buffer slots.
-                    for &i in &new_plan.to_zero {
-                        buffer_pool[i] = [0.0; 2];
-                    }
-                    current_plan = new_plan;
-                }
-                fill_buffer(
-                    data,
-                    &mut current_plan,
-                    &mut module_pool,
-                    &mut buffer_pool,
-                    channels,
-                    &mut signal_rx,
-                    control_period,
-                    &mut samples_until_next_control,
-                    &mut wi_counter,
-                );
-            },
-            |err| {
-                eprintln!("patches audio stream error: {err}");
-            },
-            None,
-        )
-        .map_err(EngineError::BuildStreamError)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn fill_buffer<T: cpal::SizedSample + cpal::FromSample<f32>>(
-    data: &mut [T],
-    plan: &mut ExecutionPlan,
-    module_pool: &mut [Option<Box<dyn Module>>],
-    buffer_pool: &mut [[f64; 2]],
-    channels: usize,
-    signal_rx: &mut rtrb::Consumer<(InstanceId, ControlSignal)>,
-    control_period: usize,
-    samples_until_next_control: &mut usize,
-    wi_counter: &mut usize,
-) {
-    let frames = if channels > 0 { data.len() / channels } else { 0 };
-    let mut remaining = frames;
-    let mut out_i: usize = 0;
-
-    while remaining > 0 {
-        let chunk = (*samples_until_next_control).min(remaining);
-
-        for _ in 0..chunk {
-            let wi = *wi_counter % 2;
-            plan.tick(module_pool, buffer_pool, wi);
-            let left = plan.last_left(module_pool) as f32;
-            let right = plan.last_right(module_pool) as f32;
-
-            if channels == 1 {
-                data[out_i] = T::from_sample((left + right) * 0.5_f32);
-            } else {
-                data[out_i * channels] = T::from_sample(left);
-                data[out_i * channels + 1] = T::from_sample(right);
-                for c in 2..channels {
-                    data[out_i * channels + c] = T::from_sample(0.0_f32);
-                }
-            }
-            out_i += 1;
-            *wi_counter += 1;
-        }
-
-        *samples_until_next_control -= chunk;
-        remaining -= chunk;
-
-        if *samples_until_next_control == 0 {
-            while let Ok((id, signal)) = signal_rx.pop() {
-                if let Ok(idx) =
-                    plan.signal_dispatch.binary_search_by_key(&id, |(k, _)| *k)
-                {
-                    let pool_idx = plan.signal_dispatch[idx].1;
-                    if let Some(module) = module_pool[pool_idx].as_mut() {
-                        module.receive_signal(signal);
-                    }
-                }
-            }
-            *samples_until_next_control = control_period;
-        }
     }
 }

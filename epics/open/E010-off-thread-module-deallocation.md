@@ -36,9 +36,9 @@ Each reload can remove modules, and those drops currently land on the audio call
 
 | Ticket | Title |
 |--------|-------|
-| T-0046 | Cleanup thread and ring buffer infrastructure |
-| T-0047 | Redirect tombstone drops to cleanup channel |
-| T-0048 | Integration test: tombstoned modules dropped off the audio thread |
+| T-0051 | Cleanup thread and ring buffer infrastructure |
+| T-0052 | Redirect tombstone drops to cleanup channel |
+| T-0053 | Integration test: tombstoned modules dropped off the audio thread |
 
 ## Definition of done
 

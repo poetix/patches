@@ -83,7 +83,7 @@ pub fn validate_parameters(
                 }
             }
             // No bounds checking for arrays; any Vec<String> is valid.
-            // Content validation is deferred to update_validated_parameters.
+            // Content validation (e.g. parsing step patterns) belongs in update_parameters.
             (ParameterKind::Array { .. }, ParameterValue::Array(_)) => {}
             _ => {
                 return Err(BuildError::InvalidParameterType {
@@ -144,7 +144,7 @@ pub trait Module: Send {
     /// Only called by the default [`update_parameters`](Module::update_parameters) after
     /// validation passes. All keys are guaranteed to be declared in the descriptor and their
     /// values are guaranteed to be correctly typed and within bounds.
-    fn update_validated_parameters(&mut self, params: &ParameterMap) -> Result<(), BuildError>;
+    fn update_validated_parameters(&mut self, params: &ParameterMap);
 
     /// Validate `params` against the module's descriptor, then apply them.
     ///
@@ -153,7 +153,8 @@ pub trait Module: Send {
     /// if custom validation beyond what [`validate_parameters`] provides is needed.
     fn update_parameters(&mut self, params: &ParameterMap) -> Result<(), BuildError> {
         validate_parameters(params, self.descriptor())?;
-        self.update_validated_parameters(params)
+        self.update_validated_parameters(params);
+        Ok(())
     }
 
     /// Construct a fully initialised instance from an audio environment, shape, and parameters.

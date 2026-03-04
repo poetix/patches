@@ -2,7 +2,6 @@ use patches_core::{
     AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleShape,
     ParameterDescriptor, ParameterKind, PortDescriptor,
 };
-use patches_core::build_error::BuildError;
 use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -97,7 +96,7 @@ impl Module for AdsrEnvelope {
         }
     }
 
-    fn update_validated_parameters(&mut self, params: &ParameterMap) -> Result<(), BuildError> {
+    fn update_validated_parameters(&mut self, params: &ParameterMap) {
         if let Some(ParameterValue::Float(v)) = params.get("attack") {
             self.attack_secs = *v;
             self.attack_inc = 1.0 / (self.attack_secs * self.sample_rate);
@@ -117,7 +116,6 @@ impl Module for AdsrEnvelope {
             self.release_secs = *v;
             // release_inc is recalculated on entry to Release using the current level
         }
-        Ok(())
     }
 
     fn descriptor(&self) -> &ModuleDescriptor {

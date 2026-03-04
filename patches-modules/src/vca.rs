@@ -1,5 +1,4 @@
 use patches_core::{AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleShape, PortDescriptor};
-use patches_core::build_error::BuildError;
 use patches_core::parameter_map::ParameterMap;
 
 /// Voltage-controlled amplifier. Multiplies a signal by a control voltage.
@@ -35,8 +34,7 @@ impl Module for Vca {
         }
     }
 
-    fn update_validated_parameters(&mut self, _params: &ParameterMap) -> Result<(), BuildError> {
-        Ok(())
+    fn update_validated_parameters(&mut self, _params: &ParameterMap) {
     }
 
     fn descriptor(&self) -> &ModuleDescriptor {

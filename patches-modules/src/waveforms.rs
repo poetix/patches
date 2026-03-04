@@ -2,7 +2,6 @@ use patches_core::{
     AudioEnvironment, ControlSignal, InstanceId, Module, ModuleDescriptor,
     ModuleShape, ParameterDescriptor, ParameterKind, PortDescriptor,
 };
-use patches_core::build_error::BuildError;
 use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
 /// Middle C2 frequency in Hz (MIDI note 36).
@@ -49,11 +48,10 @@ impl Module for SawtoothOscillator {
         }
     }
 
-    fn update_validated_parameters(&mut self, params: &ParameterMap) -> Result<(), BuildError> {
+    fn update_validated_parameters(&mut self, params: &ParameterMap) {
         if let Some(ParameterValue::Float(v)) = params.get("base_voct") {
             self.base_voct = *v;
         }
-        Ok(())
     }
 
     fn descriptor(&self) -> &ModuleDescriptor {
@@ -118,11 +116,10 @@ impl Module for SquareOscillator {
         }
     }
 
-    fn update_validated_parameters(&mut self, params: &ParameterMap) -> Result<(), BuildError> {
+    fn update_validated_parameters(&mut self, params: &ParameterMap) {
         if let Some(ParameterValue::Float(v)) = params.get("base_voct") {
             self.base_voct = *v;
         }
-        Ok(())
     }
 
     fn descriptor(&self) -> &ModuleDescriptor {

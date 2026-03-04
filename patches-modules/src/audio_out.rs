@@ -1,5 +1,4 @@
 use patches_core::{AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleShape, PortDescriptor, Sink};
-use patches_core::build_error::BuildError;
 use patches_core::parameter_map::ParameterMap;
 
 /// A passive stereo sink node.
@@ -39,8 +38,7 @@ impl Module for AudioOut {
         }
     }
 
-    fn update_validated_parameters(&mut self, _params: &ParameterMap) -> Result<(), BuildError> {
-        Ok(())
+    fn update_validated_parameters(&mut self, _params: &ParameterMap) {
     }
 
     fn descriptor(&self) -> &ModuleDescriptor {

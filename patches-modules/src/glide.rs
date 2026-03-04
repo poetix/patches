@@ -2,7 +2,6 @@ use patches_core::{
     AudioEnvironment, ControlSignal, InstanceId, Module, ModuleDescriptor,
     ModuleShape, ParameterDescriptor, ParameterKind, PortDescriptor,
 };
-use patches_core::build_error::BuildError;
 use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
 /// A portamento (pitch glide) module.
@@ -70,11 +69,10 @@ impl Module for Glide {
         }
     }
 
-    fn update_validated_parameters(&mut self, params: &ParameterMap) -> Result<(), BuildError> {
+    fn update_validated_parameters(&mut self, params: &ParameterMap) {
         if let Some(ParameterValue::Float(v)) = params.get("glide_ms") {
             self.set_glide_ms(*v);
         }
-        Ok(())
     }
 
     fn descriptor(&self) -> &ModuleDescriptor {

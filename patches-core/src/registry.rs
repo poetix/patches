@@ -78,8 +78,7 @@ mod tests {
             }
         }
 
-        fn update_validated_parameters(&mut self, _params: &ParameterMap) -> Result<(), BuildError> {
-            Ok(())
+        fn update_validated_parameters(&mut self, _params: &ParameterMap) {
         }
 
         fn descriptor(&self) -> &ModuleDescriptor {

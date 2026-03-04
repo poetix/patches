@@ -1,7 +1,6 @@
 use patches_core::{
     AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleShape, PortDescriptor,
 };
-use patches_core::build_error::BuildError;
 use patches_core::parameter_map::ParameterMap;
 
 /// Sums a configurable number of input signals into a single output.
@@ -41,8 +40,7 @@ impl Module for Sum {
         }
     }
 
-    fn update_validated_parameters(&mut self, _params: &ParameterMap) -> Result<(), BuildError> {
-        Ok(())
+    fn update_validated_parameters(&mut self, _params: &ParameterMap) {
     }
 
     fn descriptor(&self) -> &ModuleDescriptor {

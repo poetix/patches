@@ -176,23 +176,33 @@ impl Module for StepSequencer {
         }
     }
 
-    fn update_validated_parameters(&mut self, params: &ParameterMap) -> Result<(), BuildError> {
+    fn update_validated_parameters(&mut self, params: &ParameterMap) {
         if let Some(ParameterValue::Array(step_strs)) = params.get("steps") {
-            let steps: Result<Vec<Step>, ParseStepError> =
-                step_strs.iter().map(|s| parse_step(s)).collect();
-            match steps {
-                Err(e) => {
-                    return Err(BuildError::Custom {
-                        module: "StepSequencer",
-                        message: format!("invalid step pattern: {e}"),
-                    });
-                }
-                Ok(parsed) => {
-                    self.steps = parsed;
-                    self.step_index = 0;
-                }
-            }
+            // Steps have already been validated by update_parameters; parse is infallible here.
+            let parsed: Vec<Step> = step_strs
+                .iter()
+                .filter_map(|s| parse_step(s).ok())
+                .collect();
+            self.steps = parsed;
+            self.step_index = 0;
         }
+    }
+
+    fn update_parameters(&mut self, params: &ParameterMap) -> Result<(), BuildError> {
+        patches_core::validate_parameters(params, self.descriptor())?;
+        // Validate step patterns before applying — array content is not checked by
+        // validate_parameters, so we do it here in the fallible layer.
+        if let Some(ParameterValue::Array(step_strs)) = params.get("steps") {
+            let _: Vec<Step> = step_strs
+                .iter()
+                .map(|s| parse_step(s))
+                .collect::<Result<Vec<Step>, ParseStepError>>()
+                .map_err(|e| BuildError::Custom {
+                    module: "StepSequencer",
+                    message: format!("invalid step pattern: {e}"),
+                })?;
+        }
+        self.update_validated_parameters(params);
         Ok(())
     }
 

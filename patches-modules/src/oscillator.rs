@@ -4,7 +4,6 @@ use patches_core::{
     AudioEnvironment, ControlSignal, InstanceId, Module, ModuleDescriptor,
     ModuleShape, ParameterDescriptor, ParameterKind, PortDescriptor,
 };
-use patches_core::build_error::BuildError;
 use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
 /// A sine wave oscillator whose frequency is set via the `"frequency"` parameter.
@@ -59,12 +58,11 @@ impl Module for SineOscillator {
         }
     }
 
-    fn update_validated_parameters(&mut self, params: &ParameterMap) -> Result<(), BuildError> {
+    fn update_validated_parameters(&mut self, params: &ParameterMap) {
         if let Some(ParameterValue::Float(v)) = params.get("frequency") {
             self.frequency = *v;
             self.phase_increment = TAU * *v * self.sample_rate_reciprocal;
         }
-        Ok(())
     }
 
     fn descriptor(&self) -> &ModuleDescriptor {

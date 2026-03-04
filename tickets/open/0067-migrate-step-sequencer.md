@@ -9,56 +9,121 @@ created: 2026-03-04
 ## Summary
 
 Rewrite `patches-modules/src/step_sequencer.rs` so that `StepSequencer` implements the
-`Module` v2 contract. The step pattern is not a typed `ParameterMap` entry (it is
-variable-length and structurally distinct from the scalar/enum parameter kinds). Instead,
-`prepare()` initialises with an empty pattern, and a `ControlSignal::ParameterUpdate`
-variant with `name: "steps"` and `value: ParameterValue::Array(...)` sets the pattern
-post-construction.
+`Module` v2 contract, with the step pattern supplied as a `ParameterMap` entry. Because
+no `ParameterKind` variant currently covers variable-length string arrays, this ticket
+first extends `patches-core` to add one, then uses it in the sequencer.
 
-## Acceptance criteria
+## Prerequisites — changes to `patches-core`
 
-- [ ] `StepSequencer` has no `new(pattern)` constructor (or retains it as
-      `pub(crate)` / private if needed internally, but is not the primary API).
+### 1. Add `ParameterKind::Array` — `patches-core/src/module_descriptor.rs`
+
+```rust
+pub enum ParameterKind {
+    Float { min: f64, max: f64, default: f64 },
+    Int   { min: i64, max: i64, default: i64 },
+    Bool  { default: bool },
+    Enum  { variants: &'static [&'static str], default: &'static str },
+    Array { default: &'static [&'static str] },   // ← add
+}
+```
+
+- `default_value()` returns `ParameterValue::Array(default.iter().map(|s| s.to_string()).collect())`.
+- `kind_name()` returns `"array"`.
+
+The `default` field uses `&'static [&'static str]` so that the *descriptor* itself never
+allocates (consistent with ADR 0011's zero-cost descriptor requirement). The
+`ParameterValue` it produces *does* allocate, but only at the non-realtime boundary when
+defaults are filled in by `Module::build`.
+
+### 2. Change `ParameterValue::Array` to own its strings — `patches-core/src/parameter_map.rs`
+
+```rust
+// before
+Array(Vec<&'static str>),
+
+// after
+Array(Vec<String>),
+```
+
+`Enum(&'static str)` can stay static because enum variants are always a closed set
+declared in the descriptor. Array contents are data-driven (patterns come from a DSL
+file or test code) so they cannot be required to be `'static`. This is a deliberate,
+narrow exception to the ADR 0011 "all `ParameterValue` variants are static" convention;
+worth noting in a comment at the declaration site.
+
+### 3. Add the `Array` match arm to `validate_parameters` — `patches-core/src/module.rs`
+
+In the `match (&param_desc.parameter_type, value)` block:
+
+```rust
+(ParameterKind::Array { .. }, ParameterValue::Array(_)) => {}
+```
+
+No bounds checking is needed for arrays; any `Vec<String>` is valid for an `Array`
+parameter. The sequencer itself validates content in `update_validated_parameters`.
+
+These three changes are self-contained within `patches-core` and have no impact on any
+existing module (no current module declares an `Array` parameter or supplies
+`ParameterValue::Array` in a `ParameterMap`).
+
+---
+
+## StepSequencer changes — `patches-modules/src/step_sequencer.rs`
+
+- [ ] `StepSequencer` has no `new(pattern)` constructor.
 - [ ] `StepSequencer::describe(shape)` returns:
       - `module_name`: `"StepSequencer"`
       - 4 inputs: `"clock"` / 0, `"start"` / 1, `"stop"` / 2, `"reset"` / 3
       - 3 outputs: `"pitch"` / 0, `"trigger"` / 1, `"gate"` / 2
-      - 0 parameters (pattern is not a ParameterMap entry)
-- [ ] `prepare()` stores `audio_environment` and `descriptor`; initialises `steps` to an
-      empty `Vec`, `step_index` to `0`, `playing` to `false`, all edge-detection fields
-      to `0.0`.
-- [ ] `update_validated_parameters()` is a no-op; returns `Ok(())`.
-- [ ] `receive_signal` handles `ControlSignal::ParameterUpdate { name: "steps", value: ParameterValue::Array(step_strs) }`:
-      - Parses each `&'static str` using the existing `parse_step` logic.
-      - On any parse error, silently ignores the signal (or stores what parsed successfully
-        up to the error — implementer's choice, but must not panic).
-      - Resets `step_index` to `0` and `playing` to `false` after a successful pattern load.
-- [ ] `process` behaviour unchanged.
+      - 1 parameter: `"steps"`, `ParameterKind::Array { default: &[] }`
+- [ ] `prepare()` stores `audio_environment` and `descriptor`; initialises `steps` to
+      an empty `Vec`, `step_index` to `0`, `playing` to `false`, and all edge-detection
+      fields to `0.0`.
+- [ ] `update_validated_parameters()` reads `"steps"` from `params`:
+      - Parses each `String` using the existing `parse_step` logic.
+      - Returns `BuildError::Custom { module: "StepSequencer", message: … }` on any
+        parse failure.
+      - On success, stores the parsed steps and resets `step_index` to `0`.
+      - An empty array (`&[]` default) produces an empty sequence; `process` must not
+        panic when `steps` is empty (outputs hold at rest values).
+- [ ] `process` behaviour otherwise unchanged.
 - [ ] `as_any` implemented.
-- [ ] Tests include:
-      - Registry creation succeeds with an empty pattern (`describe` / `instance_id` checks).
-      - Setting a pattern via `receive_signal` then stepping through it works correctly
-        (existing sequencing logic tests, adapted).
-      - Invalid step strings in the signal payload are handled without panic.
-- [ ] `cargo clippy -p patches-modules` and `cargo test -p patches-modules` clean.
+- [ ] `ParseStepError` may be kept or made private; it is no longer part of the public
+      construction API.
+
+## Acceptance criteria
+
+- [ ] All three `patches-core` changes compile with no new warnings.
+- [ ] `validate_parameters` unit tests in `patches-core` pass; add a test that a
+      `ParameterValue::Array(vec!["C3".into()])` passes validation for an `Array`
+      parameter, and that a `ParameterValue::Float(1.0)` against an `Array` descriptor
+      returns `InvalidParameterType`.
+- [ ] `StepSequencer` can be created via a local `Registry` with an empty parameter map
+      (default empty pattern); `process` produces rest-value outputs without panicking.
+- [ ] `StepSequencer` can be created via `Registry` with `"steps"` set to a valid
+      pattern and sequences correctly through it.
+- [ ] Invalid step strings in the pattern return a `BuildError` from `Registry::create`.
+- [ ] All existing sequencing logic tests pass, rewritten to use the registry pattern:
+      ```rust
+      fn make_sequencer(steps: &[&str]) -> Box<dyn Module> {
+          let mut params = ParameterMap::new();
+          params.insert(
+              "steps".into(),
+              ParameterValue::Array(steps.iter().map(|s| s.to_string()).collect()),
+          );
+          let mut r = Registry { builders: HashMap::new() };
+          r.register::<StepSequencer>();
+          r.create("StepSequencer", &AudioEnvironment { sample_rate: 44100.0 },
+                   &ModuleShape { channels: 0 }, &params).unwrap()
+      }
+      ```
+- [ ] `cargo clippy` and `cargo test` clean across the whole workspace.
 
 ## Notes
 
-`ParameterValue::Array(Vec<&'static str>)` requires the step strings to be `'static`.
-In the DSL use case they will always be string literals. Test code can use static slices:
+The `patches-core` changes in this ticket should be committed before or alongside the
+`patches-modules` changes so that the workspace never fails to build mid-ticket.
 
-```rust
-let steps: Vec<&'static str> = vec!["C3", "Eb3", "F3", "G3"];
-m.receive_signal(ControlSignal::ParameterUpdate {
-    name: "steps",
-    value: ParameterValue::Array(steps),
-});
-```
-
-The existing `parse_step` helper function can remain private; it is called inside
-`receive_signal`. `ParseStepError` may be kept or removed from the public API since
-patterns are now set via signal, not constructor.
-
-If keeping step-parsing tests that were previously tied to the `new()` constructor, they
-should be rewritten to construct via registry, load a pattern via `receive_signal`, then
-exercise `process`.
+The `Enum` variant keeps `&'static str` because its values are always a closed set
+declared at compile time in the descriptor. `Array` diverges because step patterns are
+data — their content is not known until the DSL is parsed.

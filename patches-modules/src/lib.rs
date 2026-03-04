@@ -6,6 +6,7 @@ pub mod step_sequencer;
 pub mod sum;
 pub mod vca;
 pub mod waveforms;
+pub mod glide;
 
 pub use adsr_envelope::AdsrEnvelope;
 pub use audio_out::AudioOut;
@@ -15,3 +16,4 @@ pub use step_sequencer::StepSequencer;
 pub use sum::Sum;
 pub use vca::Vca;
 pub use waveforms::{SawtoothOscillator, SquareOscillator};
+pub use glide::Glide;

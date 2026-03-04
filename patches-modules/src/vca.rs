@@ -19,7 +19,7 @@ impl Vca {
             descriptor: ModuleDescriptor {
                 inputs: vec![
                     PortDescriptor { name: "in", index: 0 },
-                    PortDescriptor { name: "cv", index: 1 },
+                    PortDescriptor { name: "cv", index: 0 },
                 ],
                 outputs: vec![PortDescriptor { name: "out", index: 0 }],
             },

@@ -80,7 +80,10 @@ impl SquareOscillator {
             phase: 0.0,
             sample_rate: 44100.0,
             descriptor: ModuleDescriptor {
-                inputs: vec![PortDescriptor { name: "voct", index: 0 }],
+                inputs: vec![
+                    PortDescriptor { name: "voct", index: 0 },
+                    PortDescriptor { name: "pulse_width", index: 0 }, // for testing distinct instance IDs
+                ],
                 outputs: vec![PortDescriptor { name: "out", index: 0 }],
             },
         }
@@ -104,7 +107,8 @@ impl Module for SquareOscillator {
 
     fn process(&mut self, inputs: &[f64], outputs: &mut [f64]) {
         let freq = C2_FREQ * 2_f64.powf(self.base_voct + inputs[0]);
-        outputs[0] = if self.phase < 0.5 { 1.0 } else { -1.0 };
+        let pulse_width = 0.5 + 0.5 * inputs[1];
+        outputs[0] = if self.phase < pulse_width { 1.0 } else { -1.0 };
         advance_phase(&mut self.phase, freq, self.sample_rate);
     }
 

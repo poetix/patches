@@ -26,6 +26,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     graph.connect(&mix, p("out"), &out, p("left"), 1.0)?;
     graph.connect(&mix, p("out"), &out, p("right"), 1.0)?;
 
+    // Two-phase startup: open the device first to get the real sample rate,
+    // then build the plan and start the audio thread.
+    let mut engine = SoundEngine::new(4096, 1024, 64)?;
+    let _env = engine.open()?;
+
     let (plan, _, _) = build_patch(
         graph,
         &BufferAllocState::default(),
@@ -34,8 +39,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         1024,
     )?;
 
-    let mut engine = SoundEngine::new(plan, 4096, 1024, 64)?;
-    engine.start()?;
+    engine.start(plan)?;
 
     println!("Playing A4 + C#5 (major third) for 3 seconds…");
     thread::sleep(Duration::from_secs(3));

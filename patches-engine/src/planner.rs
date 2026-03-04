@@ -96,10 +96,13 @@ impl Planner {
 ///
 /// ## Normal flow
 ///
-/// 1. [`new`](Self::new) builds the initial plan and hands it to `SoundEngine`.
-/// 2. [`start`](Self::start) opens the audio device.
-/// 3. Each [`update`](Self::update) builds a new plan and pushes it to the engine
-///    via [`swap_plan`](SoundEngine::swap_plan).
+/// 1. [`new`](Self::new) stores the initial graph and creates the `SoundEngine`
+///    (without a plan or audio device).
+/// 2. [`start`](Self::start) opens the audio device, queries the sample rate,
+///    builds the initial plan with the real [`AudioEnvironment`], initialises
+///    new modules, and starts the audio thread.
+/// 3. Each [`update`](Self::update) builds a new plan, initialises new modules,
+///    and pushes it to the engine via [`swap_plan`](SoundEngine::swap_plan).
 ///
 /// ## Channel-full path
 ///
@@ -110,6 +113,8 @@ impl Planner {
 pub struct PatchEngine {
     planner: Planner,
     engine: SoundEngine,
+    /// The initial graph, held until [`start`](Self::start) builds the first plan.
+    initial_graph: Option<ModuleGraph>,
 }
 
 /// Errors returned by [`PatchEngine`] operations.
@@ -155,9 +160,10 @@ impl From<EngineError> for PatchEngineError {
 impl PatchEngine {
     /// Create a `PatchEngine` from an initial graph.
     ///
-    /// Builds the first plan and constructs the underlying [`SoundEngine`]
-    /// with the default control period (64 samples), but does not open the
-    /// audio device. Call [`start`](Self::start) to begin playback.
+    /// Stores the graph and constructs the underlying [`SoundEngine`] with the
+    /// default control period (64 samples), but does not open the audio device
+    /// or build a plan. Call [`start`](Self::start) to open the device, build
+    /// the initial plan with the real sample rate, and begin playback.
     pub fn new(graph: ModuleGraph) -> Result<Self, PatchEngineError> {
         Self::with_control_period(graph, DEFAULT_CONTROL_PERIOD)
     }
@@ -170,10 +176,8 @@ impl PatchEngine {
         graph: ModuleGraph,
         control_period: usize,
     ) -> Result<Self, PatchEngineError> {
-        let mut planner = Planner::with_capacity(DEFAULT_POOL_CAPACITY);
-        let plan = planner.build(graph)?;
+        let planner = Planner::with_capacity(DEFAULT_POOL_CAPACITY);
         let engine = SoundEngine::new(
-            plan,
             DEFAULT_POOL_CAPACITY,
             DEFAULT_MODULE_POOL_CAPACITY,
             control_period,
@@ -181,19 +185,34 @@ impl PatchEngine {
         Ok(Self {
             planner,
             engine,
+            initial_graph: Some(graph),
         })
     }
 
-    /// Open the audio device and begin processing.
+    /// Open the audio device, build the initial plan, and begin processing.
+    ///
+    /// Opens the device to obtain the real sample rate, builds the initial
+    /// [`ExecutionPlan`] from the graph provided at construction, initialises
+    /// new modules with the [`AudioEnvironment`], and starts the audio thread.
     ///
     /// Subsequent calls are no-ops if the engine is already running.
     pub fn start(&mut self) -> Result<(), PatchEngineError> {
-        self.engine.start().map_err(PatchEngineError::Engine)
+        let graph = match self.initial_graph.take() {
+            Some(g) => g,
+            None => return Ok(()), // already started
+        };
+
+        let _env = self.engine.open().map_err(PatchEngineError::Engine)?;
+
+        let plan = self.planner.build(graph)?;
+
+        self.engine.start(plan).map_err(PatchEngineError::Engine)
     }
 
     /// Apply an updated graph.
     ///
-    /// Builds a new [`ExecutionPlan`] from `graph` and pushes it to the
+    /// Builds a new [`ExecutionPlan`] from `graph`, initialises new modules
+    /// with the [`AudioEnvironment`], and pushes the plan to the
     /// [`SoundEngine`] via [`swap_plan`](SoundEngine::swap_plan). Surviving
     /// modules retain their state via the audio-thread pool.
     ///
@@ -202,6 +221,7 @@ impl PatchEngine {
     /// or an updated graph.
     pub fn update(&mut self, graph: ModuleGraph) -> Result<(), PatchEngineError> {
         let new_plan = self.planner.build(graph)?;
+
         match self.engine.swap_plan(new_plan) {
             Ok(()) => Ok(()),
             Err(_returned_plan) => Err(PatchEngineError::ChannelFull),
@@ -275,6 +295,7 @@ mod tests {
                 descriptor: ModuleDescriptor {
                     inputs: vec![],
                     outputs: vec![PortDescriptor { name: "out", index: 0 }],
+                    is_sink: false,
                 },
                 count: 0,
             }
@@ -429,6 +450,7 @@ mod tests {
                 descriptor: ModuleDescriptor {
                     inputs: vec![],
                     outputs: vec![PortDescriptor { name: "out", index: 0 }],
+                    is_sink: false,
                 },
                 received_count: Arc::clone(&received_count),
             };
@@ -528,12 +550,10 @@ mod tests {
 
     #[test]
     fn send_signal_returns_err_on_full_buffer() {
-        let mut planner = Planner::new();
-        let (graph, recv_id, _) = receiver_graph();
-        let plan = planner.build(graph).unwrap();
+        let (_, recv_id, _) = receiver_graph();
 
         let mut engine =
-            SoundEngine::new(plan, 256, 64, 64).expect("SoundEngine::new should succeed");
+            SoundEngine::new(256, 64, 64).expect("SoundEngine::new should succeed");
 
         for i in 0..64u64 {
             engine

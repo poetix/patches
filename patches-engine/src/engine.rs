@@ -3,7 +3,7 @@ use std::thread;
 use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{SampleFormat, Stream, StreamConfig};
+use cpal::{Device, SampleFormat, Stream, StreamConfig};
 
 use patches_core::{AudioEnvironment, ControlSignal, InstanceId, Module};
 
@@ -17,15 +17,24 @@ use crate::pool::ModulePool;
 pub const DEFAULT_MODULE_POOL_CAPACITY: usize = 1024;
 
 /// Pre-start state: the plan channel consumer, the signal consumer, the
-/// initial plan, the cable buffer pool, and the module pool.
+/// cable buffer pool, and the module pool.
 /// Stored in [`SoundEngine`] until [`start`](SoundEngine::start) moves them
 /// into the audio closure.
 struct PendingState {
     plan_rx: rtrb::Consumer<ExecutionPlan>,
     signal_rx: rtrb::Consumer<(InstanceId, ControlSignal)>,
-    initial_plan: ExecutionPlan,
     buffer_pool: Box<[[f64; 2]]>,
     module_pool: ModulePool,
+}
+
+/// State captured by [`SoundEngine::open`]: the audio device, its stream
+/// configuration, sample format, and channel count. Held until
+/// [`start`](SoundEngine::start) uses them to build the output stream.
+struct OpenedDevice {
+    device: Device,
+    config: StreamConfig,
+    sample_format: SampleFormat,
+    channels: usize,
 }
 
 /// Errors returned by [`SoundEngine`] operations.
@@ -49,6 +58,10 @@ pub enum EngineError {
     InvalidControlPeriod,
     /// The OS refused to spawn the cleanup thread.
     ThreadSpawnError(std::io::Error),
+    /// [`start`](SoundEngine::start) was called before [`open`](SoundEngine::open).
+    NotOpened,
+    /// [`open`](SoundEngine::open) was called after the device has already been opened.
+    AlreadyOpened,
 }
 
 impl fmt::Display for EngineError {
@@ -71,6 +84,12 @@ impl fmt::Display for EngineError {
                 write!(f, "control_period must be greater than zero")
             }
             EngineError::ThreadSpawnError(e) => write!(f, "failed to spawn cleanup thread: {e}"),
+            EngineError::NotOpened => {
+                write!(f, "start() called before open(); call open() first")
+            }
+            EngineError::AlreadyOpened => {
+                write!(f, "open() called after the device has already been opened")
+            }
         }
     }
 }
@@ -80,7 +99,7 @@ impl std::error::Error for EngineError {}
 /// Drives an [`ExecutionPlan`] continuously, writing stereo output to the
 /// default hardware audio device via CPAL.
 ///
-/// The audio callback owns the module pool and cable buffer pool directly — no
+/// The audio callback owns the module pool and cable buffer pool directly -- no
 /// `Arc`, no `Mutex`. A new plan can be swapped in at any time via
 /// [`swap_plan`](Self::swap_plan), which sends it over a wait-free SPSC
 /// channel (`rtrb`).
@@ -91,10 +110,21 @@ impl std::error::Error for EngineError {}
 ///   3. Zeros `to_zero` cable buffer slots.
 ///   4. Replaces `current_plan`.
 ///
-/// New modules are initialised (via [`Module::initialise`]) with the device's
-/// sample rate in [`swap_plan`](Self::swap_plan) before being sent to the
-/// audio callback. The initial plan's modules are initialised in
-/// [`start`](Self::start).
+/// Modules must be fully constructed and initialised before being sent to the
+/// engine. The engine does **not** call [`Module::initialise`]; callers are
+/// responsible for initialising modules with the [`AudioEnvironment`] returned
+/// by [`open`](Self::open) before passing plans to [`start`](Self::start) or
+/// [`swap_plan`](Self::swap_plan).
+///
+/// ## Lifecycle
+///
+/// 1. [`new`](Self::new) -- create the engine (no plan, no device).
+/// 2. [`open`](Self::open) -- open the audio device, query the sample rate,
+///    return an [`AudioEnvironment`]. Does **not** start audio.
+/// 3. [`start`](Self::start) -- take a fully-constructed [`ExecutionPlan`]
+///    and begin audio processing.
+/// 4. [`swap_plan`](Self::swap_plan) -- hot-swap to a new plan at any time.
+/// 5. [`stop`](Self::stop) -- stop audio and release the device.
 ///
 /// A `SoundEngine` can be started once. After [`stop`](Self::stop) the plan
 /// has been moved into (and dropped with) the audio closure; to run again
@@ -104,15 +134,15 @@ pub struct SoundEngine {
     plan_tx: rtrb::Producer<ExecutionPlan>,
     /// Write end of the lock-free signal channel.
     signal_tx: rtrb::Producer<(InstanceId, ControlSignal)>,
-    /// Consumer end, initial plan, and pools — stashed here until
+    /// Consumer end and pools -- stashed here until
     /// [`start`](Self::start) moves them into the audio closure.
     /// `None` after `start()` has been called.
     pending: Option<PendingState>,
+    /// Device state captured by [`open`](Self::open), consumed by
+    /// [`start`](Self::start).
+    opened_device: Option<OpenedDevice>,
     /// Live CPAL stream while the engine is running.
     stream: Option<Stream>,
-    /// Sample rate of the open audio device. Set in [`start`](Self::start);
-    /// used by [`swap_plan`](Self::swap_plan) to initialise incoming plans.
-    sample_rate: Option<f64>,
     /// Number of samples between control-rate ticks (signal dispatch).
     control_period: usize,
     /// Capacity of the module pool; used to size the cleanup ring buffer.
@@ -122,11 +152,11 @@ pub struct SoundEngine {
 }
 
 impl SoundEngine {
-    /// Create a new `SoundEngine` owning the given [`ExecutionPlan`] and
-    /// pre-allocated cable buffer and module pools.
+    /// Create a new `SoundEngine` with pre-allocated pools but no plan and no
+    /// audio device.
     ///
     /// `buffer_pool_capacity` is the number of `[f64; 2]` cable buffer slots.
-    /// Slot 0 is the permanent-zero slot; slots 1… are for cable buffers.
+    /// Slot 0 is the permanent-zero slot; slots 1... are for cable buffers.
     ///
     /// `module_pool_capacity` is the number of `Option<Box<dyn Module>>` slots
     /// in the audio-thread module pool. Must be at least as large as the value
@@ -136,9 +166,8 @@ impl SoundEngine {
     /// ticks (signal dispatch). Must be greater than zero; 64 is a sensible
     /// default (~1.3 ms at 48 kHz).
     ///
-    /// No audio device is opened until [`start`](Self::start) is called.
+    /// No audio device is opened until [`open`](Self::open) is called.
     pub fn new(
-        plan: ExecutionPlan,
         buffer_pool_capacity: usize,
         module_pool_capacity: usize,
         control_period: usize,
@@ -153,30 +182,26 @@ impl SoundEngine {
         Ok(Self {
             plan_tx,
             signal_tx,
-            pending: Some(PendingState { plan_rx, signal_rx, initial_plan: plan, buffer_pool, module_pool }),
+            pending: Some(PendingState { plan_rx, signal_rx, buffer_pool, module_pool }),
+            opened_device: None,
             stream: None,
-            sample_rate: None,
             control_period,
             module_pool_capacity,
             cleanup_thread: None,
         })
     }
 
-    /// Open the default output device and begin audio processing.
+    /// Open the default output device and query its configuration.
     ///
-    /// Initialises the initial plan's new modules with the device's sample rate,
-    /// installs them into the module pool, and starts the audio callback.
+    /// Returns an [`AudioEnvironment`] containing the device's sample rate.
+    /// The device and configuration are stored internally for use by
+    /// [`start`](Self::start). Does **not** start the audio thread.
     ///
-    /// Returns [`EngineError::AlreadyConsumed`] if called after the engine has
-    /// already been started and stopped. Returns `Ok(())` if the engine is
-    /// already running (no-op).
-    pub fn start(&mut self) -> Result<(), EngineError> {
-        if self.stream.is_some() {
-            return Ok(());
+    /// Returns [`EngineError::AlreadyOpened`] if called a second time.
+    pub fn open(&mut self) -> Result<AudioEnvironment, EngineError> {
+        if self.opened_device.is_some() {
+            return Err(EngineError::AlreadyOpened);
         }
-
-        let PendingState { plan_rx, signal_rx, mut initial_plan, buffer_pool, mut module_pool } =
-            self.pending.take().ok_or(EngineError::AlreadyConsumed)?;
 
         let host = cpal::default_host();
         let device = host
@@ -192,13 +217,41 @@ impl SoundEngine {
         let sample_rate = f64::from(config.sample_rate.0);
         let channels = usize::from(config.channels);
 
-        // Initialise and install the initial plan's new modules into the pool.
-        let env = AudioEnvironment { sample_rate };
-        for (idx, mut module) in initial_plan.new_modules.drain(..) {
-            module.initialise(&env);
+        self.opened_device = Some(OpenedDevice {
+            device,
+            config,
+            sample_format,
+            channels,
+        });
+
+        Ok(AudioEnvironment { sample_rate })
+    }
+
+    /// Begin audio processing with the given [`ExecutionPlan`].
+    ///
+    /// The plan's modules must already be fully constructed and initialised
+    /// (e.g. via [`Module::initialise`] with the [`AudioEnvironment`] returned
+    /// by [`open`](Self::open)). The engine installs `new_modules` into the
+    /// module pool and starts the audio callback.
+    ///
+    /// Returns [`EngineError::NotOpened`] if [`open`](Self::open) has not been
+    /// called. Returns [`EngineError::AlreadyConsumed`] if the engine has
+    /// already been started and stopped.
+    pub fn start(&mut self, mut plan: ExecutionPlan) -> Result<(), EngineError> {
+        if self.stream.is_some() {
+            return Ok(());
+        }
+
+        let PendingState { plan_rx, signal_rx, buffer_pool, mut module_pool } =
+            self.pending.take().ok_or(EngineError::AlreadyConsumed)?;
+
+        let OpenedDevice { device, config, sample_format, channels } =
+            self.opened_device.take().ok_or(EngineError::NotOpened)?;
+
+        // Install the plan's new modules into the pool (already initialised).
+        for (idx, module) in plan.new_modules.drain(..) {
             module_pool.install(idx, module);
         }
-        self.sample_rate = Some(sample_rate);
 
         let (cleanup_tx, mut cleanup_rx) =
             rtrb::RingBuffer::<Box<dyn Module>>::new(self.module_pool_capacity);
@@ -219,7 +272,7 @@ impl SoundEngine {
         self.cleanup_thread = Some(cleanup_handle);
 
         let callback = AudioCallback::new(
-            plan_rx, signal_rx, initial_plan, buffer_pool, module_pool, channels,
+            plan_rx, signal_rx, plan, buffer_pool, module_pool, channels,
             self.control_period, cleanup_tx,
         );
         let stream = match sample_format {
@@ -251,10 +304,8 @@ impl SoundEngine {
 
     /// Send a new [`ExecutionPlan`] to the audio callback.
     ///
-    /// If the engine has been started, the plan's new modules are initialised
-    /// with the device's sample rate before being queued. If the engine has not
-    /// yet been started, initialisation is skipped (sample rate is unknown) —
-    /// the modules will be initialised when `start` is called.
+    /// The plan's modules must already be fully constructed and initialised.
+    /// The engine does **not** call [`Module::initialise`] on incoming modules.
     ///
     /// The callback will adopt the new plan at the start of its next invocation,
     /// installing new modules and tombstoning removed ones. If the single-slot
@@ -263,13 +314,7 @@ impl SoundEngine {
     /// one buffer period (~10 ms).
     ///
     /// This method is wait-free and safe to call from any thread.
-    pub fn swap_plan(&mut self, mut new_plan: ExecutionPlan) -> Result<(), ExecutionPlan> {
-        if let Some(sr) = self.sample_rate {
-            let env = AudioEnvironment { sample_rate: sr };
-            for (_, module) in &mut new_plan.new_modules {
-                module.initialise(&env);
-            }
-        }
+    pub fn swap_plan(&mut self, new_plan: ExecutionPlan) -> Result<(), ExecutionPlan> {
         self.plan_tx.push(new_plan).map_err(|rtrb::PushError::Full(v)| v)
     }
 

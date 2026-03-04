@@ -1,4 +1,48 @@
-use patches_core::{InstanceId, Module, ModuleDescriptor, PortDescriptor, Sink};
+use patches_core::{
+    AudioEnvironment, InstanceId, Module, ModuleDescriptor, PortDescriptor, Sink};
+use patches_core::module::ParameterSet;
+use patches_core::module::Factory;
+
+pub struct AudioOutFactory {}
+
+impl AudioOutFactory {
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+impl Default for AudioOutFactory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Factory for AudioOutFactory {
+    fn get_module_name(&self) -> &'static str {
+        "AudioOut"
+    }
+
+    fn descriptor(&self, size: usize) -> &ModuleDescriptor {
+        ModuleDescriptor {
+            module_name: self.get_module_name(),
+            inputs: vec![
+                PortDescriptor { name: "left", index: 0 },
+                PortDescriptor { name: "right", index: 0 },
+            ],
+            outputs: vec![],
+            parameters: vec![],
+            defaults: vec![],
+        }
+    }
+
+    fn create(
+        &self,
+        audio_env: &AudioEnvironment,
+        descriptor: &ModuleDescriptor,
+        parameters: &ParameterSet) -> Box<dyn Module> {
+            Box::new(AudioOut::new(descriptor.clone()))
+        }
+}
 
 /// A passive stereo sink node.
 ///
@@ -10,24 +54,18 @@ use patches_core::{InstanceId, Module, ModuleDescriptor, PortDescriptor, Sink};
 /// `AudioOut` does not call any audio API; it knows nothing about the backend.
 pub struct AudioOut {
     instance_id: InstanceId,
+    descriptor: ModuleDescriptor,
     last_left: f64,
     last_right: f64,
-    descriptor: ModuleDescriptor,
 }
 
 impl AudioOut {
-    pub fn new() -> Self {
+    pub fn new(descriptor: ModuleDescriptor) -> Self {
         Self {
             instance_id: InstanceId::next(),
+            descriptor,
             last_left: 0.0,
             last_right: 0.0,
-            descriptor: ModuleDescriptor {
-                inputs: vec![
-                    PortDescriptor { name: "left", index: 0 },
-                    PortDescriptor { name: "right", index: 0 },
-                ],
-                outputs: vec![],
-            },
         }
     }
 
@@ -49,6 +87,7 @@ impl Default for AudioOut {
 }
 
 impl Module for AudioOut {
+
     fn descriptor(&self) -> &ModuleDescriptor {
         &self.descriptor
     }
@@ -85,9 +124,18 @@ impl Sink for AudioOut {
 mod tests {
     use super::*;
 
+    fn make_module() -> AudioOut {
+        let factory = AudioOutFactory::new();
+        let descriptor = factory.descriptor(0);
+        factory.create(
+            &AudioEnvironment::new(44100.0),
+            &descriptor,
+            &ParameterSet::default()).as_any().downcast_ref::<AudioOut>().unwrap().clone()
+    }
+
     #[test]
     fn descriptor_has_two_inputs_and_no_outputs() {
-        let sink = AudioOut::new();
+        let sink = make_module();
         let desc = sink.descriptor();
         assert_eq!(desc.inputs.len(), 2);
         assert_eq!(desc.inputs[0].name, "left");
@@ -97,22 +145,21 @@ mod tests {
 
     #[test]
     fn instance_ids_are_distinct() {
-        let a = AudioOut::new();
-        let b = AudioOut::new();
+        let a = make_module();
+        let b = make_module();
         assert_ne!(a.instance_id(), b.instance_id());
     }
 
     #[test]
     fn process_stores_left_and_right_samples() {
-        let mut sink = AudioOut::new();
-        assert_eq!(sink.last_left(), 0.0);
+        let mut sink = make_module();
         assert_eq!(sink.last_right(), 0.0);
 
-        sink.process(&[0.5, -0.3], &mut []);
+        module.process(&[0.5, -0.3], &mut []);
         assert_eq!(sink.last_left(), 0.5);
         assert_eq!(sink.last_right(), -0.3);
 
-        sink.process(&[1.0, 0.0], &mut []);
+        module.process(&[1.0, 0.0], &mut []);
         assert_eq!(sink.last_left(), 1.0);
         assert_eq!(sink.last_right(), 0.0);
     }

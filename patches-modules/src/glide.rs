@@ -33,11 +33,6 @@ impl Glide {
         glide
     }
 
-    fn initialise(&mut self, env: &AudioEnvironment) {
-        self.sample_rate = env.sample_rate;
-        self.update_beta();
-    }
-
     fn update_beta(&mut self) {
         let n_samples = self.sample_rate * self.glide_ms / 1000.0;
         self.beta = 1.0 - self.alpha.powf(1.0 / n_samples);
@@ -56,6 +51,11 @@ impl Module for Glide {
 
     fn instance_id(&self) -> InstanceId {
         self.instance_id
+    }
+
+    fn initialise(&mut self, env: &AudioEnvironment) {
+        self.sample_rate = env.sample_rate;
+        self.update_beta();
     }
 
     fn receive_signal(&mut self, signal: ControlSignal) {

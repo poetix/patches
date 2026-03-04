@@ -1,78 +1,10 @@
-use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use crate::audio_environment::AudioEnvironment;
+use crate::build_error::BuildError;
+use crate::instance_id::InstanceId;
+use crate::module_descriptor::{ModuleDescriptor, ModuleShape, ParameterKind};
+use crate::parameter_map::{ParameterMap, ParameterValue};
 
-/// Describes a single port on a module by name and index.
-///
-/// The `index` field is the user-visible number in a multi-port group (e.g.
-/// `in/2` has `name = "in"` and `index = 2`). For modules with a single port
-/// of a given name, `index` is `0`. The position of a `PortDescriptor` in
-/// `ModuleDescriptor::inputs` / `outputs` determines the slice offset passed to
-/// `Module::process`; `index` is semantically distinct from that position.
-#[derive(Debug, Clone)]
-pub struct PortDescriptor {
-    pub name: &'static str,
-    pub index: u32,
-}
-
-/// A reference to a named, indexed port used in `ModuleGraph::connect()`.
-///
-/// Port names are always `&'static str` (defined by module implementations at
-/// compile time), so producing a `PortRef` never allocates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PortRef {
-    pub name: &'static str,
-    pub index: u32,
-}
-
-/// Describes the full port layout of a module.
-///
-/// Inputs and outputs are stored in separate vecs. The index of a port in
-/// `inputs` corresponds to the index in the `inputs` slice passed to
-/// [`Module::process`], and similarly for `outputs`. The graph and patch builder
-/// use this to resolve port names to slice indices at build time.
-#[derive(Debug, Clone)]
-pub struct ModuleDescriptor {
-    pub inputs: Vec<PortDescriptor>,
-    pub outputs: Vec<PortDescriptor>,
-}
-
-/// Environmental parameters supplied to modules once when a plan is activated.
-///
-/// Modules that depend on these parameters (e.g. oscillators that use `sample_rate`)
-/// should store them in [`Module::initialise`] and use the stored copies during
-/// [`Module::process`] rather than receiving them per sample.
-#[derive(Debug, Clone, Copy)]
-pub struct AudioEnvironment {
-    pub sample_rate: f64,
-}
-
-/// A stable, unique identifier assigned to a module instance at construction time.
-///
-/// `InstanceId` is immutable for the lifetime of the module and survives across
-/// plan rebuilds, allowing the planner to match surviving modules to their pool
-/// slots in a new plan.
-///
-/// IDs are generated from a global atomic counter; no two independently constructed
-/// modules will share an `InstanceId` within a single process run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct InstanceId(u64);
-
-impl fmt::Display for InstanceId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "InstanceId({})", self.0)
-    }
-}
-
-static NEXT_INSTANCE_ID: AtomicU64 = AtomicU64::new(0);
-
-impl InstanceId {
-    /// Allocate a fresh `InstanceId`. Each call returns a distinct value.
-    pub fn next() -> Self {
-        Self(NEXT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed))
-    }
-}
-
-/// A non-audio-rate parameter update delivered to a module via [`Module::receive_signal`].
+/// A non-audio-rate control signal delivered to a module via [`Module::receive_signal`].
 ///
 /// Signals are passed by value; modules that need to store the payload can do so directly.
 /// New variants may be added in future; module implementations should use a wildcard arm
@@ -83,42 +15,195 @@ impl InstanceId {
 #[derive(Debug, Clone)]
 pub enum ControlSignal {
     /// A single named float parameter update (e.g. frequency, gain).
-    Float { name: &'static str, value: f64 },
+    ParameterUpdate { name: &'static str, value: ParameterValue },
+}
+
+/// Validate `params` against `descriptor`.
+///
+/// Returns an error if:
+/// - Any key in `params` is not declared in `descriptor.parameters`.
+/// - Any supplied value has the wrong type for its parameter.
+/// - Any supplied numeric value is outside the bounds declared in its [`ParameterKind`].
+/// - Any supplied enum value is not among the declared variants.
+///
+/// Missing parameters are not an error; they are simply left unchanged (or filled with
+/// defaults by [`Module::build`] before this is called for the first time).
+pub fn validate_parameters(
+    params: &ParameterMap,
+    descriptor: &ModuleDescriptor,
+) -> Result<(), BuildError> {
+    // Reject any key not declared in the descriptor.
+    for name in params.keys() {
+        if !descriptor.parameters.iter().any(|p| p.name == name.as_str()) {
+            return Err(BuildError::Custom {
+                module: descriptor.module_name,
+                message: format!("unknown parameter '{name}'"),
+            });
+        }
+    }
+
+    // Validate type and bounds for each supplied parameter.
+    for param_desc in &descriptor.parameters {
+        let Some(value) = params.get(param_desc.name) else {
+            continue;
+        };
+        match (&param_desc.parameter_type, value) {
+            (ParameterKind::Float { min, max, .. }, ParameterValue::Float(v)) => {
+                if *v < *min || *v > *max {
+                    return Err(BuildError::ParameterOutOfRange {
+                        module: descriptor.module_name,
+                        parameter: param_desc.name,
+                        min: *min,
+                        max: *max,
+                        found: *v,
+                    });
+                }
+            }
+            (ParameterKind::Int { min, max, .. }, ParameterValue::Int(v)) => {
+                if *v < *min || *v > *max {
+                    return Err(BuildError::ParameterOutOfRange {
+                        module: descriptor.module_name,
+                        parameter: param_desc.name,
+                        min: *min as f64,
+                        max: *max as f64,
+                        found: *v as f64,
+                    });
+                }
+            }
+            (ParameterKind::Bool { .. }, ParameterValue::Bool(_)) => {}
+            (ParameterKind::Enum { variants, .. }, ParameterValue::Enum(v)) => {
+                if !variants.contains(v) {
+                    return Err(BuildError::Custom {
+                        module: descriptor.module_name,
+                        message: format!(
+                            "parameter '{}' has unrecognised value '{v}'",
+                            param_desc.name
+                        ),
+                    });
+                }
+            }
+            _ => {
+                return Err(BuildError::InvalidParameterType {
+                    module: descriptor.module_name,
+                    parameter: param_desc.name,
+                    expected: param_desc.parameter_type.kind_name(),
+                    found: value.kind_name(),
+                });
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// The core trait all audio modules implement.
 ///
-/// `initialise` is called once when a plan is activated (or re-activated after a
-/// hot-reload). `process` is then called once per sample. Both `inputs` and
-/// `outputs` are indexed according to the module's [`ModuleDescriptor`].
+/// Construction follows a two-phase protocol:
+///
+/// 1. [`prepare`](Module::prepare) — allocates and initialises the instance with the audio
+///    environment and descriptor. Other fields are set to their defaults. Infallible.
+/// 2. [`update_validated_parameters`](Module::update_validated_parameters) — applies a
+///    pre-validated [`ParameterMap`] to the instance.
+///
+/// [`build`](Module::build) has a default implementation that:
+/// - Calls [`describe`](Module::describe) to get the descriptor.
+/// - Calls [`prepare`](Module::prepare).
+/// - Fills in any missing parameters from the descriptor's declared defaults.
+/// - Calls [`update_parameters`](Module::update_parameters) (which validates then delegates).
+///
+/// [`update_parameters`](Module::update_parameters) has a default implementation that
+/// validates via [`validate_parameters`] and, on success, calls
+/// [`update_validated_parameters`](Module::update_validated_parameters).
+///
+/// `process` is called once per sample. Both `inputs` and `outputs` are indexed
+/// according to the module's [`ModuleDescriptor`].
 ///
 /// `as_any` enables downcasting from `&dyn Module` to a concrete type.
-/// `as_sink` lets the patch builder detect a sink node without knowing its
-/// concrete type — see [`Sink`].
-///
-/// There is deliberately no `as_any_mut`: no production code needs mutable
-/// downcasting, and test code that inspects module state can use `as_any` +
-/// `downcast_ref` instead.
+/// `as_sink` lets the patch builder detect a sink node — see [`Sink`].
 pub trait Module: Send {
+    /// Return the static descriptor for this module type, computed from the given shape.
+    fn describe(shape: &ModuleShape) -> ModuleDescriptor
+    where
+        Self: Sized;
+
+    /// Allocate and initialise a new instance, storing `audio_environment` and `descriptor`.
+    /// All other fields should be set to their default/zero values.
+    ///
+    /// This is infallible; parameter validation is deferred to
+    /// [`update_validated_parameters`](Module::update_validated_parameters).
+    fn prepare(audio_environment: &AudioEnvironment, descriptor: ModuleDescriptor) -> Self
+    where
+        Self: Sized;
+
+    /// Apply an already-validated `params` to this instance, updating fields derived from
+    /// parameters.
+    ///
+    /// Only called by the default [`update_parameters`](Module::update_parameters) after
+    /// validation passes. All keys are guaranteed to be declared in the descriptor and their
+    /// values are guaranteed to be correctly typed and within bounds.
+    fn update_validated_parameters(&mut self, params: &ParameterMap) -> Result<(), BuildError>;
+
+    /// Validate `params` against the module's descriptor, then apply them.
+    ///
+    /// The default implementation calls [`validate_parameters`] and, on success, forwards
+    /// to [`update_validated_parameters`](Module::update_validated_parameters). Override only
+    /// if custom validation beyond what [`validate_parameters`] provides is needed.
+    fn update_parameters(&mut self, params: &ParameterMap) -> Result<(), BuildError> {
+        validate_parameters(params, self.descriptor())?;
+        self.update_validated_parameters(params)
+    }
+
+    /// Construct a fully initialised instance from an audio environment, shape, and parameters.
+    ///
+    /// The default implementation:
+    /// 1. Calls [`describe`](Module::describe) to obtain the descriptor.
+    /// 2. Calls [`prepare`](Module::prepare).
+    /// 3. Fills any missing parameters using the defaults declared in the descriptor.
+    /// 4. Calls [`update_parameters`](Module::update_parameters) (validates then applies).
+    ///
+    /// Module implementations should not need to override this.
+    fn build(
+        audio_environment: &AudioEnvironment,
+        shape: &ModuleShape,
+        params: &ParameterMap,
+    ) -> Result<Self, BuildError>
+    where
+        Self: Sized,
+    {
+        let descriptor = Self::describe(shape);
+        let mut instance = Self::prepare(audio_environment, descriptor);
+
+        // Fill in any missing parameters using the descriptor's declared defaults.
+        let mut filled = params.clone();
+        for param_desc in instance.descriptor().parameters.iter() {
+            filled
+                .entry(param_desc.name.to_string())
+                .or_insert_with(|| param_desc.parameter_type.default_value());
+        }
+
+        instance.update_parameters(&filled)?;
+        Ok(instance)
+    }
+
     fn descriptor(&self) -> &ModuleDescriptor;
+
     /// The stable identity of this module instance.
     ///
     /// Must be assigned at construction time (e.g. via [`InstanceId::next()`]) and
     /// return the same value for the lifetime of the instance.
     fn instance_id(&self) -> InstanceId;
-    /// Called once when the plan containing this module is activated.
-    ///
-    /// Modules that depend on environment parameters (e.g. sample rate) should
-    /// store what they need here. The default implementation is a no-op.
-    fn initialise(&mut self, _env: &AudioEnvironment) {}
+
     fn process(&mut self, inputs: &[f64], outputs: &mut [f64]);
+
     /// Deliver a non-audio-rate control signal to this module.
     ///
     /// The default implementation is a no-op; modules that respond to control signals
     /// override this method. Unknown signal variants or parameter names should be
     /// silently ignored.
     fn receive_signal(&mut self, _signal: ControlSignal) {}
+
     fn as_any(&self) -> &dyn std::any::Any;
+
     /// Returns `Some(self)` if this module is a [`Sink`], `None` otherwise.
     fn as_sink(&self) -> Option<&dyn Sink> {
         None
@@ -135,38 +220,4 @@ pub trait Sink: Module {
     fn last_left(&self) -> f64;
     /// Right-channel sample stored during the most recent [`Module::process`] call.
     fn last_right(&self) -> f64;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn port_descriptor_fields() {
-        let p = PortDescriptor { name: "freq", index: 0 };
-        assert_eq!(p.name, "freq");
-        assert_eq!(p.index, 0);
-    }
-
-    #[test]
-    fn module_descriptor_port_counts() {
-        let desc = ModuleDescriptor {
-            inputs: vec![PortDescriptor { name: "in", index: 0 }],
-            outputs: vec![
-                PortDescriptor { name: "out_l", index: 0 },
-                PortDescriptor { name: "out_r", index: 0 },
-            ],
-        };
-        assert_eq!(desc.inputs.len(), 1);
-        assert_eq!(desc.outputs.len(), 2);
-        assert_eq!(desc.inputs[0].name, "in");
-        assert_eq!(desc.outputs[1].name, "out_r");
-    }
-
-    #[test]
-    fn instance_ids_are_unique() {
-        let a = InstanceId::next();
-        let b = InstanceId::next();
-        assert_ne!(a, b);
-    }
 }

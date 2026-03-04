@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::module::{Module, PortRef};
+use crate::{ModuleDescriptor, PortRef};
+use crate::parameter_map::ParameterMap;
 
 /// Stable identifier for a module node in the graph.
 ///
@@ -90,16 +91,22 @@ struct Edge {
     scale: f64,
 }
 
+/// A node in the module graph, holding a descriptor and its current parameter values.
+pub struct Node {
+    pub module_descriptor: ModuleDescriptor,
+    pub parameter_map: ParameterMap,
+}
+
 /// An in-memory, editable directed graph of audio modules connected by patch cables.
 ///
-/// Nodes are module instances stored as `Box<dyn Module>` with stable [`NodeId`]s.
+/// Nodes store `ModuleDescriptor` and `ParameterMap` values with stable [`NodeId`]s.
 /// Edges represent patch cables: a connection from a named, indexed output port on
 /// one node to a named, indexed input port on another.
 ///
 /// This is a **topology-only** structure. No audio processing happens here; execution
 /// ordering and buffer allocation are handled by the patch builder.
 pub struct ModuleGraph {
-    nodes: HashMap<NodeId, Box<dyn Module>>,
+    nodes: HashMap<NodeId, Node>,
     /// Indexed by `(destination NodeId, input port name, input port index)` for O(1)
     /// duplicate-input detection in [`connect`](Self::connect). Each input port can
     /// have at most one driver.
@@ -121,13 +128,20 @@ impl ModuleGraph {
     pub fn add_module(
         &mut self,
         id: impl Into<NodeId>,
-        module: Box<dyn Module>,
+        module_descriptor: ModuleDescriptor,
+        parameter_map: &ParameterMap,
     ) -> Result<(), GraphError> {
         let id = id.into();
         if self.nodes.contains_key(&id) {
             return Err(GraphError::DuplicateNodeId(id));
         }
-        self.nodes.insert(id, module);
+        self.nodes.insert(
+            id,
+            Node {
+                module_descriptor,
+                parameter_map: parameter_map.clone(),
+            },
+        );
         Ok(())
     }
 
@@ -154,42 +168,43 @@ impl ModuleGraph {
         if !scale.is_finite() || !(-1.0..=1.0).contains(&scale) {
             return Err(GraphError::ScaleOutOfRange(scale));
         }
-        // Validate source node and output port.
-        let from_desc = self
-            .nodes
-            .get(from)
-            .ok_or_else(|| GraphError::NodeNotFound(from.clone()))?
-            .descriptor()
-            .clone();
 
-        if !from_desc
-            .outputs
-            .iter()
-            .any(|p| p.name == output.name && p.index == output.index)
+        // Validate source node and output port.
         {
-            return Err(GraphError::OutputPortNotFound {
-                node: from.clone(),
-                port: format!("{}/{}", output.name, output.index),
-            });
+            let from_node = self
+                .nodes
+                .get(from)
+                .ok_or_else(|| GraphError::NodeNotFound(from.clone()))?;
+            if !from_node
+                .module_descriptor
+                .outputs
+                .iter()
+                .any(|p| p.name == output.name && p.index == output.index)
+            {
+                return Err(GraphError::OutputPortNotFound {
+                    node: from.clone(),
+                    port: format!("{}/{}", output.name, output.index),
+                });
+            }
         }
 
         // Validate destination node and input port.
-        let to_desc = self
-            .nodes
-            .get(to)
-            .ok_or_else(|| GraphError::NodeNotFound(to.clone()))?
-            .descriptor()
-            .clone();
-
-        if !to_desc
-            .inputs
-            .iter()
-            .any(|p| p.name == input.name && p.index == input.index)
         {
-            return Err(GraphError::InputPortNotFound {
-                node: to.clone(),
-                port: format!("{}/{}", input.name, input.index),
-            });
+            let to_node = self
+                .nodes
+                .get(to)
+                .ok_or_else(|| GraphError::NodeNotFound(to.clone()))?;
+            if !to_node
+                .module_descriptor
+                .inputs
+                .iter()
+                .any(|p| p.name == input.name && p.index == input.index)
+            {
+                return Err(GraphError::InputPortNotFound {
+                    node: to.clone(),
+                    port: format!("{}/{}", input.name, input.index),
+                });
+            }
         }
 
         // Enforce one driver per input — O(1) via the edge index.
@@ -261,17 +276,17 @@ impl ModuleGraph {
             .collect()
     }
 
-    /// Borrow a module by id for inspection (e.g. descriptor or type-checking).
-    pub fn get_module(&self, id: &NodeId) -> Option<&dyn Module> {
-        self.nodes.get(id).map(|m| m.as_ref())
+    /// Borrow a node by id for inspection (e.g. descriptor or parameter map).
+    pub fn get_node(&self, id: &NodeId) -> Option<&Node> {
+        self.nodes.get(id)
     }
 
-    /// Consume the graph and return the underlying module map.
+    /// Consume the graph and return the underlying node map.
     ///
     /// Call [`node_ids`](Self::node_ids), [`edge_list`](Self::edge_list), and
-    /// [`get_module`](Self::get_module) first to snapshot any information you need
+    /// [`get_node`](Self::get_node) first to snapshot any information you need
     /// before consuming.
-    pub fn into_modules(self) -> HashMap<NodeId, Box<dyn Module>> {
+    pub fn into_nodes(self) -> HashMap<NodeId, Node> {
         self.nodes
     }
 }
@@ -285,70 +300,48 @@ impl Default for ModuleGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::module::{InstanceId, ModuleDescriptor, PortDescriptor, PortRef};
+    use crate::{ModuleDescriptor, PortDescriptor, PortRef};
+    use crate::module_descriptor::ModuleShape;
+    use crate::parameter_map::ParameterMap;
 
-    // A minimal stub module with configurable ports for testing.
-    struct StubModule {
-        instance_id: InstanceId,
-        descriptor: ModuleDescriptor,
-    }
-
-    impl StubModule {
-        fn new(inputs: &[&'static str], outputs: &[&'static str]) -> Self {
-            Self {
-                instance_id: InstanceId::next(),
-                descriptor: ModuleDescriptor {
-                    inputs: inputs
-                        .iter()
-                        .map(|&n| PortDescriptor { name: n, index: 0 })
-                        .collect(),
-                    outputs: outputs
-                        .iter()
-                        .map(|&n| PortDescriptor { name: n, index: 0 })
-                        .collect(),
-                },
-            }
+    fn stub_desc(inputs: &[&'static str], outputs: &[&'static str]) -> ModuleDescriptor {
+        ModuleDescriptor {
+            module_name: "stub",
+            shape: ModuleShape { channels: 0 },
+            inputs: inputs
+                .iter()
+                .map(|&n| PortDescriptor { name: n, index: 0 })
+                .collect(),
+            outputs: outputs
+                .iter()
+                .map(|&n| PortDescriptor { name: n, index: 0 })
+                .collect(),
+            parameters: vec![],
         }
-    }
-
-    impl Module for StubModule {
-        fn descriptor(&self) -> &ModuleDescriptor {
-            &self.descriptor
-        }
-
-        fn instance_id(&self) -> InstanceId {
-            self.instance_id
-        }
-
-        fn process(&mut self, _inputs: &[f64], _outputs: &mut [f64]) {}
-
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
-    }
-
-    fn stub(inputs: &[&'static str], outputs: &[&'static str]) -> Box<dyn Module> {
-        Box::new(StubModule::new(inputs, outputs))
     }
 
     fn pref(name: &'static str) -> PortRef {
         PortRef { name, index: 0 }
     }
 
+    fn no_params() -> ParameterMap {
+        ParameterMap::new()
+    }
+
     #[test]
     fn add_module_succeeds() {
         let mut g = ModuleGraph::new();
-        g.add_module("a", stub(&[], &[])).unwrap();
-        g.add_module("b", stub(&[], &[])).unwrap();
+        g.add_module("a", stub_desc(&[], &[]), &no_params()).unwrap();
+        g.add_module("b", stub_desc(&[], &[]), &no_params()).unwrap();
         assert_eq!(g.node_ids().len(), 2);
     }
 
     #[test]
     fn add_module_duplicate_id_errors() {
         let mut g = ModuleGraph::new();
-        g.add_module("a", stub(&[], &[])).unwrap();
+        g.add_module("a", stub_desc(&[], &[]), &no_params()).unwrap();
         assert!(matches!(
-            g.add_module("a", stub(&[], &[])),
+            g.add_module("a", stub_desc(&[], &[]), &no_params()),
             Err(GraphError::DuplicateNodeId(_))
         ));
     }
@@ -358,8 +351,8 @@ mod tests {
         let mut g = ModuleGraph::new();
         let src = NodeId::from("src");
         let dst = NodeId::from("dst");
-        g.add_module(src.clone(), stub(&[], &["out"])).unwrap();
-        g.add_module(dst.clone(), stub(&["in"], &[])).unwrap();
+        g.add_module(src.clone(), stub_desc(&[], &["out"]), &no_params()).unwrap();
+        g.add_module(dst.clone(), stub_desc(&["in"], &[]), &no_params()).unwrap();
         assert!(g.connect(&src, pref("out"), &dst, pref("in"), 1.0).is_ok());
     }
 
@@ -368,8 +361,8 @@ mod tests {
         let mut g = ModuleGraph::new();
         let dst = NodeId::from("dst");
         let ghost = NodeId::from("ghost");
-        g.add_module(dst.clone(), stub(&["in"], &[])).unwrap();
-        g.add_module(ghost.clone(), stub(&[], &["out"])).unwrap();
+        g.add_module(dst.clone(), stub_desc(&["in"], &[]), &no_params()).unwrap();
+        g.add_module(ghost.clone(), stub_desc(&[], &["out"]), &no_params()).unwrap();
         g.remove_module(&ghost);
         assert!(matches!(
             g.connect(&ghost, pref("out"), &dst, pref("in"), 1.0),
@@ -382,8 +375,8 @@ mod tests {
         let mut g = ModuleGraph::new();
         let src = NodeId::from("src");
         let ghost = NodeId::from("ghost");
-        g.add_module(src.clone(), stub(&[], &["out"])).unwrap();
-        g.add_module(ghost.clone(), stub(&["in"], &[])).unwrap();
+        g.add_module(src.clone(), stub_desc(&[], &["out"]), &no_params()).unwrap();
+        g.add_module(ghost.clone(), stub_desc(&["in"], &[]), &no_params()).unwrap();
         g.remove_module(&ghost);
         assert!(matches!(
             g.connect(&src, pref("out"), &ghost, pref("in"), 1.0),
@@ -396,8 +389,8 @@ mod tests {
         let mut g = ModuleGraph::new();
         let src = NodeId::from("src");
         let dst = NodeId::from("dst");
-        g.add_module(src.clone(), stub(&[], &["out"])).unwrap();
-        g.add_module(dst.clone(), stub(&["in"], &[])).unwrap();
+        g.add_module(src.clone(), stub_desc(&[], &["out"]), &no_params()).unwrap();
+        g.add_module(dst.clone(), stub_desc(&["in"], &[]), &no_params()).unwrap();
         assert!(matches!(
             g.connect(&src, pref("nope"), &dst, pref("in"), 1.0),
             Err(GraphError::OutputPortNotFound { .. })
@@ -409,8 +402,8 @@ mod tests {
         let mut g = ModuleGraph::new();
         let src = NodeId::from("src");
         let dst = NodeId::from("dst");
-        g.add_module(src.clone(), stub(&[], &["out"])).unwrap();
-        g.add_module(dst.clone(), stub(&["in"], &[])).unwrap();
+        g.add_module(src.clone(), stub_desc(&[], &["out"]), &no_params()).unwrap();
+        g.add_module(dst.clone(), stub_desc(&["in"], &[]), &no_params()).unwrap();
         assert!(matches!(
             g.connect(&src, pref("out"), &dst, pref("nope"), 1.0),
             Err(GraphError::InputPortNotFound { .. })
@@ -423,9 +416,9 @@ mod tests {
         let src1 = NodeId::from("src1");
         let src2 = NodeId::from("src2");
         let dst = NodeId::from("dst");
-        g.add_module(src1.clone(), stub(&[], &["out"])).unwrap();
-        g.add_module(src2.clone(), stub(&[], &["out"])).unwrap();
-        g.add_module(dst.clone(), stub(&["in"], &[])).unwrap();
+        g.add_module(src1.clone(), stub_desc(&[], &["out"]), &no_params()).unwrap();
+        g.add_module(src2.clone(), stub_desc(&[], &["out"]), &no_params()).unwrap();
+        g.add_module(dst.clone(), stub_desc(&["in"], &[]), &no_params()).unwrap();
         g.connect(&src1, pref("out"), &dst, pref("in"), 1.0).unwrap();
         assert!(matches!(
             g.connect(&src2, pref("out"), &dst, pref("in"), 1.0),
@@ -439,9 +432,9 @@ mod tests {
         let src = NodeId::from("src");
         let dst1 = NodeId::from("dst1");
         let dst2 = NodeId::from("dst2");
-        g.add_module(src.clone(), stub(&[], &["out"])).unwrap();
-        g.add_module(dst1.clone(), stub(&["in"], &[])).unwrap();
-        g.add_module(dst2.clone(), stub(&["in"], &[])).unwrap();
+        g.add_module(src.clone(), stub_desc(&[], &["out"]), &no_params()).unwrap();
+        g.add_module(dst1.clone(), stub_desc(&["in"], &[]), &no_params()).unwrap();
+        g.add_module(dst2.clone(), stub_desc(&["in"], &[]), &no_params()).unwrap();
         assert!(g.connect(&src, pref("out"), &dst1, pref("in"), 1.0).is_ok());
         assert!(g.connect(&src, pref("out"), &dst2, pref("in"), 1.0).is_ok());
     }
@@ -451,8 +444,8 @@ mod tests {
         let mut g = ModuleGraph::new();
         let a = NodeId::from("a");
         let b = NodeId::from("b");
-        g.add_module(a.clone(), stub(&["in"], &["out"])).unwrap();
-        g.add_module(b.clone(), stub(&["in"], &["out"])).unwrap();
+        g.add_module(a.clone(), stub_desc(&["in"], &["out"]), &no_params()).unwrap();
+        g.add_module(b.clone(), stub_desc(&["in"], &["out"]), &no_params()).unwrap();
         assert!(g.connect(&a, pref("out"), &b, pref("in"), 1.0).is_ok());
         assert!(g.connect(&b, pref("out"), &a, pref("in"), 1.0).is_ok());
     }
@@ -463,9 +456,9 @@ mod tests {
         let a = NodeId::from("a");
         let b = NodeId::from("b");
         let c = NodeId::from("c");
-        g.add_module(a.clone(), stub(&[], &["out"])).unwrap();
-        g.add_module(b.clone(), stub(&["in"], &["out"])).unwrap();
-        g.add_module(c.clone(), stub(&["in"], &[])).unwrap();
+        g.add_module(a.clone(), stub_desc(&[], &["out"]), &no_params()).unwrap();
+        g.add_module(b.clone(), stub_desc(&["in"], &["out"]), &no_params()).unwrap();
+        g.add_module(c.clone(), stub_desc(&["in"], &[]), &no_params()).unwrap();
         g.connect(&a, pref("out"), &b, pref("in"), 1.0).unwrap();
         g.connect(&b, pref("out"), &c, pref("in"), 1.0).unwrap();
 
@@ -480,8 +473,8 @@ mod tests {
         let mut g = ModuleGraph::new();
         let src = NodeId::from("src");
         let dst = NodeId::from("dst");
-        g.add_module(src.clone(), stub(&[], &["out"])).unwrap();
-        g.add_module(dst.clone(), stub(&["in"], &[])).unwrap();
+        g.add_module(src.clone(), stub_desc(&[], &["out"]), &no_params()).unwrap();
+        g.add_module(dst.clone(), stub_desc(&["in"], &[]), &no_params()).unwrap();
         g.connect(&src, pref("out"), &dst, pref("in"), 1.0).unwrap();
 
         g.disconnect(&src, pref("out"), &dst, pref("in"));
@@ -498,8 +491,8 @@ mod tests {
         let mut g = ModuleGraph::new();
         let src = NodeId::from("src");
         let dst = NodeId::from("dst");
-        g.add_module(src.clone(), stub(&[], &["out"])).unwrap();
-        g.add_module(dst.clone(), stub(&["in"], &[])).unwrap();
+        g.add_module(src.clone(), stub_desc(&[], &["out"]), &no_params()).unwrap();
+        g.add_module(dst.clone(), stub_desc(&["in"], &[]), &no_params()).unwrap();
 
         assert!(matches!(
             g.connect(&src, pref("out"), &dst, pref("in"), 1.5),
@@ -527,40 +520,39 @@ mod tests {
         let src = NodeId::from("src");
         let dst1 = NodeId::from("dst1");
         let dst2 = NodeId::from("dst2");
-        g.add_module(src.clone(), stub(&[], &["out"])).unwrap();
-        g.add_module(dst1.clone(), stub(&["in"], &[])).unwrap();
-        g.add_module(dst2.clone(), stub(&["in"], &[])).unwrap();
+        g.add_module(src.clone(), stub_desc(&[], &["out"]), &no_params()).unwrap();
+        g.add_module(dst1.clone(), stub_desc(&["in"], &[]), &no_params()).unwrap();
+        g.add_module(dst2.clone(), stub_desc(&["in"], &[]), &no_params()).unwrap();
         assert!(g.connect(&src, pref("out"), &dst1, pref("in"), 1.0).is_ok());
         assert!(g.connect(&src, pref("out"), &dst2, pref("in"), -1.0).is_ok());
     }
 
     #[test]
     fn port_ref_index_distinguishes_same_named_ports() {
-        // A module with two ports both named "in" but different indices.
-        let module = StubModule {
-            instance_id: InstanceId::next(),
-            descriptor: ModuleDescriptor {
-                inputs: vec![
-                    PortDescriptor { name: "in", index: 0 },
-                    PortDescriptor { name: "in", index: 1 },
-                ],
-                outputs: vec![],
-            },
+        // A descriptor with two ports both named "in" but different indices.
+        let desc = ModuleDescriptor {
+            module_name: "stub",
+            shape: ModuleShape { channels: 0 },
+            inputs: vec![
+                PortDescriptor { name: "in", index: 0 },
+                PortDescriptor { name: "in", index: 1 },
+            ],
+            outputs: vec![],
+            parameters: vec![],
         };
         let src = NodeId::from("src");
         let dst = NodeId::from("dst");
         let mut g = ModuleGraph::new();
-        g.add_module(src.clone(), stub(&[], &["out"])).unwrap();
-        g.add_module(dst.clone(), Box::new(module)).unwrap();
+        g.add_module(src.clone(), stub_desc(&[], &["out"]), &no_params()).unwrap();
+        g.add_module(dst.clone(), desc, &no_params()).unwrap();
 
         // Connect to in/0 and in/1 — both must succeed.
         assert!(g
             .connect(&src, pref("out"), &dst, PortRef { name: "in", index: 0 }, 1.0)
             .is_ok());
         // Fanout src to in/1 requires a second src output (or we use a separate src).
-        // Just verify the second connection can be wired once the first is in place.
         let src2 = NodeId::from("src2");
-        g.add_module(src2.clone(), stub(&[], &["out"])).unwrap();
+        g.add_module(src2.clone(), stub_desc(&[], &["out"]), &no_params()).unwrap();
         assert!(g
             .connect(&src2, pref("out"), &dst, PortRef { name: "in", index: 1 }, 1.0)
             .is_ok());

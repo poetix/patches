@@ -7,7 +7,7 @@ use patches_engine::PatchEngine;
 use patches_modules::{
     SineOscillator,
     AdsrEnvelope, AudioOut, ClockSequencer, SawtoothOscillator, SquareOscillator, StepSequencer,
-    Sum, Vca, Glide,
+    Sum, Vca,
 };
 
 const BPM: f64 = 120.0;

@@ -41,6 +41,7 @@ impl StatefulCounter {
             descriptor: ModuleDescriptor {
                 inputs: vec![],
                 outputs: vec![PortDescriptor { name: "out", index: 0 }],
+                is_sink: false,
             },
             count: 0,
         }
@@ -52,6 +53,7 @@ impl StatefulCounter {
             descriptor: ModuleDescriptor {
                 inputs: vec![],
                 outputs: vec![PortDescriptor { name: "out", index: 0 }],
+                is_sink: false,
             },
             count: 0,
         }

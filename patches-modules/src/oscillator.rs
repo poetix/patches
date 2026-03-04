@@ -44,6 +44,7 @@ impl Module for SineOscillator {
                     default: 440.0,
                 },
             }],
+            is_sink: false,
         }
     }
 

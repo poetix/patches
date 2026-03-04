@@ -24,6 +24,7 @@ impl Module for Vca {
             ],
             outputs: vec![PortDescriptor { name: "out", index: 0 }],
             parameters: vec![],
+            is_sink: false,
         }
     }
 

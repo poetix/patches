@@ -54,6 +54,7 @@ impl Module for Glide {
                     default: 100.0,
                 },
             }],
+            is_sink: false,
         }
     }
 

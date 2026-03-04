@@ -131,6 +131,7 @@ impl DropSpy {
             descriptor: ModuleDescriptor {
                 inputs: vec![],
                 outputs: vec![PortDescriptor { name: "out", index: 0 }],
+                is_sink: false,
             },
             dropped: flag,
         }

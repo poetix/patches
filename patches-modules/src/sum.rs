@@ -28,6 +28,7 @@ impl Module for Sum {
             inputs,
             outputs: vec![PortDescriptor { name: "out", index: 0 }],
             parameters: vec![],
+            is_sink: false,
         }
     }
 

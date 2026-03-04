@@ -150,6 +150,7 @@ mod tests {
                 desc: ModuleDescriptor {
                     inputs: vec![],
                     outputs: vec![PortDescriptor { name: "out", index: 0 }],
+                    is_sink: false,
                 },
             }
         }
@@ -191,6 +192,7 @@ mod tests {
                 desc: ModuleDescriptor {
                     inputs: vec![PortDescriptor { name: "in", index: 0 }],
                     outputs: vec![],
+                    is_sink: false,
                 },
             }
         }

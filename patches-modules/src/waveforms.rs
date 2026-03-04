@@ -35,6 +35,7 @@ impl Module for SawtoothOscillator {
                 index: 0,
                 parameter_type: ParameterKind::Float { min: -4.0, max: 8.0, default: 0.0 },
             }],
+            is_sink: false,
         }
     }
 
@@ -103,6 +104,7 @@ impl Module for SquareOscillator {
                 index: 0,
                 parameter_type: ParameterKind::Float { min: -4.0, max: 8.0, default: 0.0 },
             }],
+            is_sink: false,
         }
     }
 

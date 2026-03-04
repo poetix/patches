@@ -26,6 +26,7 @@ impl Module for AudioOut {
             ],
             outputs: vec![],
             parameters: vec![],
+            is_sink: true,
         }
     }
 

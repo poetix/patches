@@ -75,6 +75,7 @@ impl Module for AdsrEnvelope {
                     parameter_type: ParameterKind::Float { min: 0.001, max: 10.0, default: 0.3 },
                 },
             ],
+            is_sink: false,
         }
     }
 

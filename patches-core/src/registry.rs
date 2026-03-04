@@ -65,6 +65,7 @@ mod tests {
                 inputs: vec![],
                 outputs: vec![],
                 parameters: vec![],
+                is_sink: false,
             }
         }
 

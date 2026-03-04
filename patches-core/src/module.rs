@@ -244,6 +244,7 @@ mod tests {
                 index: 0,
                 parameter_type: ParameterKind::Array { default: &[] },
             }],
+            is_sink: false,
         }
     }
 

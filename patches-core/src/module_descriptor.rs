@@ -94,6 +94,7 @@ pub struct ModuleDescriptor {
     pub inputs: Vec<PortDescriptor>,
     pub outputs: Vec<PortDescriptor>,
     pub parameters: Vec<ParameterDescriptor>,
+    pub is_sink: bool,
 }
 
 #[cfg(test)]
@@ -131,6 +132,7 @@ mod tests {
                 ParameterDescriptor { name: "solo", index: 0, parameter_type: toggle_off_on.clone() },
                 ParameterDescriptor { name: "solo", index: 0, parameter_type: toggle_off_on },
             ],
+            is_sink: false,
         };
         assert_eq!(m.module_name, "Mixer");
         assert_eq!(m.shape.channels, 2);

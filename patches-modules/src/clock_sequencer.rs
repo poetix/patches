@@ -57,6 +57,7 @@ impl Module for ClockSequencer {
                     parameter_type: ParameterKind::Int { min: 1, max: 4, default: 2 },
                 },
             ],
+            is_sink: false,
         }
     }
 

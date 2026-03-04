@@ -317,6 +317,7 @@ mod tests {
                 .map(|&n| PortDescriptor { name: n, index: 0 })
                 .collect(),
             parameters: vec![],
+            is_sink: false,
         }
     }
 
@@ -539,6 +540,7 @@ mod tests {
             ],
             outputs: vec![],
             parameters: vec![],
+            is_sink: false,
         };
         let src = NodeId::from("src");
         let dst = NodeId::from("dst");

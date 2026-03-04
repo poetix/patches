@@ -157,6 +157,7 @@ impl Module for StepSequencer {
                     parameter_type: ParameterKind::Array { default: &[] },
                 },
             ],
+            is_sink: false,
         }
     }
 

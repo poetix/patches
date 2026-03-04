@@ -21,8 +21,7 @@ Rewrite `patches-modules/src/sum.rs` so that `Sum` implements the `Module` v2 co
       - 1 output named `"out"` / index 0
       - 0 parameters
 - [ ] `prepare()` stores `audio_environment` and `descriptor`; derives `size` from
-      `descriptor.inputs.len()` (so it doesn't need a separate field, or stores it for
-      efficiency — either is fine).
+      `descriptor.shape.channels` (the canonical source of truth, not `descriptor.inputs.len()`).
 - [ ] `update_validated_parameters()` is a no-op (no parameters declared); returns `Ok(())`.
 - [ ] `process` behaviour unchanged: `outputs[0] = inputs[..size].iter().sum()`.
 - [ ] `as_any` implemented.

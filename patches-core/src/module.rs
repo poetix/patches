@@ -82,6 +82,9 @@ pub fn validate_parameters(
                     });
                 }
             }
+            // No bounds checking for arrays; any Vec<String> is valid.
+            // Content validation is deferred to update_validated_parameters.
+            (ParameterKind::Array { .. }, ParameterValue::Array(_)) => {}
             _ => {
                 return Err(BuildError::InvalidParameterType {
                     module: descriptor.module_name,
@@ -220,4 +223,49 @@ pub trait Sink: Module {
     fn last_left(&self) -> f64;
     /// Right-channel sample stored during the most recent [`Module::process`] call.
     fn last_right(&self) -> f64;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::build_error::BuildError;
+    use crate::module_descriptor::{ModuleDescriptor, ModuleShape, ParameterDescriptor, ParameterKind};
+    use crate::parameter_map::{ParameterMap, ParameterValue};
+
+    fn array_descriptor() -> ModuleDescriptor {
+        ModuleDescriptor {
+            module_name: "TestArrayModule",
+            shape: ModuleShape { channels: 0 },
+            inputs: vec![],
+            outputs: vec![],
+            parameters: vec![ParameterDescriptor {
+                name: "steps",
+                index: 0,
+                parameter_type: ParameterKind::Array { default: &[] },
+            }],
+        }
+    }
+
+    #[test]
+    fn array_value_passes_validation_for_array_parameter() {
+        let mut params = ParameterMap::new();
+        params.insert(
+            "steps".to_string(),
+            ParameterValue::Array(vec!["C3".to_string()]),
+        );
+        let desc = array_descriptor();
+        assert!(validate_parameters(&params, &desc).is_ok());
+    }
+
+    #[test]
+    fn float_value_against_array_descriptor_returns_invalid_parameter_type() {
+        let mut params = ParameterMap::new();
+        params.insert("steps".to_string(), ParameterValue::Float(1.0));
+        let desc = array_descriptor();
+        let err = validate_parameters(&params, &desc).unwrap_err();
+        assert!(
+            matches!(err, BuildError::InvalidParameterType { parameter: "steps", .. }),
+            "expected InvalidParameterType, got: {err:?}"
+        );
+    }
 }

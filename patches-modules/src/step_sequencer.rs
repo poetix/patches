@@ -1,4 +1,9 @@
-use patches_core::{AudioEnvironment, ControlSignal, InstanceId, Module, ModuleDescriptor, PortDescriptor};
+use patches_core::{
+    AudioEnvironment, ControlSignal, InstanceId, Module, ModuleDescriptor, ModuleShape,
+    ParameterDescriptor, ParameterKind, PortDescriptor,
+};
+use patches_core::build_error::BuildError;
+use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
 /// A pre-parsed step in the sequencer pattern.
 #[derive(Debug, Clone, PartialEq)]
@@ -13,8 +18,8 @@ enum Step {
 
 /// Error returned when a step string cannot be parsed.
 #[derive(Debug, PartialEq)]
-pub struct ParseStepError {
-    pub step: String,
+struct ParseStepError {
+    step: String,
 }
 
 impl std::fmt::Display for ParseStepError {
@@ -115,41 +120,6 @@ pub struct StepSequencer {
 }
 
 impl StepSequencer {
-    /// Construct a `StepSequencer` from a slice of step strings.
-    ///
-    /// Returns an error if any step string is unrecognised.
-    pub fn new(pattern: &[&str]) -> Result<Self, ParseStepError> {
-        let steps: Result<Vec<Step>, ParseStepError> =
-            pattern.iter().map(|s| parse_step(s)).collect();
-        let steps = steps?;
-
-        Ok(Self {
-            instance_id: InstanceId::next(),
-            descriptor: ModuleDescriptor {
-                inputs: vec![
-                    PortDescriptor { name: "clock", index: 0 },
-                    PortDescriptor { name: "start", index: 0 },
-                    PortDescriptor { name: "stop",  index: 0 },
-                    PortDescriptor { name: "reset", index: 0 },
-                ],
-                outputs: vec![
-                    PortDescriptor { name: "pitch",   index: 0 },
-                    PortDescriptor { name: "trigger", index: 0 },
-                    PortDescriptor { name: "gate",    index: 0 },
-                ],
-            },
-            steps,
-            step_index: 0,
-            playing: true,
-            current_pitch: 0.0,
-            trigger_pending: false,
-            prev_clock: 0.0,
-            prev_start: 0.0,
-            prev_stop: 0.0,
-            prev_reset: 0.0,
-        })
-    }
-
     /// Apply the step at `self.step_index` to the internal pitch/trigger state.
     fn apply_current_step(&mut self) {
         match &self.steps[self.step_index] {
@@ -165,6 +135,67 @@ impl StepSequencer {
 }
 
 impl Module for StepSequencer {
+    fn describe(shape: &ModuleShape) -> ModuleDescriptor {
+        ModuleDescriptor {
+            module_name: "StepSequencer",
+            shape: shape.clone(),
+            inputs: vec![
+                PortDescriptor { name: "clock", index: 0 },
+                PortDescriptor { name: "start", index: 0 },
+                PortDescriptor { name: "stop",  index: 0 },
+                PortDescriptor { name: "reset", index: 0 },
+            ],
+            outputs: vec![
+                PortDescriptor { name: "pitch",   index: 0 },
+                PortDescriptor { name: "trigger", index: 0 },
+                PortDescriptor { name: "gate",    index: 0 },
+            ],
+            parameters: vec![
+                ParameterDescriptor {
+                    name: "steps",
+                    index: 0,
+                    parameter_type: ParameterKind::Array { default: &[] },
+                },
+            ],
+        }
+    }
+
+    fn prepare(_audio_environment: &AudioEnvironment, descriptor: ModuleDescriptor) -> Self {
+        Self {
+            instance_id: InstanceId::next(),
+            descriptor,
+            steps: Vec::new(),
+            step_index: 0,
+            playing: false,
+            current_pitch: 0.0,
+            trigger_pending: false,
+            prev_clock: 0.0,
+            prev_start: 0.0,
+            prev_stop: 0.0,
+            prev_reset: 0.0,
+        }
+    }
+
+    fn update_validated_parameters(&mut self, params: &ParameterMap) -> Result<(), BuildError> {
+        if let Some(ParameterValue::Array(step_strs)) = params.get("steps") {
+            let steps: Result<Vec<Step>, ParseStepError> =
+                step_strs.iter().map(|s| parse_step(s)).collect();
+            match steps {
+                Err(e) => {
+                    return Err(BuildError::Custom {
+                        module: "StepSequencer",
+                        message: format!("invalid step pattern: {e}"),
+                    });
+                }
+                Ok(parsed) => {
+                    self.steps = parsed;
+                    self.step_index = 0;
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn descriptor(&self) -> &ModuleDescriptor {
         &self.descriptor
     }
@@ -173,11 +204,17 @@ impl Module for StepSequencer {
         self.instance_id
     }
 
-    fn initialise(&mut self, _env: &AudioEnvironment) {}
-
     fn receive_signal(&mut self, _signal: ControlSignal) {}
 
     fn process(&mut self, inputs: &[f64], outputs: &mut [f64]) {
+        // Guard: when the pattern is empty all outputs hold at rest values.
+        if self.steps.is_empty() {
+            outputs[0] = 0.0;
+            outputs[1] = 0.0;
+            outputs[2] = 0.0;
+            return;
+        }
+
         let clock = inputs[0];
         let start = inputs[1];
         let stop  = inputs[2];
@@ -242,13 +279,26 @@ impl Module for StepSequencer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use patches_core::AudioEnvironment;
+    use patches_core::{AudioEnvironment, Module, ModuleShape, Registry};
+    use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
-    fn env() -> AudioEnvironment {
-        AudioEnvironment { sample_rate: 44100.0 }
+    fn make_sequencer(steps: &[&str]) -> Box<dyn Module> {
+        let mut params = ParameterMap::new();
+        params.insert(
+            "steps".into(),
+            ParameterValue::Array(steps.iter().map(|s| s.to_string()).collect()),
+        );
+        let mut r = Registry::new();
+        r.register::<StepSequencer>();
+        r.create(
+            "StepSequencer",
+            &AudioEnvironment { sample_rate: 44100.0 },
+            &ModuleShape { channels: 0 },
+            &params,
+        ).unwrap()
     }
 
-    fn tick(seq: &mut StepSequencer, clock: f64) -> (f64, f64, f64) {
+    fn tick(seq: &mut dyn Module, clock: f64) -> (f64, f64, f64) {
         let inputs = [clock, 0.0, 0.0, 0.0];
         let mut outputs = [0.0f64; 3];
         seq.process(&inputs, &mut outputs);
@@ -256,7 +306,7 @@ mod tests {
     }
 
     fn tick_ctrl(
-        seq: &mut StepSequencer,
+        seq: &mut dyn Module,
         clock: f64,
         start: f64,
         stop: f64,
@@ -318,7 +368,7 @@ mod tests {
 
     #[test]
     fn descriptor_shape() {
-        let m = StepSequencer::new(&["C3", "D3"]).unwrap();
+        let m = make_sequencer(&["C3", "D3"]);
         let desc = m.descriptor();
         assert_eq!(desc.inputs.len(), 4);
         assert_eq!(desc.outputs.len(), 3);
@@ -333,56 +383,93 @@ mod tests {
 
     #[test]
     fn instance_ids_are_distinct() {
-        let a = StepSequencer::new(&["C3"]).unwrap();
-        let b = StepSequencer::new(&["C3"]).unwrap();
+        let a = make_sequencer(&["C3"]);
+        let b = make_sequencer(&["C3"]);
         assert_ne!(a.instance_id(), b.instance_id());
+    }
+
+    #[test]
+    fn empty_pattern_succeeds_and_process_does_not_panic() {
+        let mut seq = make_sequencer(&[]);
+        let (pitch, trigger, gate) = tick(seq.as_mut(), 0.0);
+        assert_eq!(pitch, 0.0, "pitch should be 0.0 for empty pattern");
+        assert_eq!(trigger, 0.0, "trigger should be 0.0 for empty pattern");
+        assert_eq!(gate, 0.0, "gate should be 0.0 for empty pattern");
+        // Also tick with a rising clock edge to confirm no panic
+        let (pitch, trigger, gate) = tick(seq.as_mut(), 1.0);
+        assert_eq!(pitch, 0.0);
+        assert_eq!(trigger, 0.0);
+        assert_eq!(gate, 0.0);
+    }
+
+    #[test]
+    fn invalid_step_string_returns_err_from_create() {
+        let mut params = ParameterMap::new();
+        params.insert(
+            "steps".into(),
+            ParameterValue::Array(vec!["Z9".to_string()]),
+        );
+        let mut r = Registry::new();
+        r.register::<StepSequencer>();
+        let result = r.create(
+            "StepSequencer",
+            &AudioEnvironment { sample_rate: 44100.0 },
+            &ModuleShape { channels: 0 },
+            &params,
+        );
+        assert!(result.is_err(), "expected Err for invalid step string");
     }
 
     #[test]
     fn basic_sequence_pitch_trigger_gate() {
         // Pattern: C3 D3 - _
         // step 0=C3, step 1=D3, step 2=Rest, step 3=Tie
-        let mut seq = StepSequencer::new(&["C3", "D3", "-", "_"]).unwrap();
-        seq.initialise(&env());
+        // Note: playing starts as false, so we use start signal or simply clock to advance.
+        // The sequencer starts with playing=false; we need to start it first.
+        let mut seq = make_sequencer(&["C3", "D3", "-", "_"]);
+
+        // Start playing
+        tick_ctrl(seq.as_mut(), 0.0, 1.0, 0.0, 0.0);
+        tick_ctrl(seq.as_mut(), 0.0, 0.0, 0.0, 0.0);
 
         // Before first clock: step_index=0 → C3 Note, but trigger_pending=false.
-        // current_pitch=0.0 (C2), gate=1 (Note step), trigger=0.
-        let (pitch, trigger, gate) = tick(&mut seq, 0.0);
+        // playing=true, current_pitch=0.0 (C2), gate=1 (Note step), trigger=0.
+        let (pitch, trigger, gate) = tick(seq.as_mut(), 0.0);
         assert_eq!(gate, 1.0, "gate at step 0 (C3)");
         assert_eq!(trigger, 0.0, "no trigger before first clock");
         assert_eq!(pitch, 0.0, "pitch is initial current_pitch C2");
 
         // Rising edge → advance to step 1 = D3
         let d3 = 1.0 + 2.0 / 12.0; // (3-2) + semitone(D=2)/12
-        let (pitch, trigger, gate) = tick(&mut seq, 1.0);
+        let (pitch, trigger, gate) = tick(seq.as_mut(), 1.0);
         assert_eq!(gate, 1.0, "gate on D3");
         assert_eq!(trigger, 1.0, "trigger on D3 advance");
         assert!((pitch - d3).abs() < 1e-12, "D3 voct = {}, got {}", d3, pitch);
 
         // Clock held high → no second rising edge; trigger drops
-        let (_, trigger, gate) = tick(&mut seq, 1.0);
+        let (_, trigger, gate) = tick(seq.as_mut(), 1.0);
         assert_eq!(trigger, 0.0);
         assert_eq!(gate, 1.0);
 
         // Clock low
-        tick(&mut seq, 0.0);
+        tick(seq.as_mut(), 0.0);
 
         // Rising edge → advance to step 2 = Rest
-        let (pitch, trigger, gate) = tick(&mut seq, 1.0);
+        let (pitch, trigger, gate) = tick(seq.as_mut(), 1.0);
         assert_eq!(gate, 0.0, "gate on rest");
         assert_eq!(trigger, 0.0, "no trigger on rest");
         assert!((pitch - d3).abs() < 1e-12, "pitch holds D3 on rest");
 
         // Clock low, then rising edge → advance to step 3 = Tie
-        tick(&mut seq, 0.0);
-        let (_, trigger, gate) = tick(&mut seq, 1.0);
+        tick(seq.as_mut(), 0.0);
+        let (_, trigger, gate) = tick(seq.as_mut(), 1.0);
         assert_eq!(gate, 1.0, "gate on tie");
         assert_eq!(trigger, 0.0, "no trigger on tie");
 
         // Clock low, then rising edge → wraps back to step 0 = C3
-        tick(&mut seq, 0.0);
+        tick(seq.as_mut(), 0.0);
         let c3 = 1.0; // (3-2) + 0/12
-        let (pitch, trigger, gate) = tick(&mut seq, 1.0);
+        let (pitch, trigger, gate) = tick(seq.as_mut(), 1.0);
         assert_eq!(gate, 1.0, "gate on C3 re-entry");
         assert_eq!(trigger, 1.0, "trigger on C3 re-entry");
         assert!((pitch - c3).abs() < 1e-12, "C3 voct = {}, got {}", c3, pitch);
@@ -390,48 +477,54 @@ mod tests {
 
     #[test]
     fn stop_suppresses_gate_and_blocks_clock() {
-        let mut seq = StepSequencer::new(&["C3", "D3"]).unwrap();
-        seq.initialise(&env());
+        let mut seq = make_sequencer(&["C3", "D3"]);
+
+        // Start playing first
+        tick_ctrl(seq.as_mut(), 0.0, 1.0, 0.0, 0.0);
+        tick_ctrl(seq.as_mut(), 0.0, 0.0, 0.0, 0.0);
 
         // Advance to step 1 = D3 via rising edge
-        tick(&mut seq, 1.0);
-        tick(&mut seq, 0.0);
+        tick(seq.as_mut(), 1.0);
+        tick(seq.as_mut(), 0.0);
 
         // Stop
-        let (_, trigger, gate) = tick_ctrl(&mut seq, 0.0, 0.0, 1.0, 0.0);
+        let (_, trigger, gate) = tick_ctrl(seq.as_mut(), 0.0, 0.0, 1.0, 0.0);
         assert_eq!(gate, 0.0, "gate suppressed on stop");
         assert_eq!(trigger, 0.0);
 
         // Clock while stopped → no advance, gate stays 0
-        tick_ctrl(&mut seq, 0.0, 0.0, 0.0, 0.0);
-        let (_, _, gate) = tick_ctrl(&mut seq, 1.0, 0.0, 0.0, 0.0);
+        tick_ctrl(seq.as_mut(), 0.0, 0.0, 0.0, 0.0);
+        let (_, _, gate) = tick_ctrl(seq.as_mut(), 1.0, 0.0, 0.0, 0.0);
         assert_eq!(gate, 0.0, "gate stays 0 while stopped");
 
         // Start
-        tick_ctrl(&mut seq, 0.0, 0.0, 0.0, 0.0);
-        tick_ctrl(&mut seq, 0.0, 1.0, 0.0, 0.0);
-        let (_, _, gate) = tick_ctrl(&mut seq, 0.0, 0.0, 0.0, 0.0);
+        tick_ctrl(seq.as_mut(), 0.0, 0.0, 0.0, 0.0);
+        tick_ctrl(seq.as_mut(), 0.0, 1.0, 0.0, 0.0);
+        let (_, _, gate) = tick_ctrl(seq.as_mut(), 0.0, 0.0, 0.0, 0.0);
         // Should be at step 1 still (D3), gate=1
         assert_eq!(gate, 1.0, "gate restored after start");
     }
 
     #[test]
     fn reset_returns_to_step_zero_then_advance() {
-        let mut seq = StepSequencer::new(&["C3", "D3", "E3"]).unwrap();
-        seq.initialise(&env());
+        let mut seq = make_sequencer(&["C3", "D3", "E3"]);
+
+        // Start playing first
+        tick_ctrl(seq.as_mut(), 0.0, 1.0, 0.0, 0.0);
+        tick_ctrl(seq.as_mut(), 0.0, 0.0, 0.0, 0.0);
 
         // Advance to step 2 = E3
-        tick(&mut seq, 1.0);
-        tick(&mut seq, 0.0);
-        tick(&mut seq, 1.0);
-        tick(&mut seq, 0.0);
+        tick(seq.as_mut(), 1.0);
+        tick(seq.as_mut(), 0.0);
+        tick(seq.as_mut(), 1.0);
+        tick(seq.as_mut(), 0.0);
 
         // Reset → step_index = 0
-        tick_ctrl(&mut seq, 0.0, 0.0, 0.0, 1.0);
-        tick_ctrl(&mut seq, 0.0, 0.0, 0.0, 0.0);
+        tick_ctrl(seq.as_mut(), 0.0, 0.0, 0.0, 1.0);
+        tick_ctrl(seq.as_mut(), 0.0, 0.0, 0.0, 0.0);
 
         // Next clock → advance from 0 to step 1 = D3
-        let (pitch, trigger, gate) = tick(&mut seq, 1.0);
+        let (pitch, trigger, gate) = tick(seq.as_mut(), 1.0);
         let d3 = 1.0 + 2.0 / 12.0; // D3: (3-2) + semitone(D=2)/12
         assert!((pitch - d3).abs() < 1e-12, "D3 voct after reset, got {}", pitch);
         assert_eq!(trigger, 1.0);

@@ -6,7 +6,10 @@ pub enum ParameterValue {
     Int(i64),
     Bool(bool),
     Enum(&'static str),
-    Array(Vec<&'static str>),
+    // Array parameter values own their strings; patterns come from the DSL at runtime
+    // and cannot be required to be 'static (unlike Enum variants, which are a closed
+    // compile-time set declared in the descriptor).
+    Array(Vec<String>),
 }
 
 impl ParameterValue {

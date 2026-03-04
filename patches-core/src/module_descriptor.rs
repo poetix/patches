@@ -29,6 +29,12 @@ pub enum ParameterKind {
     Int   { min: i64, max: i64, default: i64 },
     Bool  { default: bool },
     Enum  { variants: &'static [&'static str], default: &'static str },
+    /// Variable-length array of strings (e.g. a step-sequencer pattern).
+    ///
+    /// The `default` field uses `&'static [&'static str]` so that the descriptor itself
+    /// never allocates (consistent with ADR 0011). The `ParameterValue` it produces does
+    /// allocate, but only at the non-realtime boundary.
+    Array { default: &'static [&'static str] },
 }
 
 impl ParameterKind {
@@ -39,6 +45,9 @@ impl ParameterKind {
             ParameterKind::Int   { default, .. } => ParameterValue::Int(*default),
             ParameterKind::Bool  { default }     => ParameterValue::Bool(*default),
             ParameterKind::Enum  { default, .. } => ParameterValue::Enum(default),
+            ParameterKind::Array { default }     => ParameterValue::Array(
+                default.iter().map(|s| s.to_string()).collect()
+            ),
         }
     }
 
@@ -49,6 +58,7 @@ impl ParameterKind {
             ParameterKind::Int   { .. } => "int",
             ParameterKind::Bool  { .. } => "bool",
             ParameterKind::Enum  { .. } => "enum",
+            ParameterKind::Array { .. } => "array",
         }
     }
 }

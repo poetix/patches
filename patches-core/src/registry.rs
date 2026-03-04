@@ -11,7 +11,17 @@ pub struct Registry {
     builders: HashMap<String, Box<dyn ModuleBuilder>>,
 }
 
+impl Default for Registry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Registry {
+    pub fn new() -> Self {
+        Self { builders: HashMap::new() }
+    }
+
     pub fn register<T>(&mut self)
     where
         T: Module + 'static,
@@ -89,9 +99,7 @@ mod tests {
 
     #[test]
     fn build_a_module() {
-        let mut registry = Registry {
-            builders: HashMap::new(),
-        };
+        let mut registry = Registry::new();
         registry.register::<TestModule>();
 
         let shape = ModuleShape { channels: 2 };

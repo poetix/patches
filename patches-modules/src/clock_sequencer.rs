@@ -1,4 +1,9 @@
-use patches_core::{AudioEnvironment, ControlSignal, InstanceId, Module, ModuleDescriptor, PortDescriptor};
+use patches_core::{
+    AudioEnvironment, ControlSignal, InstanceId, Module, ModuleDescriptor, ModuleShape,
+    ParameterDescriptor, ParameterKind, PortDescriptor,
+};
+use patches_core::build_error::BuildError;
+use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
 /// Generates bar, beat, quaver, and semiquaver trigger pulses from a configurable BPM
 /// and time signature.
@@ -12,6 +17,7 @@ use patches_core::{AudioEnvironment, ControlSignal, InstanceId, Module, ModuleDe
 pub struct ClockSequencer {
     instance_id: InstanceId,
     descriptor: ModuleDescriptor,
+    sample_rate: f64,
     bpm: f64,
     beats_per_bar: u32,
     quavers_per_beat: u32,
@@ -23,36 +29,66 @@ pub struct ClockSequencer {
     beat_count: u32,
 }
 
-impl ClockSequencer {
-    /// Construct a `ClockSequencer` with configurable BPM, beats per bar, and quavers per beat.
-    pub fn new(bpm: f64, beats_per_bar: u32, quavers_per_beat: u32) -> Self {
+impl Module for ClockSequencer {
+    fn describe(shape: &ModuleShape) -> ModuleDescriptor {
+        ModuleDescriptor {
+            module_name: "ClockSequencer",
+            shape: shape.clone(),
+            inputs: vec![],
+            outputs: vec![
+                PortDescriptor { name: "bar",        index: 0 },
+                PortDescriptor { name: "beat",       index: 1 },
+                PortDescriptor { name: "quaver",     index: 2 },
+                PortDescriptor { name: "semiquaver", index: 3 },
+            ],
+            parameters: vec![
+                ParameterDescriptor {
+                    name: "bpm",
+                    index: 0,
+                    parameter_type: ParameterKind::Float { min: 1.0, max: 300.0, default: 120.0 },
+                },
+                ParameterDescriptor {
+                    name: "beats_per_bar",
+                    index: 0,
+                    parameter_type: ParameterKind::Int { min: 1, max: 16, default: 4 },
+                },
+                ParameterDescriptor {
+                    name: "quavers_per_beat",
+                    index: 0,
+                    parameter_type: ParameterKind::Int { min: 1, max: 4, default: 2 },
+                },
+            ],
+        }
+    }
+
+    fn prepare(audio_environment: &AudioEnvironment, descriptor: ModuleDescriptor) -> Self {
         Self {
             instance_id: InstanceId::next(),
-            descriptor: ModuleDescriptor {
-                inputs: vec![],
-                outputs: vec![
-                    PortDescriptor { name: "bar", index: 0 },
-                    PortDescriptor { name: "beat", index: 0 },
-                    PortDescriptor { name: "quaver", index: 0 },
-                    PortDescriptor { name: "semiquaver", index: 0 },
-                ],
-            },
-            bpm,
-            beats_per_bar,
-            quavers_per_beat,
-            beat_phase_delta: bpm / (60.0 * 44100.0), // default, updated in initialise
+            descriptor,
+            sample_rate: audio_environment.sample_rate,
+            bpm: 0.0,
+            beats_per_bar: 0,
+            quavers_per_beat: 0,
+            beat_phase_delta: 0.0,
             beat_phase: 0.0,
             beat_count: 0,
         }
     }
 
-    /// Recalculate beat_phase_delta from bpm and sample_rate.
-    fn update_beat_phase_delta(&mut self, sample_rate: f64) {
-        self.beat_phase_delta = self.bpm / (60.0 * sample_rate);
+    fn update_validated_parameters(&mut self, params: &ParameterMap) -> Result<(), BuildError> {
+        if let Some(ParameterValue::Float(v)) = params.get("bpm") {
+            self.bpm = *v;
+            self.beat_phase_delta = self.bpm / (60.0 * self.sample_rate);
+        }
+        if let Some(ParameterValue::Int(v)) = params.get("beats_per_bar") {
+            self.beats_per_bar = *v as u32;
+        }
+        if let Some(ParameterValue::Int(v)) = params.get("quavers_per_beat") {
+            self.quavers_per_beat = *v as u32;
+        }
+        Ok(())
     }
-}
 
-impl Module for ClockSequencer {
     fn descriptor(&self) -> &ModuleDescriptor {
         &self.descriptor
     }
@@ -61,23 +97,17 @@ impl Module for ClockSequencer {
         self.instance_id
     }
 
-    fn initialise(&mut self, env: &AudioEnvironment) {
-        self.update_beat_phase_delta(env.sample_rate);
-    }
-
     fn receive_signal(&mut self, signal: ControlSignal) {
         match signal {
-            ControlSignal::Float { name: "bpm", value } => {
-                self.bpm = value;
-                // Note: sample_rate is not available here, so we can't update beat_phase_delta.
-                // The delta will be recalculated in the next initialise call or we'd need
-                // to store sample_rate as a field. Store sample_rate for this reason.
+            ControlSignal::ParameterUpdate { name: "bpm", value: ParameterValue::Float(v) } => {
+                self.bpm = v;
+                self.beat_phase_delta = self.bpm / (60.0 * self.sample_rate);
             }
-            ControlSignal::Float { name: "beats_per_bar", value } => {
-                self.beats_per_bar = value as u32;
+            ControlSignal::ParameterUpdate { name: "beats_per_bar", value: ParameterValue::Int(v) } => {
+                self.beats_per_bar = v as u32;
             }
-            ControlSignal::Float { name: "quavers_per_beat", value } => {
-                self.quavers_per_beat = value as u32;
+            ControlSignal::ParameterUpdate { name: "quavers_per_beat", value: ParameterValue::Int(v) } => {
+                self.quavers_per_beat = v as u32;
             }
             _ => {}
         }
@@ -137,11 +167,29 @@ impl Module for ClockSequencer {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
+    use patches_core::{AudioEnvironment, Module, ModuleShape, Registry};
+    use patches_core::parameter_map::{ParameterMap, ParameterValue};
+
+    fn make_clock(bpm: f64, beats_per_bar: i64, quavers_per_beat: i64) -> Box<dyn Module> {
+        let mut params = ParameterMap::new();
+        params.insert("bpm".into(),              ParameterValue::Float(bpm));
+        params.insert("beats_per_bar".into(),    ParameterValue::Int(beats_per_bar));
+        params.insert("quavers_per_beat".into(), ParameterValue::Int(quavers_per_beat));
+        let mut r = Registry::new();
+        r.register::<ClockSequencer>();
+        r.create(
+            "ClockSequencer",
+            &AudioEnvironment { sample_rate: 44100.0 },
+            &ModuleShape { channels: 0 },
+            &params,
+        ).unwrap()
+    }
 
     #[test]
     fn descriptor_shape() {
-        let m = ClockSequencer::new(120.0, 4, 2);
+        let m = make_clock(120.0, 4, 2);
         let desc = m.descriptor();
         assert_eq!(desc.inputs.len(), 0);
         assert_eq!(desc.outputs.len(), 4);
@@ -153,8 +201,8 @@ mod tests {
 
     #[test]
     fn instance_ids_are_distinct() {
-        let a = ClockSequencer::new(120.0, 4, 2);
-        let b = ClockSequencer::new(120.0, 4, 2);
+        let a = make_clock(120.0, 4, 2);
+        let b = make_clock(120.0, 4, 2);
         assert_ne!(a.instance_id(), b.instance_id());
     }
 
@@ -165,8 +213,18 @@ mod tests {
         // With sample_rate = 1, that's every 15 samples.
         // In 4/4, a bar has 4 beats, so bar fires every 60 samples.
 
-        let mut clock = ClockSequencer::new(4.0, 4, 2);
-        clock.initialise(&AudioEnvironment { sample_rate: 1.0 });
+        let mut params = ParameterMap::new();
+        params.insert("bpm".into(),              ParameterValue::Float(4.0));
+        params.insert("beats_per_bar".into(),    ParameterValue::Int(4));
+        params.insert("quavers_per_beat".into(), ParameterValue::Int(2));
+        let mut r = Registry::new();
+        r.register::<ClockSequencer>();
+        let mut clock = r.create(
+            "ClockSequencer",
+            &AudioEnvironment { sample_rate: 1.0 },
+            &ModuleShape { channels: 0 },
+            &params,
+        ).unwrap();
 
         let mut outputs = [0.0f64; 4];
         let mut beat_count = 0;
@@ -199,8 +257,7 @@ mod tests {
         // A beat completes every 1 / (120 / 2646000) = 22050 samples
         // 6 beats per bar = bar every 132300 samples
 
-        let mut clock = ClockSequencer::new(120.0, 6, 3);
-        clock.initialise(&AudioEnvironment { sample_rate: 44100.0 });
+        let mut clock = make_clock(120.0, 6, 3);
 
         let mut outputs = [0.0f64; 4];
         let mut beat_count = 0;
@@ -238,8 +295,7 @@ mod tests {
 
     #[test]
     fn all_outputs_initialized_to_zero() {
-        let mut clock = ClockSequencer::new(120.0, 4, 2);
-        clock.initialise(&AudioEnvironment { sample_rate: 44100.0 });
+        let mut clock = make_clock(120.0, 4, 2);
 
         let mut outputs = [0.0f64; 4];
         // First few samples should not fire anything unless we're at a boundary
@@ -257,42 +313,48 @@ mod tests {
 
     #[test]
     fn receive_signal_updates_bpm() {
-        let mut clock = ClockSequencer::new(120.0, 4, 2);
-        clock.receive_signal(ControlSignal::Float {
+        let mut clock = make_clock(120.0, 4, 2);
+        clock.receive_signal(ControlSignal::ParameterUpdate {
             name: "bpm",
-            value: 240.0,
+            value: ParameterValue::Float(240.0),
         });
+        let clock = clock.as_any().downcast_ref::<ClockSequencer>().unwrap();
         assert_eq!(clock.bpm, 240.0);
     }
 
     #[test]
     fn receive_signal_updates_beats_per_bar() {
-        let mut clock = ClockSequencer::new(120.0, 4, 2);
-        clock.receive_signal(ControlSignal::Float {
+        let mut clock = make_clock(120.0, 4, 2);
+        clock.receive_signal(ControlSignal::ParameterUpdate {
             name: "beats_per_bar",
-            value: 3.0,
+            value: ParameterValue::Int(3),
         });
+        let clock = clock.as_any().downcast_ref::<ClockSequencer>().unwrap();
         assert_eq!(clock.beats_per_bar, 3);
     }
 
     #[test]
     fn receive_signal_updates_quavers_per_beat() {
-        let mut clock = ClockSequencer::new(120.0, 4, 2);
-        clock.receive_signal(ControlSignal::Float {
+        let mut clock = make_clock(120.0, 4, 2);
+        clock.receive_signal(ControlSignal::ParameterUpdate {
             name: "quavers_per_beat",
-            value: 3.0,
+            value: ParameterValue::Int(3),
         });
+        let clock = clock.as_any().downcast_ref::<ClockSequencer>().unwrap();
         assert_eq!(clock.quavers_per_beat, 3);
     }
 
     #[test]
     fn receive_signal_unknown_is_ignored() {
-        let mut clock = ClockSequencer::new(120.0, 4, 2);
-        let original_bpm = clock.bpm;
-        clock.receive_signal(ControlSignal::Float {
-            name: "gain",
-            value: 0.5,
-        });
-        assert_eq!(clock.bpm, original_bpm);
+        let mut clock = make_clock(120.0, 4, 2);
+        {
+            let original_bpm = clock.as_any().downcast_ref::<ClockSequencer>().unwrap().bpm;
+            clock.receive_signal(ControlSignal::ParameterUpdate {
+                name: "gain",
+                value: ParameterValue::Float(0.5),
+            });
+            let bpm_after = clock.as_any().downcast_ref::<ClockSequencer>().unwrap().bpm;
+            assert_eq!(bpm_after, original_bpm);
+        }
     }
 }

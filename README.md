@@ -17,20 +17,28 @@ filter history, etc.).
 
 ## Current state
 
-The core infrastructure is in place:
+The core engine and a practical set of modules are in place:
 
 - `Module` trait with `initialise` (called once on plan activation) and `process`
   (called per sample, allocation-free).
 - `ModuleGraph` for building signal graphs with scaled connections.
 - `ExecutionPlan` produced by a pure `build_patch` function; uses a flat buffer
   pool with a 1-sample cable delay so modules can run in any order.
-- `Planner` and `PatchEngine` for coordinating re-planning with module-state
-  preservation across hot-reloads.
+- Audio-thread-owned module pool: module instances (and their state — oscillator
+  phase, filter history, envelope position) live on the audio thread and survive
+  hot-reloads automatically without crossing the thread boundary.
 - Lock-free plan handoff to the audio thread via an rtrb ring buffer.
-- A small set of modules: sine oscillator, crossfade, audio output.
+- Control-rate signalling: `ControlSignal` enum and `Module::receive_signal`;
+  the engine distributes signals at a configurable control rate using chunked
+  sample processing so there is no per-sample branch overhead.
+- Modules: sine oscillator, sawtooth oscillator, square oscillator, sum/crossfade,
+  ADSR envelope, step sequencer, clock sequencer, VCA, audio output.
+- Examples: `sine_tone`, `chord_swap`, `freq_sweep`, `demo_synth` (16-step
+  melodic sequence at 120 BPM demonstrating the full module set).
 
-In progress: stable cable buffers across re-plans (no discontinuity on hot-reload)
-and structured module destruction (`E005`).
+In progress: off-thread module deallocation (`E010`) — tombstoned modules are
+currently dropped inline in the audio callback; the next epic moves drops to a
+dedicated cleanup thread via a ring buffer.
 
 Not yet started: the patch DSL and parser.
 
@@ -57,6 +65,7 @@ cargo build
 cargo test
 cargo clippy
 cargo run --example sine_tone    # plays a 440 Hz sine tone
+cargo run --example demo_synth   # plays a 16-step melodic sequence at 120 BPM
 ```
 
 ## Design constraints

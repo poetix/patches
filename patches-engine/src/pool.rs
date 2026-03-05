@@ -1,4 +1,5 @@
 use patches_core::{ControlSignal, Module};
+use patches_core::parameter_map::ParameterMap;
 
 /// Audio-thread-owned pool of module instances.
 ///
@@ -99,6 +100,18 @@ impl ModulePool {
         }
     }
 
+    /// Apply pre-validated parameter updates to the module at `idx`.
+    ///
+    /// Calls [`Module::update_validated_parameters`] on the module at `idx`.
+    /// This is infallible — no `Result` is returned. Does nothing if the slot
+    /// is empty (the module may have been tombstoned between the plan being built
+    /// and adopted).
+    pub fn update_parameters(&mut self, idx: usize, params: &ParameterMap) {
+        if let Some(m) = self.modules[idx].as_mut() {
+            m.update_validated_parameters(params);
+        }
+    }
+
     /// Returns `true` if a [`Sink`] module is currently installed in the pool.
     pub fn has_sink(&self) -> bool {
         self.sink_slot.is_some()
@@ -126,16 +139,19 @@ mod tests {
     use std::any::Any;
 
     use patches_core::{
-        ControlSignal, InstanceId, Module, ModuleDescriptor, PortDescriptor, Sink,
+        AudioEnvironment, ControlSignal, InstanceId, Module, ModuleDescriptor, ModuleShape,
+        PortDescriptor, Sink,
     };
+    use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
     use super::*;
 
     // ── Test-only modules ─────────────────────────────────────────────────────
 
     /// Outputs a constant value on its single output port.
-    /// Responds to `ControlSignal::Float` by updating the output value, letting
-    /// tests observe signal delivery via `process` output rather than downcasting.
+    /// Responds to `ControlSignal::ParameterUpdate { name: "value", .. }` by
+    /// updating the output value, letting tests observe signal delivery via
+    /// `process` output rather than downcasting.
     struct ConstSource {
         id: InstanceId,
         value: f64,
@@ -148,8 +164,11 @@ mod tests {
                 id: InstanceId::next(),
                 value,
                 desc: ModuleDescriptor {
+                    module_name: "ConstSource",
+                    shape: ModuleShape { channels: 0 },
                     inputs: vec![],
                     outputs: vec![PortDescriptor { name: "out", index: 0 }],
+                    parameters: vec![],
                     is_sink: false,
                 },
             }
@@ -157,6 +176,20 @@ mod tests {
     }
 
     impl Module for ConstSource {
+        fn describe(_shape: &ModuleShape) -> ModuleDescriptor {
+            ModuleDescriptor {
+                module_name: "ConstSource",
+                shape: ModuleShape { channels: 0 },
+                inputs: vec![],
+                outputs: vec![PortDescriptor { name: "out", index: 0 }],
+                parameters: vec![],
+                is_sink: false,
+            }
+        }
+        fn prepare(_env: &AudioEnvironment, descriptor: ModuleDescriptor) -> Self {
+            Self { id: InstanceId::next(), value: 0.0, desc: descriptor }
+        }
+        fn update_validated_parameters(&mut self, _params: &ParameterMap) {}
         fn descriptor(&self) -> &ModuleDescriptor {
             &self.desc
         }
@@ -167,8 +200,9 @@ mod tests {
             outputs[0] = self.value;
         }
         fn receive_signal(&mut self, signal: ControlSignal) {
-            let ControlSignal::Float { value, .. } = signal;
-            self.value = value;
+            if let ControlSignal::ParameterUpdate { name: "value", value: ParameterValue::Float(v) } = signal {
+                self.value = v;
+            }
         }
         fn as_any(&self) -> &dyn Any {
             self
@@ -190,15 +224,32 @@ mod tests {
                 id: InstanceId::next(),
                 last: 0.0,
                 desc: ModuleDescriptor {
+                    module_name: "RecordingSink",
+                    shape: ModuleShape { channels: 0 },
                     inputs: vec![PortDescriptor { name: "in", index: 0 }],
                     outputs: vec![],
-                    is_sink: false,
+                    parameters: vec![],
+                    is_sink: true,
                 },
             }
         }
     }
 
     impl Module for RecordingSink {
+        fn describe(_shape: &ModuleShape) -> ModuleDescriptor {
+            ModuleDescriptor {
+                module_name: "RecordingSink",
+                shape: ModuleShape { channels: 0 },
+                inputs: vec![PortDescriptor { name: "in", index: 0 }],
+                outputs: vec![],
+                parameters: vec![],
+                is_sink: true,
+            }
+        }
+        fn prepare(_env: &AudioEnvironment, descriptor: ModuleDescriptor) -> Self {
+            Self { id: InstanceId::next(), last: 0.0, desc: descriptor }
+        }
+        fn update_validated_parameters(&mut self, _params: &ParameterMap) {}
         fn descriptor(&self) -> &ModuleDescriptor {
             &self.desc
         }
@@ -279,7 +330,7 @@ mod tests {
         pool.install(1, Box::new(ConstSource::new(1.0)));
         pool.tombstone(1);
         // Must not panic.
-        pool.receive_signal(1, ControlSignal::Float { name: "x", value: 0.0 });
+        pool.receive_signal(1, ControlSignal::ParameterUpdate { name: "x", value: ParameterValue::Float(0.0) });
     }
 
     #[test]
@@ -294,14 +345,14 @@ mod tests {
     fn receive_signal_on_empty_slot_is_noop() {
         let mut pool = ModulePool::new(4);
         // Must not panic.
-        pool.receive_signal(3, ControlSignal::Float { name: "x", value: 0.0 });
+        pool.receive_signal(3, ControlSignal::ParameterUpdate { name: "x", value: ParameterValue::Float(0.0) });
     }
 
     #[test]
     fn receive_signal_updates_module_state() {
         let mut pool = ModulePool::new(4);
         pool.install(0, Box::new(ConstSource::new(0.0)));
-        pool.receive_signal(0, ControlSignal::Float { name: "value", value: 0.9 });
+        pool.receive_signal(0, ControlSignal::ParameterUpdate { name: "value", value: ParameterValue::Float(0.9) });
         let mut out = [0.0_f64];
         pool.process(0, &[], &mut out);
         assert!((out[0] - 0.9).abs() < 1e-9, "process output should reflect the updated value");

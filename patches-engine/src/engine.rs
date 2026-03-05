@@ -314,6 +314,9 @@ impl SoundEngine {
     /// one buffer period (~10 ms).
     ///
     /// This method is wait-free and safe to call from any thread.
+    // ExecutionPlan must be returned as-is on error (for retry semantics); boxing
+    // would require an allocation, violating the wait-free contract.
+    #[allow(clippy::result_large_err)]
     pub fn swap_plan(&mut self, new_plan: ExecutionPlan) -> Result<(), ExecutionPlan> {
         self.plan_tx.push(new_plan).map_err(|rtrb::PushError::Full(v)| v)
     }

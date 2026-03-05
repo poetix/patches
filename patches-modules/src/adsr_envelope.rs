@@ -334,7 +334,7 @@ mod tests {
 
         for _ in 0..20 {
             let v = tick(adsr.as_mut(), 1.0, 1.0);
-            assert!(v >= 0.0 && v <= 1.0, "output out of range: {v}");
+            assert!((0.0..=1.0).contains(&v), "output out of range: {v}");
         }
     }
 

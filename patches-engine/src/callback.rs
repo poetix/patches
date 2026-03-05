@@ -96,6 +96,10 @@ impl AudioCallback {
             for (idx, module) in new_plan.new_modules.drain(..) {
                 self.module_pool.install(idx, module);
             }
+            // Apply parameter diffs to surviving modules.
+            for (idx, params) in &new_plan.parameter_updates {
+                self.module_pool.update_parameters(*idx, params);
+            }
             // Zero freed/new cable buffer slots.
             for &i in &new_plan.to_zero {
                 self.buffer_pool[i] = [0.0; 2];

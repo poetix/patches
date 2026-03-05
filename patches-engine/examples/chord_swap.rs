@@ -2,7 +2,8 @@ use std::process;
 use std::thread;
 use std::time::Duration;
 
-use patches_core::{ModuleGraph, NodeId, PortRef};
+use patches_core::{Module, ModuleGraph, ModuleShape, NodeId, PortRef};
+use patches_core::parameter_map::{ParameterMap, ParameterValue};
 use patches_engine::{PatchEngine, PatchEngineError};
 use patches_modules::{AudioOut, Sum, SineOscillator};
 
@@ -18,10 +19,16 @@ fn initial_graph() -> Result<ModuleGraph, Box<dyn std::error::Error>> {
     let osc_e4 = NodeId::from("osc_e4");
     let mix = NodeId::from("mix");
     let out = NodeId::from("out");
-    graph.add_module(osc_c4.clone(), Box::new(SineOscillator::new(FREQ_C4)))?;
-    graph.add_module(osc_e4.clone(), Box::new(SineOscillator::new(FREQ_E4)))?;
-    graph.add_module(mix.clone(), Box::new(Sum::new(2)))?;
-    graph.add_module(out.clone(), Box::new(AudioOut::new()))?;
+
+    let mut params_c4 = ParameterMap::new();
+    params_c4.insert("frequency".to_string(), ParameterValue::Float(FREQ_C4));
+    let mut params_e4 = ParameterMap::new();
+    params_e4.insert("frequency".to_string(), ParameterValue::Float(FREQ_E4));
+
+    graph.add_module(osc_c4.clone(), SineOscillator::describe(&ModuleShape { channels: 0 }), &params_c4)?;
+    graph.add_module(osc_e4.clone(), SineOscillator::describe(&ModuleShape { channels: 0 }), &params_e4)?;
+    graph.add_module(mix.clone(), Sum::describe(&ModuleShape { channels: 2 }), &ParameterMap::new())?;
+    graph.add_module(out.clone(), AudioOut::describe(&ModuleShape { channels: 0 }), &ParameterMap::new())?;
     let p = |name| PortRef { name, index: 0 };
     graph.connect(&osc_c4, p("out"), &mix, PortRef { name: "in", index: 0 }, 0.5)?;
     graph.connect(&osc_e4, p("out"), &mix, PortRef { name: "in", index: 1 }, 0.5)?;
@@ -40,10 +47,16 @@ fn updated_graph() -> Result<ModuleGraph, Box<dyn std::error::Error>> {
     let osc_f4 = NodeId::from("osc_f4");
     let mix = NodeId::from("mix");
     let out = NodeId::from("out");
-    graph.add_module(osc_c4.clone(), Box::new(SineOscillator::new(FREQ_C4)))?;
-    graph.add_module(osc_f4.clone(), Box::new(SineOscillator::new(FREQ_F4)))?;
-    graph.add_module(mix.clone(), Box::new(Sum::new(2)))?;
-    graph.add_module(out.clone(), Box::new(AudioOut::new()))?;
+
+    let mut params_c4 = ParameterMap::new();
+    params_c4.insert("frequency".to_string(), ParameterValue::Float(FREQ_C4));
+    let mut params_f4 = ParameterMap::new();
+    params_f4.insert("frequency".to_string(), ParameterValue::Float(FREQ_F4));
+
+    graph.add_module(osc_c4.clone(), SineOscillator::describe(&ModuleShape { channels: 0 }), &params_c4)?;
+    graph.add_module(osc_f4.clone(), SineOscillator::describe(&ModuleShape { channels: 0 }), &params_f4)?;
+    graph.add_module(mix.clone(), Sum::describe(&ModuleShape { channels: 2 }), &ParameterMap::new())?;
+    graph.add_module(out.clone(), AudioOut::describe(&ModuleShape { channels: 0 }), &ParameterMap::new())?;
     let p = |name| PortRef { name, index: 0 };
     graph.connect(&osc_c4, p("out"), &mix, PortRef { name: "in", index: 0 }, 0.5)?;
     graph.connect(&osc_f4, p("out"), &mix, PortRef { name: "in", index: 1 }, 0.5)?;
@@ -54,8 +67,10 @@ fn updated_graph() -> Result<ModuleGraph, Box<dyn std::error::Error>> {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Build the initial plan and start the audio thread.
-    let mut engine = PatchEngine::new(initial_graph()?)?;
-    engine.start()?;
+    let registry = patches_modules::default_registry();
+    let mut engine = PatchEngine::new(registry)?;
+    let initial = initial_graph()?;
+    engine.start(&initial)?;
     println!("Playing C4 + E4 (major third) for 1 second…");
     thread::sleep(Duration::from_secs(1));
 
@@ -63,8 +78,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // still occupied by the previous swap (clears within one buffer period,
     // typically ~10 ms).
     println!("Switching to C4 + F4 (perfect fourth)…");
+    let updated = updated_graph()?;
     loop {
-        match engine.update(updated_graph()?) {
+        match engine.update(&updated) {
             Ok(()) => break,
             Err(PatchEngineError::ChannelFull) => {
                 thread::sleep(Duration::from_millis(10));

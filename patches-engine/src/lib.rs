@@ -6,6 +6,7 @@ pub mod pool;
 
 pub use builder::{
     build_patch, BufferAllocState, BuildError, ExecutionPlan, ModuleAllocState, ModuleSlot,
+    NodeState, PatchBuilder, PlannerState,
 };
 pub use engine::{EngineError, SoundEngine};
 pub use planner::{PatchEngine, PatchEngineError, Planner};

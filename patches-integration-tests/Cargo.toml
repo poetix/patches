@@ -4,22 +4,6 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
-[[test]]
-name = "replan_integration"
-path = "tests/replan_integration.rs"
-
-[[test]]
-name = "state_preservation"
-path = "tests/state_preservation.rs"
-
-[[test]]
-name = "stable_buffer_indices"
-path = "tests/stable_buffer_indices.rs"
-
-[[test]]
-name = "multi_source_mixing"
-path = "tests/multi_source_mixing.rs"
-
 [dev-dependencies]
 patches-core = { path = "../patches-core" }
 patches-engine = { path = "../patches-engine" }

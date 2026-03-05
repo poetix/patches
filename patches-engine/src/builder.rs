@@ -1,7 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-use patches_core::{ControlSignal, InstanceId, Module, ModuleDescriptor, ModuleGraph, NodeId};
+use patches_core::{
+    AudioEnvironment, ControlSignal, InstanceId, Module, ModuleGraph, NodeId, Registry,
+};
+use patches_core::parameter_map::ParameterMap;
 
 use crate::pool::ModulePool;
 
@@ -18,6 +21,8 @@ pub enum BuildError {
     PoolExhausted,
     /// The number of modules would exceed the module pool capacity.
     ModulePoolExhausted,
+    /// Module creation failed (unknown module name or parameter validation error).
+    ModuleCreationError(String),
 }
 
 impl fmt::Display for BuildError {
@@ -30,13 +35,14 @@ impl fmt::Display for BuildError {
             BuildError::InternalError(msg) => write!(f, "internal builder error: {msg}"),
             BuildError::PoolExhausted => write!(f, "buffer pool exhausted: too many output ports"),
             BuildError::ModulePoolExhausted => write!(f, "module pool exhausted: too many modules"),
+            BuildError::ModuleCreationError(msg) => write!(f, "module creation failed: {msg}"),
         }
     }
 }
 
 impl std::error::Error for BuildError {}
 
-/// Stable buffer index allocation state threaded across successive [`build_patch`] calls.
+/// Stable buffer index allocation state threaded across successive [`PatchBuilder::build_patch`] calls.
 ///
 /// `BufferAllocState` allows cables that share a `(NodeId, output_port_index)` key
 /// across re-plans to reuse the same pool slot, so the audio thread reads/writes the
@@ -64,7 +70,7 @@ impl Default for BufferAllocState {
     }
 }
 
-/// Stable module slot allocation state threaded across successive [`build_patch`] calls.
+/// Stable module slot allocation state threaded across successive [`PatchBuilder::build_patch`] calls.
 ///
 /// `ModuleAllocState` is the control-thread mirror of the audio thread's module pool,
 /// analogous to [`BufferAllocState`] for the buffer pool. It tracks which pool slot each
@@ -150,6 +156,48 @@ impl ModuleAllocState {
     }
 }
 
+/// Per-node identity and parameter state carried across successive builds.
+pub struct NodeState {
+    /// The module type name (from `ModuleDescriptor::module_name`).
+    pub module_name: &'static str,
+    /// Stable identity assigned by the planner when this node first appeared.
+    pub instance_id: InstanceId,
+    /// The module pool slot assigned to this node.
+    pub pool_index: usize,
+    /// The parameter map applied to this node during the last build.
+    pub parameter_map: ParameterMap,
+}
+
+/// Planning state threaded across successive [`PatchBuilder::build_patch`] calls.
+///
+/// `PlannerState` records node identity, buffer allocation, and module slot
+/// allocation. Passing the previous build's state into the next call enables
+/// graph diffing: surviving nodes reuse their `InstanceId` and pool slot;
+/// only added and type-changed nodes trigger module instantiation.
+pub struct PlannerState {
+    /// Maps each [`NodeId`] to its last-known identity and parameters.
+    pub nodes: HashMap<NodeId, NodeState>,
+    /// Stable buffer index allocation carried across builds.
+    pub buffer_alloc: BufferAllocState,
+    /// Stable module slot allocation carried across builds.
+    pub module_alloc: ModuleAllocState,
+}
+
+impl PlannerState {
+    /// Return an empty state for the first build.
+    ///
+    /// Using an empty state causes every node in the graph to be treated as
+    /// new: each receives a fresh [`InstanceId`] and a new module is
+    /// instantiated via the registry.
+    pub fn empty() -> Self {
+        Self {
+            nodes: HashMap::new(),
+            buffer_alloc: BufferAllocState::default(),
+            module_alloc: ModuleAllocState::default(),
+        }
+    }
+}
+
 /// One entry in the execution plan: a module pool reference together with its pre-resolved
 /// input and output buffer indices and pre-allocated scratch storage.
 pub struct ModuleSlot {
@@ -169,7 +217,7 @@ pub struct ModuleSlot {
     pub output_scratch: Vec<f64>,
 }
 
-/// A fully resolved, allocation-free execution structure produced by [`build_patch`].
+/// A fully resolved, allocation-free execution structure produced by [`PatchBuilder::build_patch`].
 ///
 /// Modules are **not** owned by the plan; they live in an externally-owned module pool
 /// (a `[Option<Box<dyn Module>>]` slice managed by [`SoundEngine`]). Each
@@ -199,15 +247,22 @@ pub struct ExecutionPlan {
     /// New modules to install into the audio-thread module pool when this plan
     /// is adopted. Each entry is `(pool_index, Box<dyn Module>)`.
     ///
-    /// The audio callback drains this vec into the pool on plan adoption. Modules
-    /// are initialised (via [`Module::initialise`]) in [`SoundEngine::swap_plan`]
-    /// before the plan is pushed to the channel.
+    /// The audio callback drains this vec into the pool on plan adoption.
     pub new_modules: Vec<(usize, Box<dyn Module>)>,
     /// Pool indices of modules removed from the graph.
     ///
     /// The audio callback calls `pool[idx].take()` for each entry, dropping the
     /// `Box<dyn Module>` and freeing the slot.
     pub tombstones: Vec<usize>,
+    /// Parameter diffs to apply to surviving modules on plan adoption.
+    ///
+    /// Each entry is `(pool_index, diff_map)` where `diff_map` contains only the
+    /// keys whose value changed since the previous build. Applied via
+    /// [`ModulePool::update_parameters`] on the audio thread — infallible.
+    ///
+    /// New modules (in `new_modules`) do not appear here; their parameters are
+    /// set during construction. Empty when no surviving module changed parameters.
+    pub parameter_updates: Vec<(usize, ParameterMap)>,
 }
 
 impl ExecutionPlan {
@@ -246,310 +301,490 @@ impl ExecutionPlan {
     }
 }
 
-/// Consume a [`ModuleGraph`] and produce an [`ExecutionPlan`] with updated
-/// [`BufferAllocState`] and [`ModuleAllocState`].
-///
-/// Validates that exactly one `AudioOut` node is present, orders modules by
-/// ascending [`NodeId`], and resolves per-module input/output buffer assignments.
-/// Unconnected input ports are assigned the permanent-zero buffer (index 0);
-/// output ports get a dedicated buffer from the pool.
-///
-/// ## Stable buffer allocation
-///
-/// Buffer indices are assigned via `alloc`:
-/// - If the `(NodeId, output_port_index)` key already exists in `alloc.output_buf`,
-///   the same index is reused and is **not** added to `to_zero`.
-/// - If the key is new, an index is popped from `alloc.freelist`; if the freelist
-///   is empty, `alloc.next_hwm` is used and incremented. If the index would equal
-///   or exceed `pool_capacity`, [`BuildError::PoolExhausted`] is returned.
-/// - Output ports present in `alloc.output_buf` but absent from the new graph have
-///   their indices pushed onto the returned freelist and appended to `to_zero`.
-///
-/// ## Module pool allocation
-///
-/// Module pool slots are assigned via `module_alloc`:
-/// - Surviving modules (same [`InstanceId`] in both old and new graph) reuse their
-///   existing pool slot and appear in neither `new_modules` nor `tombstones`.
-/// - New modules receive a slot from the freelist or high-water mark and are placed
-///   in `ExecutionPlan::new_modules` for installation by the audio callback.
-/// - Removed modules have their slots tombstoned; indices appear in
-///   `ExecutionPlan::tombstones` for the audio callback to free.
-pub fn build_patch(
-    graph: ModuleGraph,
-    alloc: &BufferAllocState,
-    module_alloc: &ModuleAllocState,
-    pool_capacity: usize,
-    module_pool_capacity: usize,
-) -> Result<(ExecutionPlan, BufferAllocState, ModuleAllocState), BuildError> {
-    let node_ids = graph.node_ids();
-    let edges = graph.edge_list();
+// ── Intermediate build results ────────────────────────────────────────────────
 
-    // Snapshot descriptors and instance IDs before consuming the graph.
-    struct NodeMeta {
-        descriptor: ModuleDescriptor,
-        instance_id: InstanceId,
-        is_sink: bool,
+/// Maps each [`NodeId`] to its assigned [`InstanceId`] and, for new or
+/// type-changed nodes, the freshly-instantiated module (absent for survivors).
+type NodeIdentityMap = HashMap<NodeId, (InstanceId, Option<Box<dyn Module>>)>;
+
+/// Result of Phase 4 (buffer allocation), passed into Phase 6 (slot building).
+struct BufferAllocation {
+    output_buf: HashMap<(NodeId, usize), usize>,
+    to_zero: Vec<usize>,
+    freelist: Vec<usize>,
+    next_hwm: usize,
+}
+
+/// Result of Phase 6 (slot building).
+struct SlotBuildResult {
+    slots: Vec<ModuleSlot>,
+    new_modules: Vec<(usize, Box<dyn Module>)>,
+    parameter_updates: Vec<(usize, ParameterMap)>,
+    node_states: HashMap<NodeId, NodeState>,
+}
+
+// ── PatchBuilder ──────────────────────────────────────────────────────────────
+
+/// Produces [`ExecutionPlan`]s from [`ModuleGraph`]s, diffing against the
+/// previous [`PlannerState`] to achieve stable buffer and module-pool allocation
+/// across successive builds.
+///
+/// `PatchBuilder` captures the pool capacity constraints and delegates each
+/// logical build phase to a focused helper method. Construct one with
+/// [`new`](Self::new), then call [`build_patch`](Self::build_patch).
+pub struct PatchBuilder {
+    /// Buffer pool slot capacity; must match the [`SoundEngine`]'s pool so that
+    /// [`BuildError::PoolExhausted`] is detected at plan-build time.
+    pub pool_capacity: usize,
+    /// Module pool slot capacity; must match the [`SoundEngine`]'s pool so that
+    /// [`BuildError::ModulePoolExhausted`] is detected at plan-build time.
+    pub module_pool_capacity: usize,
+}
+
+impl PatchBuilder {
+    pub fn new(pool_capacity: usize, module_pool_capacity: usize) -> Self {
+        Self { pool_capacity, module_pool_capacity }
     }
-    let meta: HashMap<NodeId, NodeMeta> = node_ids
-        .iter()
-        .map(|id| {
-            graph
-                .get_module(id)
-                .ok_or_else(|| {
-                    BuildError::InternalError(format!("node {id:?} missing from graph"))
-                })
-                .map(|m| {
-                    (
-                        id.clone(),
-                        NodeMeta {
-                            descriptor: m.descriptor().clone(),
-                            instance_id: m.instance_id(),
-                            is_sink: m.as_sink().is_some(),
-                        },
-                    )
-                })
-        })
-        .collect::<Result<HashMap<_, _>, _>>()?;
 
-    // Identify sink nodes via the Sink trait.
-    let audio_out_ids: Vec<NodeId> = node_ids
-        .iter()
-        .filter(|id| meta[id].is_sink)
-        .cloned()
-        .collect();
+    /// Build an [`ExecutionPlan`] from `graph`, diffing against `prev_state`.
+    ///
+    /// Returns the new plan and the updated [`PlannerState`] to pass into the
+    /// next call. Pass [`PlannerState::empty`] on the first build.
+    pub fn build_patch(
+        &self,
+        graph: &ModuleGraph,
+        registry: &Registry,
+        env: &AudioEnvironment,
+        prev_state: &PlannerState,
+    ) -> Result<(ExecutionPlan, PlannerState), BuildError> {
+        let node_ids = graph.node_ids();
 
-    let audio_out_node = match audio_out_ids.len() {
-        0 => return Err(BuildError::NoAudioOut),
-        1 => audio_out_ids[0].clone(),
-        _ => return Err(BuildError::MultipleAudioOut),
-    };
+        // Phase 1 – assign stable InstanceIds; instantiate new/type-changed modules.
+        let mut node_identity =
+            self.assign_instance_ids(graph, &node_ids, prev_state, registry, env)?;
 
-    // Execution order: ascending NodeId (insertion order). The 1-sample cable
-    // delay makes any ordering correct; ascending NodeId gives stable, deterministic output.
-    let mut order = node_ids.clone();
-    order.sort_unstable();
+        // Phase 2 – locate the single sink node.
+        let sink = Self::find_sink(graph, &node_ids)?;
 
-    let audio_out_index = order
-        .iter()
-        .position(|id| *id == audio_out_node)
-        .ok_or_else(|| {
-            BuildError::InternalError("audio_out node missing from order".to_string())
-        })?;
+        // Phase 3 – sort into execution order and record the sink's position.
+        let (order, audio_out_index) = Self::compute_order(&node_ids, &sink)?;
 
-    // Consume the graph's modules.
-    let mut modules = graph.into_modules();
+        // Phase 4 – assign stable cable buffer indices.
+        let buf_alloc = self.allocate_buffers(graph, &order, &prev_state.buffer_alloc)?;
 
-    // Stable buffer index allocation.
-    let mut new_freelist: Vec<usize> = alloc.freelist.clone();
-    let mut new_hwm: usize = alloc.next_hwm;
-    let mut to_zero: Vec<usize> = Vec::new();
+        // Phase 5 – assign stable module pool slots.
+        let new_ids: HashSet<InstanceId> =
+            node_ids.iter().map(|id| node_identity[id].0).collect();
+        let module_diff = prev_state.module_alloc.diff(&new_ids, self.module_pool_capacity)?;
 
-    let mut output_buf: HashMap<(NodeId, usize), usize> = HashMap::new();
+        // Phase 6 – build ModuleSlots, collect new modules, record node states.
+        let SlotBuildResult { slots, new_modules, parameter_updates, node_states: new_node_states } = Self::build_slots(
+            graph,
+            &order,
+            &mut node_identity,
+            &buf_alloc.output_buf,
+            &module_diff,
+            prev_state,
+        )?;
 
-    for id in &order {
-        let desc = &meta[id].descriptor;
-        for (port_idx, _) in desc.outputs.iter().enumerate() {
-            let key = (id.clone(), port_idx);
-            if let Some(&existing) = alloc.output_buf.get(&key) {
-                output_buf.insert(key, existing);
-            } else {
-                let idx = if let Some(recycled) = new_freelist.pop() {
-                    recycled
+        let tombstones = module_diff.tombstoned;
+
+        // Build the signal_dispatch sorted array: (InstanceId → pool_index).
+        // Sorted by InstanceId so the audio callback can binary-search in O(log M).
+        let mut dispatch: Vec<(InstanceId, usize)> = slots
+            .iter()
+            .zip(order.iter())
+            .map(|(slot, id)| (node_identity[id].0, slot.pool_index))
+            .collect();
+        dispatch.sort_unstable_by_key(|(id, _)| *id);
+        let signal_dispatch = dispatch.into_boxed_slice();
+
+        Ok((
+            ExecutionPlan {
+                slots,
+                to_zero: buf_alloc.to_zero,
+                audio_out_index,
+                signal_dispatch,
+                new_modules,
+                tombstones,
+                parameter_updates,
+            },
+            PlannerState {
+                nodes: new_node_states,
+                buffer_alloc: BufferAllocState {
+                    output_buf: buf_alloc.output_buf,
+                    freelist: buf_alloc.freelist,
+                    next_hwm: buf_alloc.next_hwm,
+                },
+                module_alloc: ModuleAllocState {
+                    pool_map: module_diff.slot_map,
+                    freelist: module_diff.freelist,
+                    next_hwm: module_diff.next_hwm,
+                },
+            },
+        ))
+    }
+
+    /// Phase 1: Walk every node in the graph, decide whether it is surviving or
+    /// new/type-changed, and (where needed) instantiate a fresh module via `registry`.
+    ///
+    /// Returns a [`NodeIdentityMap`] from `NodeId` to `(InstanceId, Option<fresh module>)`.
+    fn assign_instance_ids(
+        &self,
+        graph: &ModuleGraph,
+        node_ids: &[NodeId],
+        prev_state: &PlannerState,
+        registry: &Registry,
+        env: &AudioEnvironment,
+    ) -> Result<NodeIdentityMap, BuildError> {
+        let mut node_identity = HashMap::with_capacity(node_ids.len());
+
+        for id in node_ids {
+            let node = graph.get_node(id).ok_or_else(|| {
+                BuildError::InternalError(format!("node {id:?} missing from graph"))
+            })?;
+            let module_name = node.module_descriptor.module_name;
+
+            let (instance_id, fresh) = if let Some(prev) = prev_state.nodes.get(id) {
+                if prev.module_name == module_name {
+                    // Surviving: same NodeId, same module type — reuse identity.
+                    (prev.instance_id, None)
                 } else {
-                    let idx = new_hwm;
-                    new_hwm += 1;
-                    idx
-                };
-                if idx >= pool_capacity {
-                    return Err(BuildError::PoolExhausted);
+                    // Type-changed: same NodeId, different type — instantiate new.
+                    let m = registry
+                        .create(module_name, env, &node.module_descriptor.shape, &node.parameter_map)
+                        .map_err(|e| BuildError::ModuleCreationError(e.to_string()))?;
+                    let id = m.instance_id();
+                    (id, Some(m))
                 }
-                to_zero.push(idx);
-                output_buf.insert(key, idx);
-            }
+            } else {
+                // New node: instantiate.
+                let m = registry
+                    .create(module_name, env, &node.module_descriptor.shape, &node.parameter_map)
+                    .map_err(|e| BuildError::ModuleCreationError(e.to_string()))?;
+                let id = m.instance_id();
+                (id, Some(m))
+            };
+
+            node_identity.insert(id.clone(), (instance_id, fresh));
         }
+
+        Ok(node_identity)
     }
 
-    // Deallocation: ports present in the old alloc that are no longer in the new graph.
-    for (key, &buf_idx) in &alloc.output_buf {
-        if !output_buf.contains_key(key) {
-            to_zero.push(buf_idx);
-            new_freelist.push(buf_idx);
-        }
-    }
-
-    // Stable module pool allocation.
-    let new_ids: HashSet<InstanceId> = node_ids.iter().map(|id| meta[id].instance_id).collect();
-    let module_diff = module_alloc.diff(&new_ids, module_pool_capacity)?;
-
-    // Build the module slots in execution order, collecting new module instances.
-    let mut slots: Vec<ModuleSlot> = Vec::with_capacity(order.len());
-    let mut new_modules: Vec<(usize, Box<dyn Module>)> = Vec::new();
-
-    for id in &order {
-        let desc = &meta[id].descriptor;
-
-        let (input_buffers, input_scales): (Vec<usize>, Vec<f64>) = desc
-            .inputs
+    /// Phase 2: Find exactly one sink node (`is_sink == true`) in the graph.
+    ///
+    /// Returns [`BuildError::NoAudioOut`] or [`BuildError::MultipleAudioOut`] if
+    /// the sink count is not exactly one.
+    fn find_sink(graph: &ModuleGraph, node_ids: &[NodeId]) -> Result<NodeId, BuildError> {
+        let sinks: Vec<NodeId> = node_ids
             .iter()
-            .map(|port| {
-                let (buf_idx, scale) = edges
-                    .iter()
-                    .find(|(_, _, _, to, in_name, in_idx, _)| {
-                        *to == *id && in_name == port.name && *in_idx == port.index
-                    })
-                    .map(|(from, out_name, out_idx, _, _, _, scale)| -> Result<(usize, f64), BuildError> {
-                        let from_desc = &meta[from].descriptor;
-                        let out_port_idx = from_desc
-                            .outputs
-                            .iter()
-                            .position(|p| p.name == out_name && p.index == *out_idx)
-                            .ok_or_else(|| {
-                                BuildError::InternalError(format!(
-                                    "output port {:?}/{} not found on node {from:?}",
-                                    out_name, out_idx
-                                ))
-                            })?;
-                        Ok((output_buf[&(from.clone(), out_port_idx)], *scale))
-                    })
-                    .transpose()?
-                    .unwrap_or((0, 1.0));
-                Ok((buf_idx, scale))
+            .filter(|id| {
+                graph.get_node(id).map(|n| n.module_descriptor.is_sink).unwrap_or(false)
             })
-            .collect::<Result<Vec<_>, BuildError>>()?
-            .into_iter()
-            .unzip();
-
-        let output_buffers: Vec<usize> = desc
-            .outputs
-            .iter()
-            .enumerate()
-            .map(|(port_idx, _)| output_buf[&(id.clone(), port_idx)])
+            .cloned()
             .collect();
 
-        let n_in = desc.inputs.len();
-        let n_out = desc.outputs.len();
-
-        let instance_id = meta[id].instance_id;
-        let pool_index = module_diff.slot_map[&instance_id];
-
-        // Take the fresh module from the graph.
-        let fresh = modules.remove(id).ok_or_else(|| {
-            BuildError::InternalError(format!("module {id:?} missing from map"))
-        })?;
-
-        // New modules go into new_modules; surviving modules stay in the pool untouched
-        // (the fresh instance from the graph is dropped).
-        if !module_alloc.pool_map.contains_key(&instance_id) {
-            new_modules.push((pool_index, fresh));
+        match sinks.len() {
+            0 => Err(BuildError::NoAudioOut),
+            1 => Ok(sinks.into_iter().next().unwrap()),
+            _ => Err(BuildError::MultipleAudioOut),
         }
-        // If surviving, `fresh` is dropped here — the stateful instance remains in the pool.
-
-        slots.push(ModuleSlot {
-            pool_index,
-            input_buffers,
-            input_scales,
-            output_buffers,
-            input_scratch: vec![0.0; n_in],
-            output_scratch: vec![0.0; n_out],
-        });
     }
 
-    let tombstones = module_diff.tombstoned;
+    /// Phase 3: Sort `node_ids` into ascending [`NodeId`] order and return the
+    /// sorted vec together with the index of `sink` within it.
+    fn compute_order(
+        node_ids: &[NodeId],
+        sink: &NodeId,
+    ) -> Result<(Vec<NodeId>, usize), BuildError> {
+        let mut order = node_ids.to_vec();
+        order.sort_unstable();
+        let audio_out_index = order
+            .iter()
+            .position(|id| id == sink)
+            .ok_or_else(|| BuildError::InternalError("sink node missing from order".to_string()))?;
+        Ok((order, audio_out_index))
+    }
 
-    let new_alloc = BufferAllocState {
-        output_buf,
-        freelist: new_freelist,
-        next_hwm: new_hwm,
-    };
+    /// Phase 4: Assign stable cable buffer pool indices.
+    ///
+    /// Reuses any `(NodeId, port_idx)` key already present in `prev_alloc`.
+    /// New keys are filled from the freelist (LIFO) or the high-water mark.
+    /// Old keys absent from the new graph are returned to the freelist and marked
+    /// for zeroing on plan adoption.
+    fn allocate_buffers(
+        &self,
+        graph: &ModuleGraph,
+        order: &[NodeId],
+        prev_alloc: &BufferAllocState,
+    ) -> Result<BufferAllocation, BuildError> {
+        let mut freelist = prev_alloc.freelist.clone();
+        let mut next_hwm = prev_alloc.next_hwm;
+        let mut to_zero = Vec::new();
+        let mut output_buf: HashMap<(NodeId, usize), usize> = HashMap::new();
 
-    let new_module_alloc = ModuleAllocState {
-        pool_map: module_diff.slot_map,
-        freelist: module_diff.freelist,
-        next_hwm: module_diff.next_hwm,
-    };
+        for id in order {
+            let desc = &graph
+                .get_node(id)
+                .ok_or_else(|| BuildError::InternalError(format!("node {id:?} missing from graph")))?
+                .module_descriptor;
 
-    // Build the signal_dispatch sorted array: (InstanceId → pool_index).
-    // Sorted by InstanceId so the audio callback can binary-search in O(log M).
-    let mut dispatch: Vec<(InstanceId, usize)> = slots
-        .iter()
-        .zip(order.iter())
-        .map(|(slot, id)| (meta[id].instance_id, slot.pool_index))
-        .collect();
-    dispatch.sort_unstable_by_key(|(id, _)| *id);
-    let signal_dispatch = dispatch.into_boxed_slice();
+            for (port_idx, _) in desc.outputs.iter().enumerate() {
+                let key = (id.clone(), port_idx);
+                if let Some(&existing) = prev_alloc.output_buf.get(&key) {
+                    output_buf.insert(key, existing);
+                } else {
+                    let idx = freelist.pop().unwrap_or_else(|| {
+                        let i = next_hwm;
+                        next_hwm += 1;
+                        i
+                    });
+                    if idx >= self.pool_capacity {
+                        return Err(BuildError::PoolExhausted);
+                    }
+                    to_zero.push(idx);
+                    output_buf.insert(key, idx);
+                }
+            }
+        }
 
-    Ok((
-        ExecutionPlan {
-            slots,
-            to_zero,
-            audio_out_index,
-            signal_dispatch,
-            new_modules,
-            tombstones,
-        },
-        new_alloc,
-        new_module_alloc,
-    ))
+        // Deallocate ports present in the old alloc that are not in the new graph.
+        for (key, &buf_idx) in &prev_alloc.output_buf {
+            if !output_buf.contains_key(key) {
+                to_zero.push(buf_idx);
+                freelist.push(buf_idx);
+            }
+        }
+
+        Ok(BufferAllocation { output_buf, to_zero, freelist, next_hwm })
+    }
+
+    /// Phase 6: Build one [`ModuleSlot`] per node, collect fresh modules for
+    /// installation, and record updated [`NodeState`]s.
+    fn build_slots(
+        graph: &ModuleGraph,
+        order: &[NodeId],
+        node_identity: &mut NodeIdentityMap,
+        output_buf: &HashMap<(NodeId, usize), usize>,
+        module_diff: &ModuleAllocDiff,
+        prev_state: &PlannerState,
+    ) -> Result<SlotBuildResult, BuildError> {
+        let edges = graph.edge_list();
+        let mut slots = Vec::with_capacity(order.len());
+        let mut new_modules: Vec<(usize, Box<dyn Module>)> = Vec::new();
+        let mut parameter_updates: Vec<(usize, ParameterMap)> = Vec::new();
+        let mut node_states: HashMap<NodeId, NodeState> = HashMap::with_capacity(order.len());
+
+        for id in order {
+            let node = graph.get_node(id).ok_or_else(|| {
+                BuildError::InternalError(format!("node {id:?} missing from graph"))
+            })?;
+            let desc = &node.module_descriptor;
+            let instance_id = node_identity[id].0;
+            let pool_index = *module_diff.slot_map.get(&instance_id).ok_or_else(|| {
+                BuildError::InternalError(format!(
+                    "instance {instance_id:?} missing from module_diff slot_map"
+                ))
+            })?;
+
+            // Build input buffer assignments from the edge list.
+            let (input_buffers, input_scales): (Vec<usize>, Vec<f64>) = desc
+                .inputs
+                .iter()
+                .map(|port| {
+                    let result = edges
+                        .iter()
+                        .find(|(_, _, _, to, in_name, in_idx, _)| {
+                            *to == *id && in_name == port.name && *in_idx == port.index
+                        })
+                        .map(|(from, out_name, out_idx, _, _, _, scale)| {
+                            let from_node = graph.get_node(from).ok_or_else(|| {
+                                BuildError::InternalError(format!(
+                                    "node {from:?} missing from graph"
+                                ))
+                            })?;
+                            let from_desc = &from_node.module_descriptor;
+                            let out_port_idx = from_desc
+                                .outputs
+                                .iter()
+                                .position(|p| {
+                                    p.name == out_name.as_str() && p.index == *out_idx
+                                })
+                                .ok_or_else(|| {
+                                    BuildError::InternalError(format!(
+                                        "output port {:?}/{} not found on node {from:?}",
+                                        out_name, out_idx
+                                    ))
+                                })?;
+                            let buf = output_buf
+                                .get(&(from.clone(), out_port_idx))
+                                .copied()
+                                .ok_or_else(|| {
+                                    BuildError::InternalError(format!(
+                                        "buffer for ({from:?}, {out_port_idx}) not found"
+                                    ))
+                                })?;
+                            Ok((buf, *scale))
+                        })
+                        .transpose()?
+                        .unwrap_or((0, 1.0));
+                    Ok(result)
+                })
+                .collect::<Result<Vec<_>, BuildError>>()?
+                .into_iter()
+                .unzip();
+
+            let output_buffers: Vec<usize> = desc
+                .outputs
+                .iter()
+                .enumerate()
+                .map(|(port_idx, _)| {
+                    output_buf
+                        .get(&(id.clone(), port_idx))
+                        .copied()
+                        .ok_or_else(|| {
+                            BuildError::InternalError(format!(
+                                "buffer for ({id:?}, {port_idx}) not found"
+                            ))
+                        })
+                })
+                .collect::<Result<_, _>>()?;
+
+            let n_in = desc.inputs.len();
+            let n_out = desc.outputs.len();
+
+            // If this node is new or type-changed, install the fresh module.
+            // Surviving nodes stay in the pool untouched, but may need parameter updates.
+            if !prev_state.module_alloc.pool_map.contains_key(&instance_id) {
+                let (_, fresh_opt) = node_identity.get_mut(id).unwrap();
+                let fresh = fresh_opt.take().ok_or_else(|| {
+                    BuildError::InternalError(format!(
+                        "fresh module for new/type-changed node {id:?} is missing"
+                    ))
+                })?;
+                new_modules.push((pool_index, fresh));
+            } else {
+                // Surviving module: emit a parameter diff if any values changed.
+                if let Some(prev_ns) = prev_state.nodes.get(id) {
+                    let diff: ParameterMap = node
+                        .parameter_map
+                        .iter()
+                        .filter(|(k, v)| prev_ns.parameter_map.get(*k) != Some(v))
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    if !diff.is_empty() {
+                        parameter_updates.push((pool_index, diff));
+                    }
+                }
+            }
+
+            node_states.insert(
+                id.clone(),
+                NodeState {
+                    module_name: desc.module_name,
+                    instance_id,
+                    pool_index,
+                    parameter_map: node.parameter_map.clone(),
+                },
+            );
+
+            slots.push(ModuleSlot {
+                pool_index,
+                input_buffers,
+                input_scales,
+                output_buffers,
+                input_scratch: vec![0.0; n_in],
+                output_scratch: vec![0.0; n_out],
+            });
+        }
+
+        Ok(SlotBuildResult { slots, new_modules, parameter_updates, node_states })
+    }
+}
+
+/// Convenience wrapper around [`PatchBuilder::build_patch`].
+///
+/// Constructs a temporary [`PatchBuilder`] with the given capacities and
+/// delegates to [`PatchBuilder::build_patch`]. Prefer constructing a
+/// [`PatchBuilder`] directly when the same capacities are reused across calls.
+pub fn build_patch(
+    graph: &ModuleGraph,
+    registry: &Registry,
+    env: &AudioEnvironment,
+    prev_state: &PlannerState,
+    pool_capacity: usize,
+    module_pool_capacity: usize,
+) -> Result<(ExecutionPlan, PlannerState), BuildError> {
+    PatchBuilder::new(pool_capacity, module_pool_capacity)
+        .build_patch(graph, registry, env, prev_state)
 }
 
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
-    use patches_core::{AudioEnvironment, Module, NodeId, PortRef};
-    use patches_modules::{AudioOut, SineOscillator};
+    use patches_core::{AudioEnvironment, InstanceId, Module, ModuleShape, NodeId, PortRef};
+    use patches_core::parameter_map::{ParameterMap, ParameterValue};
+    use patches_modules::{AudioOut, SawtoothOscillator, SineOscillator};
 
     fn p(name: &'static str) -> PortRef {
         PortRef { name, index: 0 }
     }
 
-    fn sine_to_audio_out_graph() -> (ModuleGraph, NodeId, NodeId) {
+    fn sine_to_audio_out_graph() -> ModuleGraph {
         let mut graph = ModuleGraph::new();
-        let sine_id = NodeId::from("a_sine");
-        let out_id = NodeId::from("b_out");
-        graph.add_module(sine_id.clone(), Box::new(SineOscillator::new(440.0))).unwrap();
-        graph.add_module(out_id.clone(), Box::new(AudioOut::new())).unwrap();
-        graph.connect(&sine_id, p("out"), &out_id, p("left"), 1.0).unwrap();
-        graph.connect(&sine_id, p("out"), &out_id, p("right"), 1.0).unwrap();
-        (graph, sine_id, out_id)
+        let sine_desc = SineOscillator::describe(&ModuleShape { channels: 0 });
+        let out_desc = AudioOut::describe(&ModuleShape { channels: 0 });
+        let mut sine_params = ParameterMap::new();
+        sine_params.insert("frequency".to_string(), ParameterValue::Float(440.0));
+        graph.add_module("a_sine", sine_desc, &sine_params).unwrap();
+        graph.add_module("b_out", out_desc, &ParameterMap::new()).unwrap();
+        graph
+            .connect(&NodeId::from("a_sine"), p("out"), &NodeId::from("b_out"), p("left"), 1.0)
+            .unwrap();
+        graph
+            .connect(&NodeId::from("a_sine"), p("out"), &NodeId::from("b_out"), p("right"), 1.0)
+            .unwrap();
+        graph
     }
 
     fn make_buffer_pool(capacity: usize) -> Vec<[f64; 2]> {
         vec![[0.0; 2]; capacity]
     }
 
-    /// Build a plan from scratch (no prior alloc state) and install its modules.
-    fn default_build(
-        graph: ModuleGraph,
-    ) -> (ExecutionPlan, BufferAllocState, ModuleAllocState, ModulePool) {
-        let mut plan = build_patch(
-            graph,
-            &BufferAllocState::default(),
-            &ModuleAllocState::default(),
-            256,
-            256,
-        )
-        .expect("build should succeed");
+    fn default_registry() -> Registry {
+        patches_modules::default_registry()
+    }
 
-        // Simulate SoundEngine: install new_modules into module pool and initialise.
+    fn default_env() -> AudioEnvironment {
+        AudioEnvironment { sample_rate: 44100.0 }
+    }
+
+    fn default_builder() -> PatchBuilder {
+        PatchBuilder::new(256, 256)
+    }
+
+    /// Build a plan from scratch (no prior state) and install its modules.
+    fn default_build(graph: &ModuleGraph) -> (ExecutionPlan, PlannerState, ModulePool) {
+        let registry = default_registry();
+        let env = default_env();
+        let (mut plan, state) = default_builder()
+            .build_patch(graph, &registry, &env, &PlannerState::empty())
+            .expect("build should succeed");
         let mut module_pool = ModulePool::new(256);
-        let env = AudioEnvironment { sample_rate: 44100.0 };
-        for (idx, mut m) in plan.0.new_modules.drain(..) {
-            m.initialise(&env);
+        for (idx, m) in plan.new_modules.drain(..) {
             module_pool.install(idx, m);
         }
-
-        (plan.0, plan.1, plan.2, module_pool)
+        (plan, state, module_pool)
     }
 
     #[test]
     fn builds_minimal_plan_with_correct_order() {
-        let (graph, _, _) = sine_to_audio_out_graph();
-        let (plan, _, _, _) = default_build(graph);
+        let graph = sine_to_audio_out_graph();
+        let (plan, _, _) = default_build(&graph);
 
         let audio_out_idx = plan.audio_out_index;
-        // Find the sine slot by exclusion: the only slot that isn't AudioOut.
         let sine_idx = plan
             .slots
             .iter()
@@ -561,18 +796,14 @@ mod tests {
 
     #[test]
     fn fanout_buffer_shared_between_both_inputs() {
-        let (graph, _, _) = sine_to_audio_out_graph();
-        let (plan, _, _, _) = default_build(graph);
+        let graph = sine_to_audio_out_graph();
+        let (plan, _, _) = default_build(&graph);
 
         let audio_out_idx = plan.audio_out_index;
         let sine_idx = plan
             .slots
             .iter()
-            .position(|s| {
-                // Find by pool_index: sine is not AudioOut, check by slot position
-                // (sine is at lower index than AudioOut per ascending-NodeId order)
-                s.pool_index != plan.slots[audio_out_idx].pool_index
-            })
+            .position(|s| s.pool_index != plan.slots[audio_out_idx].pool_index)
             .unwrap();
 
         let sine_out_buf = plan.slots[sine_idx].output_buffers[0];
@@ -585,8 +816,8 @@ mod tests {
 
     #[test]
     fn tick_produces_bounded_audio_output() {
-        let (graph, _, _) = sine_to_audio_out_graph();
-        let (mut plan, _, _, mut module_pool) = default_build(graph);
+        let graph = sine_to_audio_out_graph();
+        let (mut plan, _, mut module_pool) = default_build(&graph);
         let mut buffer_pool = make_buffer_pool(256);
 
         for i in 0..1000 {
@@ -601,9 +832,14 @@ mod tests {
     #[test]
     fn no_audio_out_returns_error() {
         let mut graph = ModuleGraph::new();
-        graph.add_module("sine", Box::new(SineOscillator::new(440.0))).unwrap();
+        let sine_desc = SineOscillator::describe(&ModuleShape { channels: 0 });
+        let mut p_map = ParameterMap::new();
+        p_map.insert("frequency".to_string(), ParameterValue::Float(440.0));
+        graph.add_module("sine", sine_desc, &p_map).unwrap();
+        let registry = default_registry();
+        let env = default_env();
         assert!(matches!(
-            build_patch(graph, &BufferAllocState::default(), &ModuleAllocState::default(), 256, 256),
+            default_builder().build_patch(&graph, &registry, &env, &PlannerState::empty()),
             Err(BuildError::NoAudioOut)
         ));
     }
@@ -611,53 +847,55 @@ mod tests {
     #[test]
     fn multiple_audio_out_returns_error() {
         let mut graph = ModuleGraph::new();
-        let sine_id = NodeId::from("sine");
-        let out1 = NodeId::from("out1");
-        let out2 = NodeId::from("out2");
-        graph.add_module(sine_id.clone(), Box::new(SineOscillator::new(440.0))).unwrap();
-        graph.add_module(out1.clone(), Box::new(AudioOut::new())).unwrap();
-        graph.add_module(out2.clone(), Box::new(AudioOut::new())).unwrap();
-        graph.connect(&sine_id, p("out"), &out1, p("left"), 1.0).unwrap();
-        graph.connect(&sine_id, p("out"), &out1, p("right"), 1.0).unwrap();
-        graph.connect(&sine_id, p("out"), &out2, p("left"), 1.0).unwrap();
-        graph.connect(&sine_id, p("out"), &out2, p("right"), 1.0).unwrap();
+        let sine_desc = SineOscillator::describe(&ModuleShape { channels: 0 });
+        let out1_desc = AudioOut::describe(&ModuleShape { channels: 0 });
+        let out2_desc = AudioOut::describe(&ModuleShape { channels: 0 });
+        let mut p_map = ParameterMap::new();
+        p_map.insert("frequency".to_string(), ParameterValue::Float(440.0));
+        graph.add_module("sine", sine_desc, &p_map).unwrap();
+        graph.add_module("out1", out1_desc, &ParameterMap::new()).unwrap();
+        graph.add_module("out2", out2_desc, &ParameterMap::new()).unwrap();
+        graph.connect(&NodeId::from("sine"), p("out"), &NodeId::from("out1"), p("left"), 1.0).unwrap();
+        graph.connect(&NodeId::from("sine"), p("out"), &NodeId::from("out1"), p("right"), 1.0).unwrap();
+        graph.connect(&NodeId::from("sine"), p("out"), &NodeId::from("out2"), p("left"), 1.0).unwrap();
+        graph.connect(&NodeId::from("sine"), p("out"), &NodeId::from("out2"), p("right"), 1.0).unwrap();
+        let registry = default_registry();
+        let env = default_env();
         assert!(matches!(
-            build_patch(graph, &BufferAllocState::default(), &ModuleAllocState::default(), 256, 256),
+            default_builder().build_patch(&graph, &registry, &env, &PlannerState::empty()),
             Err(BuildError::MultipleAudioOut)
         ));
     }
 
     #[test]
     fn input_scale_is_applied_at_tick_time() {
-        let mut graph_half = ModuleGraph::new();
-        graph_half.add_module("sine", Box::new(SineOscillator::new(440.0))).unwrap();
-        graph_half.add_module("out", Box::new(patches_modules::AudioOut::new())).unwrap();
-        let sine_h = NodeId::from("sine");
-        let out_h = NodeId::from("out");
-        graph_half.connect(&sine_h, p("out"), &out_h, p("left"), 0.5).unwrap();
-        graph_half.connect(&sine_h, p("out"), &out_h, p("right"), 0.5).unwrap();
+        let make_graph = |scale: f64| {
+            let mut g = ModuleGraph::new();
+            let sine_desc = SineOscillator::describe(&ModuleShape { channels: 0 });
+            let out_desc = AudioOut::describe(&ModuleShape { channels: 0 });
+            let mut p_map = ParameterMap::new();
+            p_map.insert("frequency".to_string(), ParameterValue::Float(440.0));
+            g.add_module("sine", sine_desc, &p_map).unwrap();
+            g.add_module("out", out_desc, &ParameterMap::new()).unwrap();
+            g.connect(&NodeId::from("sine"), p("out"), &NodeId::from("out"), p("left"), scale).unwrap();
+            g.connect(&NodeId::from("sine"), p("out"), &NodeId::from("out"), p("right"), scale).unwrap();
+            g
+        };
 
-        let mut graph_full = ModuleGraph::new();
-        graph_full.add_module("sine", Box::new(SineOscillator::new(440.0))).unwrap();
-        graph_full.add_module("out", Box::new(patches_modules::AudioOut::new())).unwrap();
-        let sine_f = NodeId::from("sine");
-        let out_f = NodeId::from("out");
-        graph_full.connect(&sine_f, p("out"), &out_f, p("left"), 1.0).unwrap();
-        graph_full.connect(&sine_f, p("out"), &out_f, p("right"), 1.0).unwrap();
-
-        let (mut plan_half, _, _, mut pool_half) = default_build(graph_half);
-        let (mut plan_full, _, _, mut pool_full) = default_build(graph_full);
-        let mut buffer_half = make_buffer_pool(256);
-        let mut buffer_full = make_buffer_pool(256);
+        let graph_half = make_graph(0.5);
+        let graph_full = make_graph(1.0);
+        let (mut plan_half, _, mut pool_half) = default_build(&graph_half);
+        let (mut plan_full, _, mut pool_full) = default_build(&graph_full);
+        let mut buf_half = make_buffer_pool(256);
+        let mut buf_full = make_buffer_pool(256);
 
         for i in 0..100 {
-            plan_half.tick(&mut pool_half, &mut buffer_half, i % 2);
-            plan_full.tick(&mut pool_full, &mut buffer_full, i % 2);
+            plan_half.tick(&mut pool_half, &mut buf_half, i % 2);
+            plan_full.tick(&mut pool_full, &mut buf_full, i % 2);
         }
 
         let half = pool_half.read_sink_left();
         let full = pool_full.read_sink_left();
-
         if full.abs() > 1e-6 {
             let ratio = half / full;
             assert!(
@@ -667,45 +905,63 @@ mod tests {
         }
     }
 
-    // ── Acceptance criteria: T-0025 ──────────────────────────────────────────
+    // ── Acceptance criteria: stable allocation across replan ─────────────────
 
     #[test]
     fn stable_buffer_index_for_unchanged_module_across_replan() {
-        let pool_capacity = 256;
-        let alloc0 = BufferAllocState::default();
-        let module_alloc0 = ModuleAllocState::default();
+        let registry = default_registry();
+        let env = default_env();
+        let builder = default_builder();
 
+        // Graph A: two sines → AudioOut
         let mut graph_a = ModuleGraph::new();
-        graph_a.add_module("sine_a", Box::new(SineOscillator::new(440.0))).unwrap();
-        graph_a.add_module("sine_b", Box::new(SineOscillator::new(880.0))).unwrap();
-        graph_a.add_module("out", Box::new(AudioOut::new())).unwrap();
-        let sine_a = NodeId::from("sine_a");
-        let sine_b = NodeId::from("sine_b");
-        let out_a = NodeId::from("out");
-        graph_a.connect(&sine_a, p("out"), &out_a, p("left"), 1.0).unwrap();
-        graph_a.connect(&sine_b, p("out"), &out_a, p("right"), 1.0).unwrap();
+        {
+            let sine_a = SineOscillator::describe(&ModuleShape { channels: 0 });
+            let sine_b = SineOscillator::describe(&ModuleShape { channels: 0 });
+            let out_desc = AudioOut::describe(&ModuleShape { channels: 0 });
+            let mut pa = ParameterMap::new();
+            pa.insert("frequency".to_string(), ParameterValue::Float(440.0));
+            let mut pb = ParameterMap::new();
+            pb.insert("frequency".to_string(), ParameterValue::Float(880.0));
+            graph_a.add_module("sine_a", sine_a, &pa).unwrap();
+            graph_a.add_module("sine_b", sine_b, &pb).unwrap();
+            graph_a.add_module("out", out_desc, &ParameterMap::new()).unwrap();
+            graph_a
+                .connect(&NodeId::from("sine_a"), p("out"), &NodeId::from("out"), p("left"), 1.0)
+                .unwrap();
+            graph_a
+                .connect(&NodeId::from("sine_b"), p("out"), &NodeId::from("out"), p("right"), 1.0)
+                .unwrap();
+        }
 
-        let (_plan_a, alloc_a, module_alloc_a) =
-            build_patch(graph_a, &alloc0, &module_alloc0, pool_capacity, pool_capacity).unwrap();
+        let (_plan_a, state_a) =
+            builder.build_patch(&graph_a, &registry, &env, &PlannerState::empty()).unwrap();
 
-        let buf_a = alloc_a.output_buf[&(NodeId::from("sine_a"), 0)];
+        let buf_a = state_a.buffer_alloc.output_buf[&(NodeId::from("sine_a"), 0)];
 
+        // Graph B: only sine_a (sine_b removed)
         let mut graph_b = ModuleGraph::new();
-        graph_b.add_module("sine_a", Box::new(SineOscillator::new(440.0))).unwrap();
-        graph_b.add_module("out", Box::new(AudioOut::new())).unwrap();
-        let sine_a_b = NodeId::from("sine_a");
-        let out_b = NodeId::from("out");
-        graph_b.connect(&sine_a_b, p("out"), &out_b, p("left"), 1.0).unwrap();
-        graph_b.connect(&sine_a_b, p("out"), &out_b, p("right"), 1.0).unwrap();
+        {
+            let sine_a = SineOscillator::describe(&ModuleShape { channels: 0 });
+            let out_desc = AudioOut::describe(&ModuleShape { channels: 0 });
+            let mut pa = ParameterMap::new();
+            pa.insert("frequency".to_string(), ParameterValue::Float(440.0));
+            graph_b.add_module("sine_a", sine_a, &pa).unwrap();
+            graph_b.add_module("out", out_desc, &ParameterMap::new()).unwrap();
+            graph_b
+                .connect(&NodeId::from("sine_a"), p("out"), &NodeId::from("out"), p("left"), 1.0)
+                .unwrap();
+            graph_b
+                .connect(&NodeId::from("sine_a"), p("out"), &NodeId::from("out"), p("right"), 1.0)
+                .unwrap();
+        }
 
-        let (plan_b, alloc_b, _) =
-            build_patch(graph_b, &alloc_a, &module_alloc_a, pool_capacity, pool_capacity).unwrap();
+        let (plan_b, state_b) = builder.build_patch(&graph_b, &registry, &env, &state_a).unwrap();
 
-        let buf_b = alloc_b.output_buf[&(NodeId::from("sine_a"), 0)];
-
+        let buf_b = state_b.buffer_alloc.output_buf[&(NodeId::from("sine_a"), 0)];
         assert_eq!(buf_a, buf_b, "sine_a output buffer must be identical across re-plan");
 
-        let freed_buf = alloc_a.output_buf[&(NodeId::from("sine_b"), 0)];
+        let freed_buf = state_a.buffer_alloc.output_buf[&(NodeId::from("sine_b"), 0)];
         assert!(
             plan_b.to_zero.contains(&freed_buf),
             "freed buffer index {freed_buf} must appear in plan_b.to_zero"
@@ -714,78 +970,216 @@ mod tests {
 
     #[test]
     fn freelist_recycles_indices_preventing_hwm_growth() {
-        let pool_capacity = 256;
-        let module_alloc0 = ModuleAllocState::default();
+        let registry = default_registry();
+        let env = default_env();
+        let builder = default_builder();
 
-        let build_two = |alloc: &BufferAllocState, module_alloc: &ModuleAllocState| {
+        let build_two = |state: &PlannerState| {
             let mut g = ModuleGraph::new();
-            let s1 = NodeId::from("s1");
-            let s2 = NodeId::from("s2");
-            let out = NodeId::from("out");
-            g.add_module(s1.clone(), Box::new(SineOscillator::new(440.0))).unwrap();
-            g.add_module(s2.clone(), Box::new(SineOscillator::new(880.0))).unwrap();
-            g.add_module(out.clone(), Box::new(AudioOut::new())).unwrap();
-            g.connect(&s1, p("out"), &out, p("left"), 1.0).unwrap();
-            g.connect(&s2, p("out"), &out, p("right"), 1.0).unwrap();
-            let (_, a, ma) = build_patch(g, alloc, module_alloc, pool_capacity, pool_capacity).unwrap();
-            (a, ma)
+            let s1 = SineOscillator::describe(&ModuleShape { channels: 0 });
+            let s2 = SineOscillator::describe(&ModuleShape { channels: 0 });
+            let out = AudioOut::describe(&ModuleShape { channels: 0 });
+            let mut p1 = ParameterMap::new();
+            p1.insert("frequency".to_string(), ParameterValue::Float(440.0));
+            let mut p2 = ParameterMap::new();
+            p2.insert("frequency".to_string(), ParameterValue::Float(880.0));
+            g.add_module("s1", s1, &p1).unwrap();
+            g.add_module("s2", s2, &p2).unwrap();
+            g.add_module("out", out, &ParameterMap::new()).unwrap();
+            g.connect(&NodeId::from("s1"), p("out"), &NodeId::from("out"), p("left"), 1.0).unwrap();
+            g.connect(&NodeId::from("s2"), p("out"), &NodeId::from("out"), p("right"), 1.0).unwrap();
+            let (_, new_state) = builder.build_patch(&g, &registry, &env, state).unwrap();
+            new_state
         };
 
-        let build_one = |alloc: &BufferAllocState, module_alloc: &ModuleAllocState| {
+        let build_one = |state: &PlannerState| {
             let mut g = ModuleGraph::new();
-            let s = NodeId::from("s1");
-            let out = NodeId::from("out");
-            g.add_module(s.clone(), Box::new(SineOscillator::new(440.0))).unwrap();
-            g.add_module(out.clone(), Box::new(AudioOut::new())).unwrap();
-            g.connect(&s, p("out"), &out, p("left"), 1.0).unwrap();
-            g.connect(&s, p("out"), &out, p("right"), 1.0).unwrap();
-            let (_, a, ma) = build_patch(g, alloc, module_alloc, pool_capacity, pool_capacity).unwrap();
-            (a, ma)
+            let s = SineOscillator::describe(&ModuleShape { channels: 0 });
+            let out = AudioOut::describe(&ModuleShape { channels: 0 });
+            let mut pm = ParameterMap::new();
+            pm.insert("frequency".to_string(), ParameterValue::Float(440.0));
+            g.add_module("s1", s, &pm).unwrap();
+            g.add_module("out", out, &ParameterMap::new()).unwrap();
+            g.connect(&NodeId::from("s1"), p("out"), &NodeId::from("out"), p("left"), 1.0).unwrap();
+            g.connect(&NodeId::from("s1"), p("out"), &NodeId::from("out"), p("right"), 1.0).unwrap();
+            let (_, new_state) = builder.build_patch(&g, &registry, &env, state).unwrap();
+            new_state
         };
 
-        let (alloc_a, module_alloc_a) = build_two(&BufferAllocState::default(), &module_alloc0);
-        let hwm_after_first_two = alloc_a.next_hwm;
+        let state_a = build_two(&PlannerState::empty());
+        let hwm_after_first_two = state_a.buffer_alloc.next_hwm;
 
-        let mut current_alloc = alloc_a;
-        let mut current_module_alloc = module_alloc_a;
+        let mut current_state = state_a;
         for _ in 0..20 {
-            let (a, ma) = build_one(&current_alloc, &current_module_alloc);
-            current_alloc = a;
-            current_module_alloc = ma;
-            let (a, ma) = build_two(&current_alloc, &current_module_alloc);
-            current_alloc = a;
-            current_module_alloc = ma;
+            current_state = build_one(&current_state);
+            current_state = build_two(&current_state);
         }
 
         assert_eq!(
-            current_alloc.next_hwm, hwm_after_first_two,
-            "hwm grew from {hwm_after_first_two} to {}: freelist should have prevented new allocations",
-            current_alloc.next_hwm
+            current_state.buffer_alloc.next_hwm,
+            hwm_after_first_two,
+            "hwm grew: freelist should have prevented new allocations"
         );
     }
 
     #[test]
     fn pool_exhausted_error_when_capacity_exceeded() {
         let mut graph = ModuleGraph::new();
-        let sine = NodeId::from("sine");
-        let out = NodeId::from("out");
-        graph.add_module(sine.clone(), Box::new(SineOscillator::new(440.0))).unwrap();
-        graph.add_module(out.clone(), Box::new(AudioOut::new())).unwrap();
-        graph.connect(&sine, p("out"), &out, p("left"), 1.0).unwrap();
-        graph.connect(&sine, p("out"), &out, p("right"), 1.0).unwrap();
-
+        let sine_desc = SineOscillator::describe(&ModuleShape { channels: 0 });
+        let out_desc = AudioOut::describe(&ModuleShape { channels: 0 });
+        let mut pm = ParameterMap::new();
+        pm.insert("frequency".to_string(), ParameterValue::Float(440.0));
+        graph.add_module("sine", sine_desc, &pm).unwrap();
+        graph.add_module("out", out_desc, &ParameterMap::new()).unwrap();
+        graph.connect(&NodeId::from("sine"), p("out"), &NodeId::from("out"), p("left"), 1.0).unwrap();
+        graph.connect(&NodeId::from("sine"), p("out"), &NodeId::from("out"), p("right"), 1.0).unwrap();
+        let registry = default_registry();
+        let env = default_env();
         assert!(matches!(
-            build_patch(graph, &BufferAllocState::default(), &ModuleAllocState::default(), 1, 256),
+            PatchBuilder::new(1, 256).build_patch(&graph, &registry, &env, &PlannerState::empty()),
             Err(BuildError::PoolExhausted)
         ));
+    }
+
+    // ── Diffing acceptance tests (T-0073) ─────────────────────────────────────
+
+    #[test]
+    fn new_node_all_modules_in_new_modules() {
+        let graph = sine_to_audio_out_graph();
+        let registry = default_registry();
+        let env = default_env();
+        let (plan, _state) = default_builder()
+            .build_patch(&graph, &registry, &env, &PlannerState::empty())
+            .unwrap();
+        // All 2 nodes are new: sine + AudioOut → both should appear in new_modules.
+        assert_eq!(
+            plan.new_modules.len(),
+            2,
+            "all nodes are new on first build"
+        );
+    }
+
+    #[test]
+    fn surviving_node_no_new_modules_same_instance_id() {
+        let graph = sine_to_audio_out_graph();
+        let registry = default_registry();
+        let env = default_env();
+        let builder = default_builder();
+        let (_plan_a, state_a) =
+            builder.build_patch(&graph, &registry, &env, &PlannerState::empty()).unwrap();
+        let id_sine_a = state_a.nodes[&NodeId::from("a_sine")].instance_id;
+        let id_out_a = state_a.nodes[&NodeId::from("b_out")].instance_id;
+
+        let (plan_b, state_b) = builder.build_patch(&graph, &registry, &env, &state_a).unwrap();
+        // Same graph: all nodes are surviving → no new_modules.
+        assert!(plan_b.new_modules.is_empty(), "no new modules on identical rebuild");
+        // InstanceIds must be stable.
+        assert_eq!(state_b.nodes[&NodeId::from("a_sine")].instance_id, id_sine_a);
+        assert_eq!(state_b.nodes[&NodeId::from("b_out")].instance_id, id_out_a);
+    }
+
+    #[test]
+    fn removed_node_tombstone() {
+        let registry = default_registry();
+        let env = default_env();
+        let builder = default_builder();
+
+        // Graph with two sines.
+        let mut graph_a = ModuleGraph::new();
+        {
+            let s1 = SineOscillator::describe(&ModuleShape { channels: 0 });
+            let s2 = SineOscillator::describe(&ModuleShape { channels: 0 });
+            let out = AudioOut::describe(&ModuleShape { channels: 0 });
+            let mut p1 = ParameterMap::new();
+            p1.insert("frequency".to_string(), ParameterValue::Float(440.0));
+            let mut p2 = ParameterMap::new();
+            p2.insert("frequency".to_string(), ParameterValue::Float(880.0));
+            graph_a.add_module("s1", s1, &p1).unwrap();
+            graph_a.add_module("s2", s2, &p2).unwrap();
+            graph_a.add_module("out", out, &ParameterMap::new()).unwrap();
+            graph_a.connect(&NodeId::from("s1"), p("out"), &NodeId::from("out"), p("left"), 1.0).unwrap();
+            graph_a.connect(&NodeId::from("s2"), p("out"), &NodeId::from("out"), p("right"), 1.0).unwrap();
+        }
+        let (_plan_a, state_a) =
+            builder.build_patch(&graph_a, &registry, &env, &PlannerState::empty()).unwrap();
+        let s2_slot = state_a.nodes[&NodeId::from("s2")].pool_index;
+
+        // Graph with only s1.
+        let mut graph_b = ModuleGraph::new();
+        {
+            let s1 = SineOscillator::describe(&ModuleShape { channels: 0 });
+            let out = AudioOut::describe(&ModuleShape { channels: 0 });
+            let mut p1 = ParameterMap::new();
+            p1.insert("frequency".to_string(), ParameterValue::Float(440.0));
+            graph_b.add_module("s1", s1, &p1).unwrap();
+            graph_b.add_module("out", out, &ParameterMap::new()).unwrap();
+            graph_b.connect(&NodeId::from("s1"), p("out"), &NodeId::from("out"), p("left"), 1.0).unwrap();
+            graph_b.connect(&NodeId::from("s1"), p("out"), &NodeId::from("out"), p("right"), 1.0).unwrap();
+        }
+        let (plan_b, _state_b) =
+            builder.build_patch(&graph_b, &registry, &env, &state_a).unwrap();
+
+        assert!(
+            plan_b.tombstones.contains(&s2_slot),
+            "removed s2 pool slot must be tombstoned"
+        );
+    }
+
+    #[test]
+    fn type_changed_node_tombstone_and_new_module() {
+        let registry = default_registry();
+        let env = default_env();
+        let builder = default_builder();
+
+        // Graph A: SineOscillator at "osc".
+        let mut graph_a = ModuleGraph::new();
+        {
+            let sine = SineOscillator::describe(&ModuleShape { channels: 0 });
+            let out = AudioOut::describe(&ModuleShape { channels: 0 });
+            let mut pm = ParameterMap::new();
+            pm.insert("frequency".to_string(), ParameterValue::Float(440.0));
+            graph_a.add_module("osc", sine, &pm).unwrap();
+            graph_a.add_module("out", out, &ParameterMap::new()).unwrap();
+            // SineOscillator has no inputs so we wire its "out" to both channels.
+            graph_a.connect(&NodeId::from("osc"), p("out"), &NodeId::from("out"), p("left"), 1.0).unwrap();
+            graph_a.connect(&NodeId::from("osc"), p("out"), &NodeId::from("out"), p("right"), 1.0).unwrap();
+        }
+        let (_plan_a, state_a) =
+            builder.build_patch(&graph_a, &registry, &env, &PlannerState::empty()).unwrap();
+        let old_osc_id = state_a.nodes[&NodeId::from("osc")].instance_id;
+        let old_osc_slot = state_a.nodes[&NodeId::from("osc")].pool_index;
+
+        // Graph B: SawtoothOscillator at "osc" (type changed).
+        let mut graph_b = ModuleGraph::new();
+        {
+            let saw = SawtoothOscillator::describe(&ModuleShape { channels: 0 });
+            let out = AudioOut::describe(&ModuleShape { channels: 0 });
+            graph_b.add_module("osc", saw, &ParameterMap::new()).unwrap();
+            graph_b.add_module("out", out, &ParameterMap::new()).unwrap();
+            // SawtoothOscillator has a "voct" input (wired to zero buffer implicitly).
+            graph_b.connect(&NodeId::from("osc"), p("out"), &NodeId::from("out"), p("left"), 1.0).unwrap();
+            graph_b.connect(&NodeId::from("osc"), p("out"), &NodeId::from("out"), p("right"), 1.0).unwrap();
+        }
+        let (plan_b, state_b) =
+            builder.build_patch(&graph_b, &registry, &env, &state_a).unwrap();
+
+        let new_osc_id = state_b.nodes[&NodeId::from("osc")].instance_id;
+
+        // InstanceId must have changed (new module, new identity).
+        assert_ne!(new_osc_id, old_osc_id, "type-changed node must receive a new InstanceId");
+        // Old slot must be tombstoned.
+        assert!(
+            plan_b.tombstones.contains(&old_osc_slot),
+            "old osc pool slot must be tombstoned on type change"
+        );
+        // Exactly one new module installed (the new SawtoothOscillator; AudioOut survives).
+        assert_eq!(plan_b.new_modules.len(), 1, "only the type-changed node should be new");
     }
 
     // ── ModuleAllocState unit tests ───────────────────────────────────────────
 
     fn make_ids(n: u64) -> Vec<InstanceId> {
-        (0..n)
-            .map(|_| SineOscillator::new(440.0).instance_id())
-            .collect()
+        (0..n).map(|_| InstanceId::next()).collect()
     }
 
     fn ids_set(ids: &[InstanceId]) -> HashSet<InstanceId> {
@@ -877,6 +1271,163 @@ mod tests {
         assert!(
             matches!(result, Err(BuildError::ModulePoolExhausted)),
             "expected ModulePoolExhausted, got {result:?}"
+        );
+    }
+
+    // ── Parameter diff acceptance tests (T-0074) ──────────────────────────────
+
+    /// Parameter-only change: surviving module, one key changed.
+    /// Expect `parameter_updates` is non-empty, `new_modules` is empty.
+    #[test]
+    fn parameter_only_change_produces_parameter_updates_no_new_modules() {
+        let registry = default_registry();
+        let env = default_env();
+        let builder = default_builder();
+
+        // Build initial graph with sine at 440 Hz.
+        let graph_a = sine_to_audio_out_graph();
+        let (_plan_a, state_a) =
+            builder.build_patch(&graph_a, &registry, &env, &PlannerState::empty()).unwrap();
+
+        // Rebuild with same topology but different frequency.
+        let mut graph_b = ModuleGraph::new();
+        {
+            let sine_desc = SineOscillator::describe(&ModuleShape { channels: 0 });
+            let out_desc = AudioOut::describe(&ModuleShape { channels: 0 });
+            let mut sine_params = ParameterMap::new();
+            sine_params.insert("frequency".to_string(), ParameterValue::Float(880.0));
+            graph_b.add_module("a_sine", sine_desc, &sine_params).unwrap();
+            graph_b.add_module("b_out", out_desc, &ParameterMap::new()).unwrap();
+            graph_b
+                .connect(&NodeId::from("a_sine"), p("out"), &NodeId::from("b_out"), p("left"), 1.0)
+                .unwrap();
+            graph_b
+                .connect(
+                    &NodeId::from("a_sine"),
+                    p("out"),
+                    &NodeId::from("b_out"),
+                    p("right"),
+                    1.0,
+                )
+                .unwrap();
+        }
+
+        let (plan_b, _state_b) =
+            builder.build_patch(&graph_b, &registry, &env, &state_a).unwrap();
+
+        assert!(plan_b.new_modules.is_empty(), "parameter-only change must not produce new_modules");
+        assert!(
+            !plan_b.parameter_updates.is_empty(),
+            "parameter-only change must produce parameter_updates"
+        );
+
+        // The diff should contain exactly the changed key.
+        let sine_slot = state_a.nodes[&NodeId::from("a_sine")].pool_index;
+        let update = plan_b
+            .parameter_updates
+            .iter()
+            .find(|(idx, _)| *idx == sine_slot)
+            .expect("update entry for sine must be present");
+        assert!(
+            matches!(update.1.get("frequency"), Some(ParameterValue::Float(f)) if (*f - 880.0).abs() < 1e-9),
+            "diff must contain updated frequency"
+        );
+    }
+
+    /// Unchanged parameters: surviving module with same parameters.
+    /// Expect `parameter_updates` is empty.
+    #[test]
+    fn unchanged_parameters_produce_empty_parameter_updates() {
+        let registry = default_registry();
+        let env = default_env();
+        let builder = default_builder();
+
+        let graph = sine_to_audio_out_graph();
+        let (_plan_a, state_a) =
+            builder.build_patch(&graph, &registry, &env, &PlannerState::empty()).unwrap();
+        let (plan_b, _state_b) =
+            builder.build_patch(&graph, &registry, &env, &state_a).unwrap();
+
+        assert!(
+            plan_b.parameter_updates.is_empty(),
+            "unchanged parameters must produce empty parameter_updates"
+        );
+    }
+
+    /// Topology change (add/remove node) works correctly alongside parameter diffs.
+    /// Removed module is tombstoned; surviving module with a changed parameter
+    /// appears in `parameter_updates`; new module appears in `new_modules`.
+    #[test]
+    fn topology_change_and_parameter_diff_coexist() {
+        let registry = default_registry();
+        let env = default_env();
+        let builder = default_builder();
+
+        // Graph A: sine_a (440 Hz) + sine_b (880 Hz) → AudioOut.
+        let mut graph_a = ModuleGraph::new();
+        {
+            let s_a = SineOscillator::describe(&ModuleShape { channels: 0 });
+            let s_b = SineOscillator::describe(&ModuleShape { channels: 0 });
+            let out = AudioOut::describe(&ModuleShape { channels: 0 });
+            let mut pa = ParameterMap::new();
+            pa.insert("frequency".to_string(), ParameterValue::Float(440.0));
+            let mut pb = ParameterMap::new();
+            pb.insert("frequency".to_string(), ParameterValue::Float(880.0));
+            graph_a.add_module("s_a", s_a, &pa).unwrap();
+            graph_a.add_module("s_b", s_b, &pb).unwrap();
+            graph_a.add_module("out", out, &ParameterMap::new()).unwrap();
+            graph_a
+                .connect(&NodeId::from("s_a"), p("out"), &NodeId::from("out"), p("left"), 1.0)
+                .unwrap();
+            graph_a
+                .connect(&NodeId::from("s_b"), p("out"), &NodeId::from("out"), p("right"), 1.0)
+                .unwrap();
+        }
+        let (_plan_a, state_a) =
+            builder.build_patch(&graph_a, &registry, &env, &PlannerState::empty()).unwrap();
+        let s_b_slot = state_a.nodes[&NodeId::from("s_b")].pool_index;
+
+        // Graph B: sine_a (changed to 660 Hz) + new sine_c (1000 Hz), sine_b removed.
+        let mut graph_b = ModuleGraph::new();
+        {
+            let s_a = SineOscillator::describe(&ModuleShape { channels: 0 });
+            let s_c = SineOscillator::describe(&ModuleShape { channels: 0 });
+            let out = AudioOut::describe(&ModuleShape { channels: 0 });
+            let mut pa = ParameterMap::new();
+            pa.insert("frequency".to_string(), ParameterValue::Float(660.0));
+            let mut pc = ParameterMap::new();
+            pc.insert("frequency".to_string(), ParameterValue::Float(1000.0));
+            graph_b.add_module("s_a", s_a, &pa).unwrap();
+            graph_b.add_module("s_c", s_c, &pc).unwrap();
+            graph_b.add_module("out", out, &ParameterMap::new()).unwrap();
+            graph_b
+                .connect(&NodeId::from("s_a"), p("out"), &NodeId::from("out"), p("left"), 1.0)
+                .unwrap();
+            graph_b
+                .connect(&NodeId::from("s_c"), p("out"), &NodeId::from("out"), p("right"), 1.0)
+                .unwrap();
+        }
+        let (plan_b, _state_b) =
+            builder.build_patch(&graph_b, &registry, &env, &state_a).unwrap();
+
+        // s_b was removed → tombstoned.
+        assert!(plan_b.tombstones.contains(&s_b_slot), "s_b must be tombstoned");
+        // s_c is new → appears in new_modules (pool_index may vary; just check count).
+        // s_a is surviving with changed param → appears in parameter_updates.
+        let s_a_slot = state_a.nodes[&NodeId::from("s_a")].pool_index;
+        let has_s_a_update = plan_b
+            .parameter_updates
+            .iter()
+            .any(|(idx, diff)| {
+                *idx == s_a_slot
+                    && matches!(diff.get("frequency"), Some(ParameterValue::Float(f)) if (*f - 660.0).abs() < 1e-9)
+            });
+        assert!(has_s_a_update, "s_a parameter update must appear in parameter_updates");
+        // s_c must not appear in parameter_updates (it is new, not surviving).
+        assert_eq!(
+            plan_b.new_modules.iter().filter(|(_, m)| m.descriptor().module_name == "SineOscillator").count(),
+            1,
+            "exactly one new SineOscillator (s_c) in new_modules"
         );
     }
 }

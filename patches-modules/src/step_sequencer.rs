@@ -167,7 +167,7 @@ impl Module for StepSequencer {
             descriptor,
             steps: Vec::new(),
             step_index: 0,
-            playing: false,
+            playing: true,
             current_pitch: 0.0,
             trigger_pending: false,
             prev_clock: 0.0,

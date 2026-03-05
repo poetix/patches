@@ -109,6 +109,30 @@ pub fn validate_parameters(
     Ok(())
 }
 
+/// Describes which input and output ports of a module are connected in the current patch.
+///
+/// `inputs[i]` is `true` if the i-th input port (as listed in [`ModuleDescriptor::inputs`])
+/// has at least one incoming cable; `outputs[i]` is `true` if the i-th output port has at
+/// least one outgoing cable.
+///
+/// Construct with [`PortConnectivity::new`], which fills both slices with `false`.
+#[derive(Debug, Clone)]
+pub struct PortConnectivity {
+    pub inputs: Box<[bool]>,
+    pub outputs: Box<[bool]>,
+}
+
+impl PortConnectivity {
+    /// Create an all-`false` instance sized for a module with `n_inputs` input ports and
+    /// `n_outputs` output ports.
+    pub fn new(n_inputs: usize, n_outputs: usize) -> Self {
+        Self {
+            inputs: vec![false; n_inputs].into_boxed_slice(),
+            outputs: vec![false; n_outputs].into_boxed_slice(),
+        }
+    }
+}
+
 /// The core trait all audio modules implement.
 ///
 /// Construction follows a two-phase protocol:
@@ -215,6 +239,18 @@ pub trait Module: Send {
     /// override this method. Unknown signal variants or parameter names should be
     /// silently ignored.
     fn receive_signal(&mut self, _signal: ControlSignal) {}
+
+    /// Inform the module which of its ports are connected in the current patch.
+    ///
+    /// Called by the engine whenever the patch topology changes (e.g. after a hot-reload).
+    /// Implementations may use this to skip computation for unconnected ports, cache
+    /// derived coefficients, or mirror state across channels.
+    ///
+    /// **Implementations must not allocate, block, or perform I/O.** This method may be
+    /// called on the audio thread immediately before the next `process` call.
+    ///
+    /// The default implementation is a no-op.
+    fn set_connectivity(&mut self, _connectivity: PortConnectivity) {}
 
     fn as_any(&self) -> &dyn std::any::Any;
 

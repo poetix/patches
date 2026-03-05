@@ -10,7 +10,7 @@ pub mod audio_environment;
 pub mod instance_id;
 
 pub use graph::{GraphError, ModuleGraph, Node, NodeId};
-pub use module::{validate_parameters, ControlSignal, Module, Sink};
+pub use module::{validate_parameters, ControlSignal, Module, PortConnectivity, Sink};
 pub use module_descriptor::{ModuleDescriptor, ModuleShape, ParameterDescriptor, ParameterKind, PortDescriptor, PortRef};
 pub use module_builder::ModuleBuilder;
 pub use registry::Registry;

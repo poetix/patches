@@ -23,10 +23,8 @@ pub(crate) struct AudioCallback {
     samples_until_next_control: usize,
     wi_counter: usize,
     /// Producer end of the cleanup ring buffer. Tombstoned modules are pushed here
-    /// (T-0052) so that deallocation happens on the cleanup thread, not the audio thread.
-    /// Unused until T-0052; stored here so that dropping the stream drops the producer,
-    /// signalling the cleanup thread to exit.
-    #[allow(dead_code)]
+    /// so that deallocation happens on the cleanup thread, not the audio thread.
+    /// Dropping the stream drops this producer, signalling the cleanup thread to exit.
     cleanup_tx: rtrb::Producer<Box<dyn Module>>,
 }
 
@@ -90,7 +88,14 @@ impl AudioCallback {
             // tombstoned slots for new modules, so we must clear old entries
             // before installing new ones.
             for &idx in &new_plan.tombstones {
-                self.module_pool.tombstone(idx);
+                if let Some(module) = self.module_pool.tombstone(idx) {
+                    if let Err(rtrb::PushError::Full(module)) = self.cleanup_tx.push(module) {
+                        eprintln!(
+                            "patches: cleanup ring buffer full — dropping module on audio thread (slot {idx})"
+                        );
+                        drop(module);
+                    }
+                }
             }
             // Install new modules (already initialised by swap_plan).
             for (idx, module) in new_plan.new_modules.drain(..) {

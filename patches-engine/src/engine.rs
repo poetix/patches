@@ -96,6 +96,116 @@ impl fmt::Display for EngineError {
 
 impl std::error::Error for EngineError {}
 
+#[cfg(test)]
+mod tests {
+    use std::any::Any;
+    use std::sync::{Arc, Mutex};
+
+    use patches_core::{AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleShape};
+    use patches_core::parameter_map::ParameterMap;
+
+    struct ThreadIdDropSpy {
+        instance_id: InstanceId,
+        descriptor: ModuleDescriptor,
+        drop_thread: Arc<Mutex<Option<String>>>,
+    }
+
+    impl ThreadIdDropSpy {
+        fn new(drop_thread: Arc<Mutex<Option<String>>>) -> Self {
+            Self {
+                instance_id: InstanceId::next(),
+                descriptor: ModuleDescriptor {
+                    module_name: "ThreadIdDropSpy",
+                    shape: ModuleShape { channels: 0, length: 0 },
+                    inputs: vec![],
+                    outputs: vec![],
+                    parameters: vec![],
+                    is_sink: false,
+                },
+                drop_thread,
+            }
+        }
+    }
+
+    impl Drop for ThreadIdDropSpy {
+        fn drop(&mut self) {
+            let name = std::thread::current().name().map(str::to_owned);
+            *self.drop_thread.lock().unwrap() = name;
+        }
+    }
+
+    impl Module for ThreadIdDropSpy {
+        fn describe(_shape: &ModuleShape) -> ModuleDescriptor {
+            ModuleDescriptor {
+                module_name: "ThreadIdDropSpy",
+                shape: ModuleShape { channels: 0, length: 0 },
+                inputs: vec![],
+                outputs: vec![],
+                parameters: vec![],
+                is_sink: false,
+            }
+        }
+
+        fn prepare(_env: &AudioEnvironment, descriptor: ModuleDescriptor) -> Self {
+            Self {
+                instance_id: InstanceId::next(),
+                descriptor,
+                drop_thread: Arc::new(Mutex::new(None)),
+            }
+        }
+
+        fn update_validated_parameters(&mut self, _params: &ParameterMap) {}
+
+        fn descriptor(&self) -> &ModuleDescriptor {
+            &self.descriptor
+        }
+
+        fn instance_id(&self) -> InstanceId {
+            self.instance_id
+        }
+
+        fn process(&mut self, _inputs: &[f64], _outputs: &mut [f64]) {}
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    /// The cleanup channel and thread can be exercised in isolation without CPAL.
+    ///
+    /// A `ThreadIdDropSpy` pushed to the ring buffer must be dropped on the
+    /// thread named `"patches-cleanup"`, not on the test thread.
+    #[test]
+    fn tombstoned_module_dropped_on_cleanup_thread() {
+        let drop_thread: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let spy = Box::new(ThreadIdDropSpy::new(Arc::clone(&drop_thread)));
+        let (mut tx, rx) = rtrb::RingBuffer::<Box<dyn Module>>::new(16);
+
+        let handle = std::thread::Builder::new()
+            .name("patches-cleanup".to_owned())
+            .spawn(move || {
+                let mut rx = rx;
+                loop {
+                    while let Ok(module) = rx.pop() {
+                        drop(module);
+                    }
+                    if rx.is_abandoned() {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            })
+            .unwrap();
+
+        tx.push(spy).unwrap();
+        drop(tx); // abandon producer → cleanup thread exits
+        handle.join().unwrap();
+
+        let recorded = drop_thread.lock().unwrap().clone();
+        assert_eq!(recorded, Some("patches-cleanup".to_owned()));
+    }
+}
+
 /// Drives an [`ExecutionPlan`] continuously, writing stereo output to the
 /// default hardware audio device via CPAL.
 ///
@@ -105,8 +215,10 @@ impl std::error::Error for EngineError {}
 /// channel (`rtrb`).
 ///
 /// When the audio callback adopts a new plan it:
-///   1. Installs `new_modules` into the module pool.
-///   2. Takes tombstoned modules out of the pool (dropping them).
+///   1. Takes tombstoned modules out of the pool and sends them to the cleanup
+///      ring buffer so they are deallocated off the audio thread. If the ring
+///      buffer is full the module is dropped inline with a diagnostic message.
+///   2. Installs `new_modules` into the module pool.
 ///   3. Zeros `to_zero` cable buffer slots.
 ///   4. Replaces `current_plan`.
 ///

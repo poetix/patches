@@ -43,16 +43,18 @@ impl ModulePool {
         }
     }
 
-    /// Drop the module at `idx`, leaving the slot empty.
+    /// Remove the module at `idx`, leaving the slot empty, and return it.
     ///
+    /// Returns `None` if the slot was already empty.
     /// If the slot held the registered sink, the sink cache is cleared.
-    pub fn tombstone(&mut self, idx: usize) {
-        self.modules[idx].take();
+    pub fn tombstone(&mut self, idx: usize) -> Option<Box<dyn Module>> {
+        let module = self.modules[idx].take();
         if self.sink_slot == Some(idx) {
             self.sink_slot = None;
             self.last_sink_left = 0.0;
             self.last_sink_right = 0.0;
         }
+        module
     }
 
     /// Install `module` at `idx`, replacing any previous occupant.

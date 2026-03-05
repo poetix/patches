@@ -4,7 +4,10 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
-[dev-dependencies]
+[dependencies]
 patches-core = { path = "../patches-core" }
 patches-engine = { path = "../patches-engine" }
+rtrb = "0.3"
+
+[dev-dependencies]
 patches-modules = { path = "../patches-modules" }

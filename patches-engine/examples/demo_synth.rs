@@ -44,41 +44,41 @@ fn build_graph() -> Result<ModuleGraph, Box<dyn std::error::Error>> {
     clock_params.insert("bpm".to_string(), ParameterValue::Float(BPM));
     clock_params.insert("beats_per_bar".to_string(), ParameterValue::Int(BEATS_PER_BAR as i64));
     clock_params.insert("quavers_per_beat".to_string(), ParameterValue::Int(QUAVERS_PER_BEAT as i64));
-    graph.add_module(clock.clone(), ClockSequencer::describe(&ModuleShape { channels: 0 }), &clock_params)?;
+    graph.add_module(clock.clone(), ClockSequencer::describe(&ModuleShape { channels: 0, length: 0 }), &clock_params)?;
 
     let mut seq_params = ParameterMap::new();
     seq_params.insert("steps".to_string(), ParameterValue::Array(
         PATTERN.iter().map(|s| s.to_string()).collect(),
     ));
-    graph.add_module(seq.clone(), StepSequencer::describe(&ModuleShape { channels: 0 }), &seq_params)?;
+    graph.add_module(seq.clone(), StepSequencer::describe(&ModuleShape { channels: 0, length: 16 }), &seq_params)?;
 
     let mut glide_params = ParameterMap::new();
     glide_params.insert("glide_ms".to_string(), ParameterValue::Float(50.0));
-    graph.add_module(glide.clone(), Glide::describe(&ModuleShape { channels: 0 }), &glide_params)?;
+    graph.add_module(glide.clone(), Glide::describe(&ModuleShape { channels: 0, length: 0 }), &glide_params)?;
 
     let mut lfo_params = ParameterMap::new();
     lfo_params.insert("frequency".to_string(), ParameterValue::Float(0.2));
-    graph.add_module(lfo.clone(), SineOscillator::describe(&ModuleShape { channels: 0 }), &lfo_params)?;
+    graph.add_module(lfo.clone(), SineOscillator::describe(&ModuleShape { channels: 0, length: 0 }), &lfo_params)?;
 
     let mut saw_params = ParameterMap::new();
     saw_params.insert("base_voct".to_string(), ParameterValue::Float(0.0));
-    graph.add_module(saw.clone(), SawtoothOscillator::describe(&ModuleShape { channels: 0 }), &saw_params)?;
+    graph.add_module(saw.clone(), SawtoothOscillator::describe(&ModuleShape { channels: 0, length: 0 }), &saw_params)?;
 
     let mut sq_params = ParameterMap::new();
     sq_params.insert("base_voct".to_string(), ParameterValue::Float(1.005));
-    graph.add_module(sq.clone(), SquareOscillator::describe(&ModuleShape { channels: 0 }), &sq_params)?;
+    graph.add_module(sq.clone(), SquareOscillator::describe(&ModuleShape { channels: 0, length: 0 }), &sq_params)?;
 
-    graph.add_module(mix.clone(), Sum::describe(&ModuleShape { channels: 2 }), &ParameterMap::new())?;
+    graph.add_module(mix.clone(), Sum::describe(&ModuleShape { channels: 2, length: 0 }), &ParameterMap::new())?;
 
     let mut env_params = ParameterMap::new();
     env_params.insert("attack".to_string(), ParameterValue::Float(ATTACK_SECS));
     env_params.insert("decay".to_string(), ParameterValue::Float(DECAY_SECS));
     env_params.insert("sustain".to_string(), ParameterValue::Float(SUSTAIN));
     env_params.insert("release".to_string(), ParameterValue::Float(RELEASE_SECS));
-    graph.add_module(env.clone(), AdsrEnvelope::describe(&ModuleShape { channels: 0 }), &env_params)?;
+    graph.add_module(env.clone(), AdsrEnvelope::describe(&ModuleShape { channels: 0, length: 0 }), &env_params)?;
 
-    graph.add_module(vca.clone(), Vca::describe(&ModuleShape { channels: 0 }), &ParameterMap::new())?;
-    graph.add_module(out.clone(), AudioOut::describe(&ModuleShape { channels: 0 }), &ParameterMap::new())?;
+    graph.add_module(vca.clone(), Vca::describe(&ModuleShape { channels: 0, length: 0 }), &ParameterMap::new())?;
+    graph.add_module(out.clone(), AudioOut::describe(&ModuleShape { channels: 0, length: 0 }), &ParameterMap::new())?;
 
     let p = |name| PortRef { name, index: 0 };
 

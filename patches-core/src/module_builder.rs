@@ -89,7 +89,7 @@ mod tests {
     #[test]
     fn build_a_module() {
         let audio_environment = AudioEnvironment { sample_rate: 44100.0 };
-        let shape = ModuleShape { channels: 2 };
+        let shape = ModuleShape { channels: 2, length: 0 };
         let params = ParameterMap::new();
         let builder = Builder::<TestModule>(PhantomData);
         let module = builder.build(&audio_environment, &shape, &params).unwrap();

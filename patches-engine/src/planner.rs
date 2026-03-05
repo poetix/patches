@@ -280,8 +280,8 @@ mod tests {
 
     fn simple_graph(freq: f64) -> ModuleGraph {
         let mut graph = ModuleGraph::new();
-        let osc_desc = SineOscillator::describe(&ModuleShape { channels: 0 });
-        let out_desc = AudioOut::describe(&ModuleShape { channels: 0 });
+        let osc_desc = SineOscillator::describe(&ModuleShape { channels: 0, length: 0 });
+        let out_desc = AudioOut::describe(&ModuleShape { channels: 0, length: 0 });
         let mut pm = ParameterMap::new();
         pm.insert("frequency".to_string(), ParameterValue::Float(freq));
         graph.add_module("osc", osc_desc, &pm).unwrap();
@@ -340,8 +340,8 @@ mod tests {
     }
 
     fn counter_graph() -> ModuleGraph {
-        let counter_desc = Counter::describe(&ModuleShape { channels: 0 });
-        let out_desc = AudioOut::describe(&ModuleShape { channels: 0 });
+        let counter_desc = Counter::describe(&ModuleShape { channels: 0, length: 0 });
+        let out_desc = AudioOut::describe(&ModuleShape { channels: 0, length: 0 });
         let mut g = ModuleGraph::new();
         g.add_module("counter", counter_desc, &ParameterMap::new()).unwrap();
         g.add_module("out", out_desc, &ParameterMap::new()).unwrap();
@@ -503,8 +503,8 @@ mod tests {
     }
 
     fn receiver_graph() -> ModuleGraph {
-        let recv_desc = SignalReceiver::describe(&ModuleShape { channels: 0 });
-        let out_desc = AudioOut::describe(&ModuleShape { channels: 0 });
+        let recv_desc = SignalReceiver::describe(&ModuleShape { channels: 0, length: 0 });
+        let out_desc = AudioOut::describe(&ModuleShape { channels: 0, length: 0 });
         let mut g = ModuleGraph::new();
         g.add_module("recv", recv_desc, &ParameterMap::new()).unwrap();
         g.add_module("out", out_desc, &ParameterMap::new()).unwrap();

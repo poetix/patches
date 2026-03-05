@@ -4,5 +4,6 @@ members = [
     "patches-modules",
     "patches-engine",
     "patches-integration-tests",
+    "patches-player",
 ]
 resolver = "2"

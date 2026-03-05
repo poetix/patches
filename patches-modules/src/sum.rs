@@ -74,7 +74,7 @@ mod tests {
         r.create(
             "Sum",
             &AudioEnvironment { sample_rate: 44100.0 },
-            &ModuleShape { channels },
+            &ModuleShape { channels, length: 0 },
             &ParameterMap::new(),
         ).unwrap()
     }

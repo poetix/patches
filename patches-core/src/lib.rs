@@ -1,4 +1,5 @@
 pub mod graph;
+pub mod graph_yaml;
 pub mod module;
 pub mod build_error;
 pub mod module_descriptor;

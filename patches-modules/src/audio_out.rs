@@ -87,7 +87,7 @@ mod tests {
         r.create(
             "AudioOut",
             &AudioEnvironment { sample_rate: 44100.0 },
-            &ModuleShape { channels: 0 },
+            &ModuleShape { channels: 0, length: 0 },
             &ParameterMap::new(),
         ).unwrap()
     }

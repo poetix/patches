@@ -82,9 +82,19 @@ pub fn validate_parameters(
                     });
                 }
             }
-            // No bounds checking for arrays; any Vec<String> is valid.
-            // Content validation (e.g. parsing step patterns) belongs in update_parameters.
-            (ParameterKind::Array { .. }, ParameterValue::Array(_)) => {}
+            (ParameterKind::Array { length, .. }, ParameterValue::Array(v)) => {
+                if v.len() > *length {
+                    return Err(BuildError::Custom {
+                        module: descriptor.module_name,
+                        message: format!(
+                            "parameter '{}' has {} elements but capacity is {}",
+                            param_desc.name,
+                            v.len(),
+                            length,
+                        ),
+                    });
+                }
+            }
             _ => {
                 return Err(BuildError::InvalidParameterType {
                     module: descriptor.module_name,
@@ -236,13 +246,13 @@ mod tests {
     fn array_descriptor() -> ModuleDescriptor {
         ModuleDescriptor {
             module_name: "TestArrayModule",
-            shape: ModuleShape { channels: 0 },
+            shape: ModuleShape { channels: 0, length: 16 },
             inputs: vec![],
             outputs: vec![],
             parameters: vec![ParameterDescriptor {
                 name: "steps",
                 index: 0,
-                parameter_type: ParameterKind::Array { default: &[] },
+                parameter_type: ParameterKind::Array { default: &[], length: 16 },
             }],
             is_sink: false,
         }
@@ -257,6 +267,21 @@ mod tests {
         );
         let desc = array_descriptor();
         assert!(validate_parameters(&params, &desc).is_ok());
+    }
+
+    #[test]
+    fn array_value_exceeding_length_returns_error() {
+        let mut params = ParameterMap::new();
+        params.insert(
+            "steps".to_string(),
+            ParameterValue::Array(vec!["C3".to_string(); 17]),
+        );
+        let desc = array_descriptor();
+        let err = validate_parameters(&params, &desc).unwrap_err();
+        assert!(
+            matches!(err, BuildError::Custom { module: "TestArrayModule", .. }),
+            "expected Custom error for capacity exceeded, got: {err:?}"
+        );
     }
 
     #[test]

@@ -34,7 +34,12 @@ pub enum ParameterKind {
     /// The `default` field uses `&'static [&'static str]` so that the descriptor itself
     /// never allocates (consistent with ADR 0011). The `ParameterValue` it produces does
     /// allocate, but only at the non-realtime boundary.
-    Array { default: &'static [&'static str] },
+    ///
+    /// `length` is the maximum number of elements the pre-allocated backing array can hold.
+    /// It must match `ModuleShape::length` for the module that declares this parameter.
+    /// `validate_parameters` rejects any `ParameterValue::Array` whose element count
+    /// exceeds this limit.
+    Array { default: &'static [&'static str], length: usize },
 }
 
 impl ParameterKind {
@@ -45,7 +50,7 @@ impl ParameterKind {
             ParameterKind::Int   { default, .. } => ParameterValue::Int(*default),
             ParameterKind::Bool  { default }     => ParameterValue::Bool(*default),
             ParameterKind::Enum  { default, .. } => ParameterValue::Enum(default),
-            ParameterKind::Array { default }     => ParameterValue::Array(
+            ParameterKind::Array { default, .. } => ParameterValue::Array(
                 default.iter().map(|s| s.to_string()).collect()
             ),
         }
@@ -75,9 +80,17 @@ pub struct ParameterDescriptor {
     pub parameter_type: ParameterKind,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ModuleShape {
     pub channels: usize,
+    /// Pre-allocated step/slot count for sequencer-style modules.
+    ///
+    /// Set to `0` for modules that do not use array parameters. When non-zero,
+    /// the module factory uses this value to pre-allocate the backing array so
+    /// that subsequent `update_parameters` calls can write into the existing
+    /// allocation. If the shape changes between builds the planner will
+    /// tombstone the old instance and create a fresh one.
+    pub length: usize,
 }
 
 /// Describes the full layout of a module.
@@ -109,7 +122,7 @@ mod tests {
 
         let m = ModuleDescriptor {
             module_name: "Mixer",
-            shape: ModuleShape { channels: 2 },
+            shape: ModuleShape { channels: 2, length: 0 },
             inputs: vec![
                 PortDescriptor { name: "in", index: 0 },
                 PortDescriptor { name: "in", index: 1 },
@@ -136,6 +149,7 @@ mod tests {
         };
         assert_eq!(m.module_name, "Mixer");
         assert_eq!(m.shape.channels, 2);
+        assert_eq!(m.shape.length, 0);
         assert_eq!(m.inputs.len(), 6);
         assert_eq!(m.outputs.len(), 2);
         assert_eq!(m.parameters.len(), 8);

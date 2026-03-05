@@ -4,7 +4,7 @@ use crate::audio_environment::AudioEnvironment;
 use crate::build_error::BuildError;
 use crate::module::Module;
 use crate::module_builder::{Builder, ModuleBuilder};
-use crate::module_descriptor::ModuleShape;
+use crate::module_descriptor::{ModuleDescriptor, ModuleShape};
 use crate::parameter_map::ParameterMap;
 
 pub struct Registry {
@@ -26,9 +26,16 @@ impl Registry {
     where
         T: Module + 'static,
     {
-        let name = T::describe(&ModuleShape { channels: 0 }).module_name;
+        let name = T::describe(&ModuleShape { channels: 0, length: 0 }).module_name;
         self.builders
             .insert(name.to_string(), Box::new(Builder::<T>(PhantomData)));
+    }
+
+    pub fn describe(&self, name: &str, shape: &ModuleShape) -> Result<ModuleDescriptor, BuildError> {
+        self.builders
+            .get(name)
+            .map(|builder| builder.describe(shape))
+            .ok_or_else(|| BuildError::UnknownModule { name: name.to_string() })
     }
 
     pub fn create(
@@ -102,7 +109,7 @@ mod tests {
         let mut registry = Registry::new();
         registry.register::<TestModule>();
 
-        let shape = ModuleShape { channels: 2 };
+        let shape = ModuleShape { channels: 2, length: 0 };
         let params = ParameterMap::new();
         let audio_environment = AudioEnvironment { sample_rate: 44100.0 };
         let module = registry.create("TestModule", &audio_environment, &shape, &params).unwrap();

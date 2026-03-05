@@ -181,7 +181,7 @@ mod tests {
         r.create(
             "ClockSequencer",
             &AudioEnvironment { sample_rate: 44100.0 },
-            &ModuleShape { channels: 0 },
+            &ModuleShape { channels: 0, length: 0 },
             &params,
         ).unwrap()
     }
@@ -221,7 +221,7 @@ mod tests {
         let mut clock = r.create(
             "ClockSequencer",
             &AudioEnvironment { sample_rate: 1.0 },
-            &ModuleShape { channels: 0 },
+            &ModuleShape { channels: 0, length: 0 },
             &params,
         ).unwrap();
 

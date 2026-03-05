@@ -6,16 +6,18 @@ use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
 /// A portamento (pitch glide) module.
 ///
-/// Smooths frequency changes over a configurable time using a one-pole
-/// low-pass filter operating in log-frequency space to give perceptually
-/// linear glide. The glide time is set via the `"glide_ms"` parameter.
+/// Smooths V/OCT pitch values using a one-pole low-pass filter. Because V/OCT
+/// is a log-frequency scale (1 V/OCT = 1 octave), interpolating linearly in
+/// V/OCT space gives perceptually linear (constant-ratio) glide. The glide
+/// time is set via the `"glide_ms"` parameter.
 ///
 /// Constructed via the Module v2 protocol: `describe` → `prepare` →
 /// `update_validated_parameters`.
 pub struct Glide {
     instance_id: InstanceId,
     descriptor: ModuleDescriptor,
-    log_freq: f64,
+    /// Current smoothed V/OCT value (C2 = 0.0).
+    voct: f64,
     alpha: f64,
     beta: f64,
     glide_ms: f64,
@@ -62,7 +64,7 @@ impl Module for Glide {
         Self {
             instance_id: InstanceId::next(),
             descriptor,
-            log_freq: 0.0,
+            voct: 0.0,
             alpha: 0.01,
             beta: 0.0,
             glide_ms: 0.0,
@@ -95,9 +97,10 @@ impl Module for Glide {
     }
 
     fn process(&mut self, inputs: &[f64], outputs: &mut [f64]) {
-        let log_target = if inputs[0] > 0.0 { inputs[0].ln() } else { self.log_freq };
-        self.log_freq += self.beta * (log_target - self.log_freq);
-        outputs[0] = self.log_freq.exp();
+        // Input is V/OCT (C2 = 0.0). Interpolate directly in V/OCT space —
+        // no ln/exp needed since V/OCT is already a log-frequency scale.
+        self.voct += self.beta * (inputs[0] - self.voct);
+        outputs[0] = self.voct;
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -124,7 +127,7 @@ mod tests {
         r.create(
             "Glide",
             &AudioEnvironment { sample_rate },
-            &ModuleShape { channels: 0 },
+            &ModuleShape { channels: 0, length: 0 },
             &params,
         ).unwrap()
     }
@@ -149,25 +152,25 @@ mod tests {
     #[test]
     fn output_tracks_input_with_glide() {
         // With a non-zero glide time the output should not jump immediately to
-        // the target frequency. It should be moving toward it but still differ
+        // the target V/OCT. It should be moving toward it but still differ
         // from it after a small number of samples.
         let mut g = make_glide_sr(500.0, 44100.0);
-        let target_freq = 880.0_f64;
+        let start_voct = 1.0_f64; // C3
+        let target_voct = 2.0_f64; // C4
 
-        // Seed the log_freq by processing one sample at the starting frequency.
-        let start_freq = 440.0_f64;
+        // Seed the module at the starting V/OCT.
         let mut out = [0.0_f64; 1];
-        g.process(&[start_freq], &mut out);
+        g.process(&[start_voct], &mut out);
         let after_start = out[0];
 
-        // Now switch to a higher target and process a few samples.
-        g.process(&[target_freq], &mut out);
+        // Now switch to a higher target and process one more sample.
+        g.process(&[target_voct], &mut out);
         let after_step = out[0];
 
         // The output must not have jumped all the way to the target in one sample.
         assert!(
-            after_step < target_freq,
-            "expected output {after_step} to be below target {target_freq} (glide should smooth)"
+            after_step < target_voct,
+            "expected output {after_step} to be below target {target_voct} (glide should smooth)"
         );
         // But it must have moved in the right direction.
         assert!(
@@ -181,12 +184,30 @@ mod tests {
         // With glide_ms=0.0 beta must be 1.0 so the output matches the input
         // in the same sample.
         let mut g = make_glide_sr(0.0, 44100.0);
-        let target_freq = 880.0_f64;
+        let target_voct = 2.0_f64; // C4
         let mut out = [0.0_f64; 1];
-        g.process(&[target_freq], &mut out);
+        g.process(&[target_voct], &mut out);
         assert!(
-            (out[0] - target_freq).abs() < 1e-9,
+            (out[0] - target_voct).abs() < 1e-9,
             "expected instant tracking, got {}", out[0]
+        );
+    }
+
+    #[test]
+    fn c2_voct_zero_is_not_held() {
+        // C2 = 0.0 V/OCT. With zero glide the output must track it immediately.
+        // (The old Hz-based implementation treated 0.0 as invalid and held the
+        // previous value, causing C2 to sound like the previous note.)
+        let mut g = make_glide_sr(0.0, 44100.0);
+        let mut out = [0.0_f64; 1];
+        // Prime the module at C3 = 1.0 V/OCT.
+        g.process(&[1.0], &mut out);
+        assert!((out[0] - 1.0).abs() < 1e-9);
+        // Now target C2 = 0.0 V/OCT; output must follow.
+        g.process(&[0.0], &mut out);
+        assert!(
+            out[0].abs() < 1e-9,
+            "C2 (0.0 V/OCT) must not be ignored; got {}", out[0]
         );
     }
 
@@ -196,16 +217,16 @@ mod tests {
         // zero glide via receive_signal and verify instant tracking.
         let mut g = make_glide_sr(5000.0, 44100.0);
 
-        // Seed the module at 440 Hz.
+        // Seed the module at C3 = 1.0 V/OCT.
         let mut out = [0.0_f64; 1];
-        g.process(&[440.0], &mut out);
+        g.process(&[1.0], &mut out);
 
-        // Verify that the output does not jump immediately to a new target.
-        g.process(&[880.0], &mut out);
+        // Verify that the output does not jump immediately to C4 = 2.0 V/OCT.
+        g.process(&[2.0], &mut out);
         let smooth_out = out[0];
         assert!(
-            smooth_out < 880.0,
-            "expected smoothed output {smooth_out} to be below 880 Hz with long glide"
+            smooth_out < 2.0,
+            "expected smoothed output {smooth_out} to be below 2.0 V/OCT with long glide"
         );
 
         // Now reduce glide to zero via receive_signal.
@@ -215,9 +236,9 @@ mod tests {
         });
 
         // Process at the target; output should now track immediately.
-        g.process(&[880.0], &mut out);
+        g.process(&[2.0], &mut out);
         assert!(
-            (out[0] - 880.0).abs() < 1e-9,
+            (out[0] - 2.0).abs() < 1e-9,
             "expected instant tracking after receive_signal(0 ms), got {}", out[0]
         );
     }

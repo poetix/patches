@@ -1,0 +1,153 @@
+# demo_synth.yaml — 16-step minor-pentatonic phrase at 120 BPM
+#
+# Signal flow:
+#
+#   clock ──semiquaver──→ seq ──pitch──→ glide ──out──→ saw ──out──┐
+#                          │                    └──────→ sq  ──out──┤ scale 0.3/0.7
+#                          ├──trigger──→ env                lfo ──→ sq.pulse_width
+#                          └──gate────→ env ──out──→ vca.cv
+#                                               mix ──out──→ vca ──out──→ out.left
+#                                                                    └──→ out.right
+#
+# Hot-reload tips:
+#   - Change bpm to speed up or slow down the pattern.
+#   - Edit the steps list to try different melodies ("-" = rest, "_" = hold/tie).
+#   - Adjust attack/decay/sustain/release for a different envelope shape.
+#   - Change glide_ms to add or remove portamento between notes.
+
+nodes:
+  clock:
+    module: ClockSequencer
+    params:
+      bpm: 120.0
+      beats_per_bar: 4
+      quavers_per_beat: 2
+
+  seq:
+    module: StepSequencer
+    length: 16
+    params:
+      steps:
+        - C3
+        - Eb3
+        - F3
+        - G3
+        - "-"
+        - Bb3
+        - "-"
+        - C4
+        - "-"
+        - G3
+        - F3
+        - Eb3
+        - "-"
+        - C3
+        - "_"
+        - "-"
+
+  glide:
+    module: Glide
+    params:
+      glide_ms: 50.0
+
+  lfo:
+    module: SineOscillator
+    params:
+      frequency: 0.2
+
+  saw:
+    module: SawtoothOscillator
+    params:
+      base_voct: 0.0
+
+  sq:
+    module: SquareOscillator
+    params:
+      base_voct: 1.005
+
+  mix:
+    module: Sum
+    channels: 2
+
+  env:
+    module: AdsrEnvelope
+    params:
+      attack: 0.001
+      decay: 0.05
+      sustain: 0.4
+      release: 0.2
+
+  vca:
+    module: Vca
+
+  out:
+    module: AudioOut
+
+cables:
+  - from: clock
+    output: semiquaver
+    to: seq
+    input: clock
+
+  - from: seq
+    output: pitch
+    to: glide
+    input: in
+
+  - from: glide
+    output: out
+    to: saw
+    input: voct
+
+  - from: glide
+    output: out
+    to: sq
+    input: voct
+
+  - from: seq
+    output: trigger
+    to: env
+    input: trigger
+
+  - from: seq
+    output: gate
+    to: env
+    input: gate
+
+  - from: lfo
+    output: out
+    to: sq
+    input: pulse_width
+    scale: 0.8
+
+  - from: saw
+    output: out
+    to: mix
+    input: in
+    scale: 0.3
+
+  - from: sq
+    output: out
+    to: mix
+    input: in/1
+    scale: 0.7
+
+  - from: mix
+    output: out
+    to: vca
+    input: in
+
+  - from: env
+    output: out
+    to: vca
+    input: cv
+
+  - from: vca
+    output: out
+    to: out
+    input: left
+
+  - from: vca
+    output: out
+    to: out
+    input: right

@@ -25,10 +25,10 @@ fn initial_graph() -> Result<ModuleGraph, Box<dyn std::error::Error>> {
     let mut params_e4 = ParameterMap::new();
     params_e4.insert("frequency".to_string(), ParameterValue::Float(FREQ_E4));
 
-    graph.add_module(osc_c4.clone(), SineOscillator::describe(&ModuleShape { channels: 0 }), &params_c4)?;
-    graph.add_module(osc_e4.clone(), SineOscillator::describe(&ModuleShape { channels: 0 }), &params_e4)?;
-    graph.add_module(mix.clone(), Sum::describe(&ModuleShape { channels: 2 }), &ParameterMap::new())?;
-    graph.add_module(out.clone(), AudioOut::describe(&ModuleShape { channels: 0 }), &ParameterMap::new())?;
+    graph.add_module(osc_c4.clone(), SineOscillator::describe(&ModuleShape { channels: 0, length: 0 }), &params_c4)?;
+    graph.add_module(osc_e4.clone(), SineOscillator::describe(&ModuleShape { channels: 0, length: 0 }), &params_e4)?;
+    graph.add_module(mix.clone(), Sum::describe(&ModuleShape { channels: 2, length: 0 }), &ParameterMap::new())?;
+    graph.add_module(out.clone(), AudioOut::describe(&ModuleShape { channels: 0, length: 0 }), &ParameterMap::new())?;
     let p = |name| PortRef { name, index: 0 };
     graph.connect(&osc_c4, p("out"), &mix, PortRef { name: "in", index: 0 }, 0.5)?;
     graph.connect(&osc_e4, p("out"), &mix, PortRef { name: "in", index: 1 }, 0.5)?;
@@ -53,10 +53,10 @@ fn updated_graph() -> Result<ModuleGraph, Box<dyn std::error::Error>> {
     let mut params_f4 = ParameterMap::new();
     params_f4.insert("frequency".to_string(), ParameterValue::Float(FREQ_F4));
 
-    graph.add_module(osc_c4.clone(), SineOscillator::describe(&ModuleShape { channels: 0 }), &params_c4)?;
-    graph.add_module(osc_f4.clone(), SineOscillator::describe(&ModuleShape { channels: 0 }), &params_f4)?;
-    graph.add_module(mix.clone(), Sum::describe(&ModuleShape { channels: 2 }), &ParameterMap::new())?;
-    graph.add_module(out.clone(), AudioOut::describe(&ModuleShape { channels: 0 }), &ParameterMap::new())?;
+    graph.add_module(osc_c4.clone(), SineOscillator::describe(&ModuleShape { channels: 0, length: 0 }), &params_c4)?;
+    graph.add_module(osc_f4.clone(), SineOscillator::describe(&ModuleShape { channels: 0, length: 0 }), &params_f4)?;
+    graph.add_module(mix.clone(), Sum::describe(&ModuleShape { channels: 2, length: 0 }), &ParameterMap::new())?;
+    graph.add_module(out.clone(), AudioOut::describe(&ModuleShape { channels: 0, length: 0 }), &ParameterMap::new())?;
     let p = |name| PortRef { name, index: 0 };
     graph.connect(&osc_c4, p("out"), &mix, PortRef { name: "in", index: 0 }, 0.5)?;
     graph.connect(&osc_f4, p("out"), &mix, PortRef { name: "in", index: 1 }, 0.5)?;

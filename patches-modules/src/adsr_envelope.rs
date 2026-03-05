@@ -204,7 +204,7 @@ mod tests {
         r.create(
             "AdsrEnvelope",
             &AudioEnvironment { sample_rate: 10.0 },
-            &ModuleShape { channels: 0 },
+            &ModuleShape { channels: 0, length: 0 },
             &params,
         ).unwrap()
     }
@@ -345,7 +345,7 @@ mod tests {
         let m = r.create(
             "AdsrEnvelope",
             &AudioEnvironment { sample_rate: 44100.0 },
-            &ModuleShape { channels: 0 },
+            &ModuleShape { channels: 0, length: 0 },
             &ParameterMap::new(),
         ).unwrap();
         let desc = m.descriptor();
@@ -361,7 +361,7 @@ mod tests {
         let mut r = Registry::new();
         r.register::<AdsrEnvelope>();
         let env = AudioEnvironment { sample_rate: 44100.0 };
-        let shape = ModuleShape { channels: 0 };
+        let shape = ModuleShape { channels: 0, length: 0 };
         let params = ParameterMap::new();
         let a = r.create("AdsrEnvelope", &env, &shape, &params).unwrap();
         let b = r.create("AdsrEnvelope", &env, &shape, &params).unwrap();

@@ -110,7 +110,7 @@ mod tests {
         r.create(
             "SineOscillator",
             &AudioEnvironment { sample_rate },
-            &ModuleShape { channels: 0 },
+            &ModuleShape { channels: 0, length: 0 },
             &params,
         ).unwrap()
     }

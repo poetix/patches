@@ -1,0 +1,14 @@
+[package]
+name = "patches-player"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "patch_player"
+path = "src/main.rs"
+
+[dependencies]
+patches-core    = { path = "../patches-core" }
+patches-engine  = { path = "../patches-engine" }
+patches-modules = { path = "../patches-modules" }

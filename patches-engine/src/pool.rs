@@ -165,7 +165,7 @@ mod tests {
                 value,
                 desc: ModuleDescriptor {
                     module_name: "ConstSource",
-                    shape: ModuleShape { channels: 0 },
+                    shape: ModuleShape { channels: 0, length: 0 },
                     inputs: vec![],
                     outputs: vec![PortDescriptor { name: "out", index: 0 }],
                     parameters: vec![],
@@ -179,7 +179,7 @@ mod tests {
         fn describe(_shape: &ModuleShape) -> ModuleDescriptor {
             ModuleDescriptor {
                 module_name: "ConstSource",
-                shape: ModuleShape { channels: 0 },
+                shape: ModuleShape { channels: 0, length: 0 },
                 inputs: vec![],
                 outputs: vec![PortDescriptor { name: "out", index: 0 }],
                 parameters: vec![],
@@ -225,7 +225,7 @@ mod tests {
                 last: 0.0,
                 desc: ModuleDescriptor {
                     module_name: "RecordingSink",
-                    shape: ModuleShape { channels: 0 },
+                    shape: ModuleShape { channels: 0, length: 0 },
                     inputs: vec![PortDescriptor { name: "in", index: 0 }],
                     outputs: vec![],
                     parameters: vec![],
@@ -239,7 +239,7 @@ mod tests {
         fn describe(_shape: &ModuleShape) -> ModuleDescriptor {
             ModuleDescriptor {
                 module_name: "RecordingSink",
-                shape: ModuleShape { channels: 0 },
+                shape: ModuleShape { channels: 0, length: 0 },
                 inputs: vec![PortDescriptor { name: "in", index: 0 }],
                 outputs: vec![],
                 parameters: vec![],

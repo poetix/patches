@@ -23,10 +23,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut params_b = ParameterMap::new();
     params_b.insert("frequency".to_string(), ParameterValue::Float(FREQ_CS5));
 
-    graph.add_module(sine_a.clone(), SineOscillator::describe(&ModuleShape { channels: 0 }), &params_a)?;
-    graph.add_module(sine_b.clone(), SineOscillator::describe(&ModuleShape { channels: 0 }), &params_b)?;
-    graph.add_module(mix.clone(), Sum::describe(&ModuleShape { channels: 2 }), &ParameterMap::new())?;
-    graph.add_module(out.clone(), AudioOut::describe(&ModuleShape { channels: 0 }), &ParameterMap::new())?;
+    graph.add_module(sine_a.clone(), SineOscillator::describe(&ModuleShape { channels: 0, length: 0 }), &params_a)?;
+    graph.add_module(sine_b.clone(), SineOscillator::describe(&ModuleShape { channels: 0, length: 0 }), &params_b)?;
+    graph.add_module(mix.clone(), Sum::describe(&ModuleShape { channels: 2, length: 0 }), &ParameterMap::new())?;
+    graph.add_module(out.clone(), AudioOut::describe(&ModuleShape { channels: 0, length: 0 }), &ParameterMap::new())?;
 
     let p = |name| PortRef { name, index: 0 };
     graph.connect(&sine_a, p("out"), &mix, PortRef { name: "in", index: 0 }, 0.5)?;

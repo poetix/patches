@@ -154,7 +154,7 @@ impl Module for StepSequencer {
                 ParameterDescriptor {
                     name: "steps",
                     index: 0,
-                    parameter_type: ParameterKind::Array { default: &[] },
+                    parameter_type: ParameterKind::Array { default: &[], length: shape.length },
                 },
             ],
             is_sink: false,
@@ -162,10 +162,11 @@ impl Module for StepSequencer {
     }
 
     fn prepare(_audio_environment: &AudioEnvironment, descriptor: ModuleDescriptor) -> Self {
+        let capacity = descriptor.shape.length;
         Self {
             instance_id: InstanceId::next(),
             descriptor,
-            steps: Vec::new(),
+            steps: Vec::with_capacity(capacity),
             step_index: 0,
             playing: true,
             current_pitch: 0.0,
@@ -185,7 +186,10 @@ impl Module for StepSequencer {
                 .filter_map(|s| parse_step(s).ok())
                 .collect();
             self.steps = parsed;
-            self.step_index = 0;
+            // Do not reset step_index: preserve position so that hot-reloading a pattern
+            // during playback does not cause an audible jump to step 0.
+            // process() uses steps.get(step_index), which returns None (treated as rest)
+            // for any out-of-range index until the next clock edge wraps it back in bounds.
         }
     }
 
@@ -304,7 +308,7 @@ mod tests {
         r.create(
             "StepSequencer",
             &AudioEnvironment { sample_rate: 44100.0 },
-            &ModuleShape { channels: 0 },
+            &ModuleShape { channels: 0, length: 32 },
             &params,
         ).unwrap()
     }
@@ -425,7 +429,7 @@ mod tests {
         let result = r.create(
             "StepSequencer",
             &AudioEnvironment { sample_rate: 44100.0 },
-            &ModuleShape { channels: 0 },
+            &ModuleShape { channels: 0, length: 32 },
             &params,
         );
         assert!(result.is_err(), "expected Err for invalid step string");

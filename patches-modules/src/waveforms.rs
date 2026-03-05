@@ -161,7 +161,7 @@ mod tests {
         r.create(
             "SawtoothOscillator",
             &AudioEnvironment { sample_rate: 44100.0 },
-            &ModuleShape { channels: 0 },
+            &ModuleShape { channels: 0, length: 0 },
             &params,
         ).unwrap()
     }
@@ -174,7 +174,7 @@ mod tests {
         r.create(
             "SawtoothOscillator",
             &AudioEnvironment { sample_rate },
-            &ModuleShape { channels: 0 },
+            &ModuleShape { channels: 0, length: 0 },
             &params,
         ).unwrap()
     }
@@ -187,7 +187,7 @@ mod tests {
         r.create(
             "SquareOscillator",
             &AudioEnvironment { sample_rate: 44100.0 },
-            &ModuleShape { channels: 0 },
+            &ModuleShape { channels: 0, length: 0 },
             &params,
         ).unwrap()
     }
@@ -200,7 +200,7 @@ mod tests {
         r.create(
             "SquareOscillator",
             &AudioEnvironment { sample_rate },
-            &ModuleShape { channels: 0 },
+            &ModuleShape { channels: 0, length: 0 },
             &params,
         ).unwrap()
     }

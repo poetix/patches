@@ -3,7 +3,7 @@ use std::f64::consts::TAU;
 use patches_core::{AudioEnvironment, Module, ModuleGraph, ModuleShape, NodeId, PortRef};
 use patches_core::parameter_map::{ParameterMap, ParameterValue};
 use patches_engine::{build_patch, ExecutionPlan, ModulePool, PlannerState};
-use patches_modules::{AudioOut, SawtoothOscillator, SineOscillator, Sum};
+use patches_modules::{AudioOut, SawtoothOscillator, SineOscillator, StepSequencer, Sum};
 
 // ── constants ─────────────────────────────────────────────────────────────────
 
@@ -26,8 +26,8 @@ fn sine_out_graph(osc_id: &str, freq: f64) -> ModuleGraph {
     let mut graph = ModuleGraph::new();
     let mut params = ParameterMap::new();
     params.insert("frequency".to_string(), ParameterValue::Float(freq));
-    graph.add_module(osc_id, SineOscillator::describe(&ModuleShape { channels: 0 }), &params).unwrap();
-    graph.add_module("out", AudioOut::describe(&ModuleShape { channels: 0 }), &ParameterMap::new()).unwrap();
+    graph.add_module(osc_id, SineOscillator::describe(&ModuleShape { channels: 0, length: 0 }), &params).unwrap();
+    graph.add_module("out", AudioOut::describe(&ModuleShape { channels: 0, length: 0 }), &ParameterMap::new()).unwrap();
     graph.connect(&NodeId::from(osc_id), p("out"), &NodeId::from("out"), p("left"), 1.0).unwrap();
     graph.connect(&NodeId::from(osc_id), p("out"), &NodeId::from("out"), p("right"), 1.0).unwrap();
     graph
@@ -40,10 +40,10 @@ fn two_osc_graph(freq_a: f64, freq_b: f64) -> ModuleGraph {
     pa.insert("frequency".to_string(), ParameterValue::Float(freq_a));
     let mut pb = ParameterMap::new();
     pb.insert("frequency".to_string(), ParameterValue::Float(freq_b));
-    graph.add_module("osc_a", SineOscillator::describe(&ModuleShape { channels: 0 }), &pa).unwrap();
-    graph.add_module("osc_b", SineOscillator::describe(&ModuleShape { channels: 0 }), &pb).unwrap();
-    graph.add_module("mix", Sum::describe(&ModuleShape { channels: 2 }), &ParameterMap::new()).unwrap();
-    graph.add_module("out", AudioOut::describe(&ModuleShape { channels: 0 }), &ParameterMap::new()).unwrap();
+    graph.add_module("osc_a", SineOscillator::describe(&ModuleShape { channels: 0, length: 0 }), &pa).unwrap();
+    graph.add_module("osc_b", SineOscillator::describe(&ModuleShape { channels: 0, length: 0 }), &pb).unwrap();
+    graph.add_module("mix", Sum::describe(&ModuleShape { channels: 2, length: 0 }), &ParameterMap::new()).unwrap();
+    graph.add_module("out", AudioOut::describe(&ModuleShape { channels: 0, length: 0 }), &ParameterMap::new()).unwrap();
     graph.connect(&NodeId::from("osc_a"), p("out"), &NodeId::from("mix"), PortRef { name: "in", index: 0 }, 1.0).unwrap();
     graph.connect(&NodeId::from("osc_b"), p("out"), &NodeId::from("mix"), PortRef { name: "in", index: 1 }, 1.0).unwrap();
     graph.connect(&NodeId::from("mix"), p("out"), &NodeId::from("out"), p("left"), 1.0).unwrap();
@@ -54,8 +54,8 @@ fn two_osc_graph(freq_a: f64, freq_b: f64) -> ModuleGraph {
 /// SawtoothOscillator (voct input unconnected) → AudioOut.
 fn sawtooth_out_graph() -> ModuleGraph {
     let mut graph = ModuleGraph::new();
-    graph.add_module("osc", SawtoothOscillator::describe(&ModuleShape { channels: 0 }), &ParameterMap::new()).unwrap();
-    graph.add_module("out", AudioOut::describe(&ModuleShape { channels: 0 }), &ParameterMap::new()).unwrap();
+    graph.add_module("osc", SawtoothOscillator::describe(&ModuleShape { channels: 0, length: 0 }), &ParameterMap::new()).unwrap();
+    graph.add_module("out", AudioOut::describe(&ModuleShape { channels: 0, length: 0 }), &ParameterMap::new()).unwrap();
     graph.connect(&NodeId::from("osc"), p("out"), &NodeId::from("out"), p("left"), 1.0).unwrap();
     graph.connect(&NodeId::from("osc"), p("out"), &NodeId::from("out"), p("right"), 1.0).unwrap();
     graph
@@ -366,5 +366,116 @@ fn initial_plan_uses_provided_sample_rate() {
     assert!(
         (sink_val - expected).abs() < 1e-10,
         "sink must equal sin(TAU * {FREQ} / {SAMPLE_RATE}) ≈ {expected:.6}; got {sink_val}"
+    );
+}
+
+/// Changing the shape of a sequencer node (e.g. length 4 → 8) forces the old
+/// instance to be tombstoned and a fresh one to be created, even though the
+/// NodeId and module type are unchanged.
+#[test]
+fn shape_change_forces_re_instantiation() {
+    let registry = patches_modules::default_registry();
+
+    // Build a minimal graph: StepSequencer("seq") → AudioOut("out").
+    // First build: length = 4.
+    let seq_steps_a: Vec<String> = ["C3", "D3", "E3", "F3"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let mut seq_params_a = patches_core::parameter_map::ParameterMap::new();
+    seq_params_a.insert(
+        "steps".to_string(),
+        patches_core::parameter_map::ParameterValue::Array(seq_steps_a),
+    );
+
+    let mut graph_a = patches_core::ModuleGraph::new();
+    graph_a.add_module(
+        "seq",
+        StepSequencer::describe(&ModuleShape { channels: 0, length: 4 }),
+        &seq_params_a,
+    ).unwrap();
+    graph_a.add_module(
+        "out",
+        AudioOut::describe(&ModuleShape { channels: 0, length: 0 }),
+        &patches_core::parameter_map::ParameterMap::new(),
+    ).unwrap();
+    graph_a.connect(
+        &patches_core::NodeId::from("seq"),
+        p("pitch"),
+        &patches_core::NodeId::from("out"),
+        p("left"),
+        1.0,
+    ).unwrap();
+    graph_a.connect(
+        &patches_core::NodeId::from("seq"),
+        p("pitch"),
+        &patches_core::NodeId::from("out"),
+        p("right"),
+        1.0,
+    ).unwrap();
+
+    let (plan_a, state_a) =
+        build_patch(&graph_a, &registry, &env(), &PlannerState::empty(), POOL_CAP, MODULE_CAP)
+            .unwrap();
+
+    let seq_id_a = state_a.nodes[&patches_core::NodeId::from("seq")].instance_id;
+    assert!(!plan_a.new_modules.is_empty(), "first build must produce new modules");
+
+    // Second build: same NodeId "seq", same module type, but length = 8.
+    let seq_steps_b: Vec<String> = ["C3", "D3", "E3", "F3", "G3", "A3", "B3", "C4"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let mut seq_params_b = patches_core::parameter_map::ParameterMap::new();
+    seq_params_b.insert(
+        "steps".to_string(),
+        patches_core::parameter_map::ParameterValue::Array(seq_steps_b),
+    );
+
+    let mut graph_b = patches_core::ModuleGraph::new();
+    graph_b.add_module(
+        "seq",
+        StepSequencer::describe(&ModuleShape { channels: 0, length: 8 }),
+        &seq_params_b,
+    ).unwrap();
+    graph_b.add_module(
+        "out",
+        AudioOut::describe(&ModuleShape { channels: 0, length: 0 }),
+        &patches_core::parameter_map::ParameterMap::new(),
+    ).unwrap();
+    graph_b.connect(
+        &patches_core::NodeId::from("seq"),
+        p("pitch"),
+        &patches_core::NodeId::from("out"),
+        p("left"),
+        1.0,
+    ).unwrap();
+    graph_b.connect(
+        &patches_core::NodeId::from("seq"),
+        p("pitch"),
+        &patches_core::NodeId::from("out"),
+        p("right"),
+        1.0,
+    ).unwrap();
+
+    let (plan_b, state_b) =
+        build_patch(&graph_b, &registry, &env(), &state_a, POOL_CAP, MODULE_CAP).unwrap();
+
+    let seq_id_b = state_b.nodes[&patches_core::NodeId::from("seq")].instance_id;
+
+    // The shape changed, so the "seq" node must get a brand-new InstanceId.
+    assert_ne!(
+        seq_id_a, seq_id_b,
+        "shape change (length 4 → 8) must produce a new InstanceId for the sequencer"
+    );
+    // The old instance must be tombstoned.
+    assert!(
+        !plan_b.tombstones.is_empty(),
+        "shape change must tombstone the old sequencer instance"
+    );
+    // A fresh module must appear in new_modules.
+    assert!(
+        plan_b.new_modules.iter().any(|(_, m)| m.instance_id() == seq_id_b),
+        "shape change must install a new sequencer module"
     );
 }

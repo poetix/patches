@@ -307,7 +307,7 @@ mod tests {
     fn stub_desc(inputs: &[&'static str], outputs: &[&'static str]) -> ModuleDescriptor {
         ModuleDescriptor {
             module_name: "stub",
-            shape: ModuleShape { channels: 0 },
+            shape: ModuleShape { channels: 0, length: 0 },
             inputs: inputs
                 .iter()
                 .map(|&n| PortDescriptor { name: n, index: 0 })
@@ -533,7 +533,7 @@ mod tests {
         // A descriptor with two ports both named "in" but different indices.
         let desc = ModuleDescriptor {
             module_name: "stub",
-            shape: ModuleShape { channels: 0 },
+            shape: ModuleShape { channels: 0, length: 0 },
             inputs: vec![
                 PortDescriptor { name: "in", index: 0 },
                 PortDescriptor { name: "in", index: 1 },

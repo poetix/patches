@@ -1,0 +1,29 @@
+name: Build Windows executable
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Build patch_player
+        run: cargo build --release -p patches-player
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: patch_player-windows-x86_64
+          path: target/release/patch_player.exe
+          if-no-files-found: error

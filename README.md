@@ -8,8 +8,8 @@ filter history, etc.).
 
 ## Goals
 
-- **Patch DSL** — a YAML format for describing signal graphs of audio modules
-  (connections, scaling, routing), with full serde support.
+- **Patch DSL** — a DSL for describing signal graphs of audio modules
+  (connections, scaling, routing).
 - **Audio engine** — a real-time processing pipeline that accepts new patch plans
   without allocating or blocking on the audio thread.
 - **Live-reload** — stateful module instances survive re-planning; only structurally
@@ -17,7 +17,9 @@ filter history, etc.).
 
 ## Current state
 
-The core engine, DSL, and a practical set of modules are all in place:
+The full intended DSL is not implemented, but a temporary YAML format is in place which enables patches to be loaded from file. `patches-player` will watch its input file and re-plan the patch (keeping existing modules running) if a new version is saved.
+
+The core engine and a small practical set of modules are all in place:
 
 - `Module` trait with `prepare` (called once on plan activation) and `process`
   (called per sample, allocation-free).

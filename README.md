@@ -8,8 +8,8 @@ filter history, etc.).
 
 ## Goals
 
-- **Patch DSL** — a format for describing signal graphs of audio modules (connections,
-  scaling, routing).
+- **Patch DSL** — a YAML format for describing signal graphs of audio modules
+  (connections, scaling, routing), with full serde support.
 - **Audio engine** — a real-time processing pipeline that accepts new patch plans
   without allocating or blocking on the audio thread.
 - **Live-reload** — stateful module instances survive re-planning; only structurally
@@ -17,9 +17,9 @@ filter history, etc.).
 
 ## Current state
 
-The core engine and a practical set of modules are in place:
+The core engine, DSL, and a practical set of modules are all in place:
 
-- `Module` trait with `initialise` (called once on plan activation) and `process`
+- `Module` trait with `prepare` (called once on plan activation) and `process`
   (called per sample, allocation-free).
 - `ModuleGraph` for building signal graphs with scaled connections.
 - `ExecutionPlan` produced by a pure `build_patch` function; uses a flat buffer
@@ -28,30 +28,36 @@ The core engine and a practical set of modules are in place:
   phase, filter history, envelope position) live on the audio thread and survive
   hot-reloads automatically without crossing the thread boundary.
 - Lock-free plan handoff to the audio thread via an rtrb ring buffer.
-- Control-rate signalling: `ControlSignal` enum and `Module::receive_signal`;
-  the engine distributes signals at a configurable control rate using chunked
-  sample processing so there is no per-sample branch overhead.
-- Modules: sine oscillator, sawtooth oscillator, square oscillator, sum/crossfade,
-  ADSR envelope, step sequencer, clock sequencer, VCA, audio output.
-- Examples: `sine_tone`, `chord_swap`, `freq_sweep`, `demo_synth` (16-step
-  melodic sequence at 120 BPM demonstrating the full module set).
+- YAML patch DSL: `graph_to_yaml` / `yaml_to_graph` in `patches-core`; the format
+  supports nodes, cables, parameters (float, int, bool, enum, array), scaled
+  connections, and indexed ports (`in/1`).
+- `patch_player` binary (`patches-player`): loads a YAML patch, plays it, and
+  hot-reloads whenever the file changes on disk.
+- Modules: sine oscillator, sawtooth oscillator, square oscillator, sum/mix,
+  ADSR envelope, step sequencer, clock sequencer, VCA, glide (portamento),
+  audio output.
+- Examples: `sine_tone`, `chord_swap`, `demo_synth` (16-step minor-pentatonic
+  sequence at 120 BPM with glide, LFO-modulated square, and ADSR).
 
-In progress: off-thread module deallocation (`E010`) — tombstoned modules are
-currently dropped inline in the audio callback; the next epic moves drops to a
-dedicated cleanup thread via a ring buffer.
-
-Not yet started: the patch DSL and parser.
+In progress:
+- E010: off-thread module deallocation — tombstoned modules are currently dropped
+  inline in the audio callback; tickets 0052–0053 move drops to a cleanup thread.
+- E015: port connectivity awareness — modules will be notified when their ports
+  are connected or disconnected (tickets 0078–0081).
 
 ## Workspace layout
 
 ```text
-patches-core/     Core types, traits, and the execution plan runtime.
+patches-core/     Core types, traits, YAML DSL, and the execution plan runtime.
                   No audio-backend dependencies; fully testable without hardware.
 
 patches-modules/  Audio module implementations (oscillators, mixing, effects, …).
 
 patches-engine/   Patch builder, Planner, PatchEngine, CPAL sound engine,
                   and runnable examples.
+
+patches-player/   `patch_player` binary: load a YAML patch, play it, hot-reload
+                  on file change.
 
 tickets/          Work tracking (open / in-progress / closed).
 epics/            Epics grouping related tickets.
@@ -64,9 +70,41 @@ adr/              Architecture decision records.
 cargo build
 cargo test
 cargo clippy
-cargo run --example sine_tone    # plays a 440 Hz sine tone
-cargo run --example demo_synth   # plays a 16-step melodic sequence at 120 BPM
+
+# Run a built-in example (generates audio in code):
+cargo run --example sine_tone    # 440 Hz sine tone
+cargo run --example demo_synth   # 16-step melodic sequence at 120 BPM
+
+# Run the player with a YAML patch file (hot-reloads on save):
+cargo run -p patches-player -- demo_synth.yaml
 ```
+
+## Patch format
+
+```yaml
+nodes:
+  osc:
+    module: SineOscillator
+    params:
+      frequency: 440.0
+
+  out:
+    module: AudioOut
+
+cables:
+  - from: osc
+    output: out
+    to: out
+    input: left
+  - from: osc
+    output: out
+    to: out
+    input: right
+```
+
+Parameters are plain YAML scalars (float, int, bool, string for enums, sequences
+for arrays). Port indices use `name/n` notation (e.g. `in/1`). Cable `scale`
+defaults to `1.0` and is omitted when serialising at that value.
 
 ## Design constraints
 

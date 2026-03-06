@@ -1,7 +1,8 @@
 use std::f64::consts::{FRAC_1_SQRT_2, TAU};
+use crate::common::approximate::fast_tanh;
 
 use patches_core::{
-    AudioEnvironment, ControlSignal, InstanceId, Module, ModuleDescriptor,
+    AudioEnvironment, InstanceId, Module, ModuleDescriptor,
     ModuleShape, ParameterDescriptor, ParameterKind, PortConnectivity, PortDescriptor,
 };
 use patches_core::parameter_map::{ParameterMap, ParameterValue};
@@ -11,6 +12,7 @@ use patches_core::parameter_map::{ParameterMap, ParameterValue};
 /// fast enough for LFO and envelope modulation. Linear interpolation of
 /// coefficients across the interval prevents audible stepping.
 const COEFF_UPDATE_INTERVAL: u32 = 32;
+const COEFF_UPDATE_INTERVAL_RECIPROCAL: f64 = 1.0 / COEFF_UPDATE_INTERVAL as f64;
 
 /// Maps normalised resonance [0, 1] to filter Q.
 ///
@@ -107,8 +109,7 @@ pub struct ResonantLowpass {
     s2: f64,
 
     // ── Connectivity ──────────────────────────────────────────────────────
-    cutoff_cv_connected: bool,
-    resonance_cv_connected: bool,
+    any_cv_connected: bool,
 
     // ── Update counter (CV path only) ─────────────────────────────────────
     update_counter: u32,
@@ -136,10 +137,6 @@ impl ResonantLowpass {
         self.db2 = 0.0;
         self.da1 = 0.0;
         self.da2 = 0.0;
-    }
-
-    fn any_cv_connected(&self) -> bool {
-        self.cutoff_cv_connected || self.resonance_cv_connected
     }
 }
 
@@ -206,8 +203,7 @@ impl Module for ResonantLowpass {
             da2: 0.0,
             s1: 0.0,
             s2: 0.0,
-            cutoff_cv_connected: false,
-            resonance_cv_connected: false,
+            any_cv_connected: false,
             update_counter: 0,
         }
     }
@@ -222,7 +218,7 @@ impl Module for ResonantLowpass {
         // In the CV path the next update_counter == 0 will recompute using the
         // new base parameters combined with the live CV values. In the static
         // path we recompute immediately.
-        if !self.any_cv_connected() {
+        if !self.any_cv_connected {
             self.recompute_static_coeffs();
         }
     }
@@ -235,102 +231,86 @@ impl Module for ResonantLowpass {
         self.instance_id
     }
 
-    fn receive_signal(&mut self, signal: ControlSignal) {
-        match signal {
-            ControlSignal::ParameterUpdate {
-                name: "cutoff",
-                value: ParameterValue::Float(v),
-            } => {
-                self.cutoff = v;
-                if !self.any_cv_connected() {
-                    self.recompute_static_coeffs();
-                }
-            }
-            ControlSignal::ParameterUpdate {
-                name: "resonance",
-                value: ParameterValue::Float(v),
-            } => {
-                self.resonance = v;
-                if !self.any_cv_connected() {
-                    self.recompute_static_coeffs();
-                }
-            }
-            _ => {}
-        }
-    }
-
     fn set_connectivity(&mut self, connectivity: PortConnectivity) {
-        self.cutoff_cv_connected = *connectivity.inputs.get(1).unwrap_or(&false);
-        self.resonance_cv_connected = *connectivity.inputs.get(2).unwrap_or(&false);
-
-        if !self.any_cv_connected() {
-            // Switching to the static path: snap coefficients to the
-            // parameter-derived values and clear stale interpolation state.
-            self.recompute_static_coeffs();
-            self.update_counter = 0;
-        }
-    }
-
-    fn process(&mut self, inputs: &[f64], outputs: &mut [f64]) {
-        if self.any_cv_connected() {
-            // ── CV path: recompute coefficients every COEFF_UPDATE_INTERVAL ──
-            if self.update_counter == 0 {
-                // Snap to the previous target to eliminate accumulated float
-                // drift before starting a new interpolation ramp.
+        let cutoff_cv_connected = connectivity.inputs[1];
+        let resonance_cv_connected = connectivity.inputs[2];
+        let any_cv_connected = cutoff_cv_connected || resonance_cv_connected;
+        if any_cv_connected != self.any_cv_connected {
+            self.any_cv_connected = any_cv_connected;
+            if !any_cv_connected {
+                // Transitioning to static path: sync coefficients to the current
+                // target to prevent zipper noise.
                 self.b0 = self.b0t;
                 self.b1 = self.b1t;
                 self.b2 = self.b2t;
                 self.a1 = self.a1t;
                 self.a2 = self.a2t;
-
-                // Effective parameters: base values offset by CV.
-                // cutoff_cv is V/oct: +1 V doubles the frequency.
-                let effective_cutoff =
-                    (self.cutoff * 2.0_f64.powf(inputs[1])).clamp(20.0, self.sample_rate * 0.499);
-                let effective_resonance = (self.resonance + inputs[2]).clamp(0.0, 1.0);
-
-                let (b0t, b1t, b2t, a1t, a2t) =
-                    compute_biquad_lowpass(effective_cutoff, effective_resonance, self.sample_rate);
-
-                let n = COEFF_UPDATE_INTERVAL as f64;
-                self.db0 = (b0t - self.b0) / n;
-                self.db1 = (b1t - self.b1) / n;
-                self.db2 = (b2t - self.b2) / n;
-                self.da1 = (a1t - self.a1) / n;
-                self.da2 = (a2t - self.a2) / n;
-
-                self.b0t = b0t;
-                self.b1t = b1t;
-                self.b2t = b2t;
-                self.a1t = a1t;
-                self.a2t = a2t;
             }
+        }
+    }
 
-            // Apply filter (Transposed Direct Form II).
-            let x = inputs[0];
-            let y = self.b0 * x + self.s1;
-            self.s1 = self.b1 * x - self.a1 * y + self.s2;
-            self.s2 = self.b2 * x - self.a2 * y;
-            outputs[0] = y;
-
-            // Advance interpolation toward the target.
-            self.b0 += self.db0;
-            self.b1 += self.db1;
-            self.b2 += self.db2;
-            self.a1 += self.da1;
-            self.a2 += self.da2;
-
-            self.update_counter += 1;
-            if self.update_counter >= COEFF_UPDATE_INTERVAL {
-                self.update_counter = 0;
-            }
-        } else {
+    fn process(&mut self, inputs: &[f64], outputs: &mut [f64]) {
+        if !self.any_cv_connected {
             // ── Static path: coefficients do not change ───────────────────
             let x = inputs[0];
             let y = self.b0 * x + self.s1;
-            self.s1 = self.b1 * x - self.a1 * y + self.s2;
-            self.s2 = self.b2 * x - self.a2 * y;
+            let y_sat = fast_tanh(y);
+            self.s1 = self.b1 * x - self.a1 * y_sat + self.s2;
+            self.s2 = self.b2 * x - self.a2 * y_sat;
             outputs[0] = y;
+            return;
+        }
+        
+        // ── CV path: recompute coefficients every COEFF_UPDATE_INTERVAL ──
+        if self.update_counter == 0 {
+            // Snap to the previous target to eliminate accumulated float
+            // drift before starting a new interpolation ramp.
+            self.b0 = self.b0t;
+            self.b1 = self.b1t;
+            self.b2 = self.b2t;
+            self.a1 = self.a1t;
+            self.a2 = self.a2t;
+
+            // Effective parameters: base values offset by CV.
+            // cutoff_cv is V/oct: +1 V doubles the frequency.
+            let effective_cutoff =
+                (self.cutoff * exp2(inputs[1])).clamp(20.0, self.sample_rate * 0.499);
+            let effective_resonance = (self.resonance + inputs[2]).clamp(0.0, 1.0);
+
+            let (b0t, b1t, b2t, a1t, a2t) =
+                compute_biquad_lowpass(effective_cutoff, effective_resonance, self.sample_rate);
+
+            self.db0 = (b0t - self.b0) * COEFF_UPDATE_INTERVAL_RECIPROCAL;
+            self.db1 = (b1t - self.b1) * COEFF_UPDATE_INTERVAL_RECIPROCAL;
+            self.db2 = (b2t - self.b2) * COEFF_UPDATE_INTERVAL_RECIPROCAL;
+            self.da1 = (a1t - self.a1) * COEFF_UPDATE_INTERVAL_RECIPROCAL;
+            self.da2 = (a2t - self.a2) * COEFF_UPDATE_INTERVAL_RECIPROCAL;
+
+            self.b0t = b0t;
+            self.b1t = b1t;
+            self.b2t = b2t;
+            self.a1t = a1t;
+            self.a2t = a2t;
+        }
+
+        // Apply filter (Transposed Direct Form II).
+        let x = inputs[0];
+        let y = self.b0 * x + self.s1;
+        let y_sat = fast_tanh(y); // prevent runaway self-oscillation at high resonance
+        self.s1 = self.b1 * x - self.a1 * y_sat + self.s2;
+        self.s2 = self.b2 * x - self.a2 * y_sat;
+        outputs[0] = y;
+
+        // Advance interpolation toward the target.
+        self.b0 += self.db0;
+        self.b1 += self.db1;
+        self.b2 += self.db2;
+        self.a1 += self.da1;
+        self.a2 += self.da2;
+
+        self.update_counter += 1;
+        if self.update_counter >= COEFF_UPDATE_INTERVAL {
+            self.update_counter = 0;
         }
     }
 
@@ -342,7 +322,7 @@ impl Module for ResonantLowpass {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use patches_core::{AudioEnvironment, ControlSignal, Module, ModuleShape, PortConnectivity, Registry};
+    use patches_core::{AudioEnvironment, Module, ModuleShape, PortConnectivity, Registry};
     use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
     fn make_filter(cutoff: f64, resonance: f64) -> Box<dyn Module> {
@@ -515,51 +495,6 @@ mod tests {
             (out[0] - 1.0).abs() < 0.001,
             "DC should pass in static path; got {}",
             out[0]
-        );
-    }
-
-    #[test]
-    fn receive_signal_updates_cutoff() {
-        // Lowering the cutoff via receive_signal should attenuate a signal
-        // that was previously in the pass-band.
-        let sr = 44100.0;
-        let mut f = make_filter_sr(4000.0, 0.0, sr);
-        settle(&mut f, 4096);
-        let peak_before = measure_peak(&mut f, 2000.0, sr, 4096);
-
-        f.receive_signal(ControlSignal::ParameterUpdate {
-            name: "cutoff",
-            value: ParameterValue::Float(200.0),
-        });
-        settle(&mut f, 4096);
-        let peak_after = measure_peak(&mut f, 2000.0, sr, 4096);
-
-        assert!(
-            peak_after < peak_before * 0.3,
-            "lowering cutoff should attenuate; before={peak_before:.4}, after={peak_after:.4}"
-        );
-    }
-
-    #[test]
-    fn receive_signal_updates_resonance() {
-        // Increasing resonance via receive_signal should boost the signal near
-        // the cutoff frequency.
-        let sr = 44100.0;
-        let cutoff = 1000.0;
-        let mut f = make_filter_sr(cutoff, 0.0, sr);
-        settle(&mut f, 4096);
-        let peak_flat = measure_peak(&mut f, cutoff, sr, 4096);
-
-        f.receive_signal(ControlSignal::ParameterUpdate {
-            name: "resonance",
-            value: ParameterValue::Float(0.8),
-        });
-        settle(&mut f, 4096);
-        let peak_resonant = measure_peak(&mut f, cutoff, sr, 4096);
-
-        assert!(
-            peak_resonant > peak_flat * 1.5,
-            "increasing resonance should boost near cutoff; flat={peak_flat:.4}, resonant={peak_resonant:.4}"
         );
     }
 }

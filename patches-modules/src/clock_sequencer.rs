@@ -1,5 +1,5 @@
 use patches_core::{
-    AudioEnvironment, ControlSignal, InstanceId, Module, ModuleDescriptor, ModuleShape,
+    AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleShape,
     ParameterDescriptor, ParameterKind, PortDescriptor,
 };
 use patches_core::parameter_map::{ParameterMap, ParameterValue};
@@ -94,22 +94,6 @@ impl Module for ClockSequencer {
 
     fn instance_id(&self) -> InstanceId {
         self.instance_id
-    }
-
-    fn receive_signal(&mut self, signal: ControlSignal) {
-        match signal {
-            ControlSignal::ParameterUpdate { name: "bpm", value: ParameterValue::Float(v) } => {
-                self.bpm = v;
-                self.beat_phase_delta = self.bpm / (60.0 * self.sample_rate);
-            }
-            ControlSignal::ParameterUpdate { name: "beats_per_bar", value: ParameterValue::Int(v) } => {
-                self.beats_per_bar = v as u32;
-            }
-            ControlSignal::ParameterUpdate { name: "quavers_per_beat", value: ParameterValue::Int(v) } => {
-                self.quavers_per_beat = v as u32;
-            }
-            _ => {}
-        }
     }
 
     fn process(&mut self, _inputs: &[f64], outputs: &mut [f64]) {
@@ -310,50 +294,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn receive_signal_updates_bpm() {
-        let mut clock = make_clock(120.0, 4, 2);
-        clock.receive_signal(ControlSignal::ParameterUpdate {
-            name: "bpm",
-            value: ParameterValue::Float(240.0),
-        });
-        let clock = clock.as_any().downcast_ref::<ClockSequencer>().unwrap();
-        assert_eq!(clock.bpm, 240.0);
-    }
-
-    #[test]
-    fn receive_signal_updates_beats_per_bar() {
-        let mut clock = make_clock(120.0, 4, 2);
-        clock.receive_signal(ControlSignal::ParameterUpdate {
-            name: "beats_per_bar",
-            value: ParameterValue::Int(3),
-        });
-        let clock = clock.as_any().downcast_ref::<ClockSequencer>().unwrap();
-        assert_eq!(clock.beats_per_bar, 3);
-    }
-
-    #[test]
-    fn receive_signal_updates_quavers_per_beat() {
-        let mut clock = make_clock(120.0, 4, 2);
-        clock.receive_signal(ControlSignal::ParameterUpdate {
-            name: "quavers_per_beat",
-            value: ParameterValue::Int(3),
-        });
-        let clock = clock.as_any().downcast_ref::<ClockSequencer>().unwrap();
-        assert_eq!(clock.quavers_per_beat, 3);
-    }
-
-    #[test]
-    fn receive_signal_unknown_is_ignored() {
-        let mut clock = make_clock(120.0, 4, 2);
-        {
-            let original_bpm = clock.as_any().downcast_ref::<ClockSequencer>().unwrap().bpm;
-            clock.receive_signal(ControlSignal::ParameterUpdate {
-                name: "gain",
-                value: ParameterValue::Float(0.5),
-            });
-            let bpm_after = clock.as_any().downcast_ref::<ClockSequencer>().unwrap().bpm;
-            assert_eq!(bpm_after, original_bpm);
-        }
-    }
 }

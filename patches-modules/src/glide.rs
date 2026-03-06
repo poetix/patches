@@ -1,5 +1,5 @@
 use patches_core::{
-    AudioEnvironment, ControlSignal, InstanceId, Module, ModuleDescriptor,
+    AudioEnvironment, InstanceId, Module, ModuleDescriptor,
     ModuleShape, ParameterDescriptor, ParameterKind, PortDescriptor,
 };
 use patches_core::parameter_map::{ParameterMap, ParameterValue};
@@ -86,16 +86,6 @@ impl Module for Glide {
         self.instance_id
     }
 
-    fn receive_signal(&mut self, signal: ControlSignal) {
-        if let ControlSignal::ParameterUpdate {
-            name: "glide_ms",
-            value: ParameterValue::Float(v),
-        } = signal
-        {
-            self.set_glide_ms(v);
-        }
-    }
-
     fn process(&mut self, inputs: &[f64], outputs: &mut [f64]) {
         // Input is V/OCT (C2 = 0.0). Interpolate directly in V/OCT space —
         // no ln/exp needed since V/OCT is already a log-frequency scale.
@@ -112,7 +102,7 @@ impl Module for Glide {
 mod tests {
 
     use super::*;
-    use patches_core::{AudioEnvironment, ControlSignal, Module, ModuleShape, Registry};
+    use patches_core::{AudioEnvironment, Module, ModuleShape, Registry};
     use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
     fn make_glide(glide_ms: f64) -> Box<dyn Module> {
@@ -211,35 +201,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn receive_signal_updates_glide_time() {
-        // Start with a long glide, verify smoothing is present. Then switch to
-        // zero glide via receive_signal and verify instant tracking.
-        let mut g = make_glide_sr(5000.0, 44100.0);
-
-        // Seed the module at C3 = 1.0 V/OCT.
-        let mut out = [0.0_f64; 1];
-        g.process(&[1.0], &mut out);
-
-        // Verify that the output does not jump immediately to C4 = 2.0 V/OCT.
-        g.process(&[2.0], &mut out);
-        let smooth_out = out[0];
-        assert!(
-            smooth_out < 2.0,
-            "expected smoothed output {smooth_out} to be below 2.0 V/OCT with long glide"
-        );
-
-        // Now reduce glide to zero via receive_signal.
-        g.receive_signal(ControlSignal::ParameterUpdate {
-            name: "glide_ms",
-            value: ParameterValue::Float(0.0),
-        });
-
-        // Process at the target; output should now track immediately.
-        g.process(&[2.0], &mut out);
-        assert!(
-            (out[0] - 2.0).abs() < 1e-9,
-            "expected instant tracking after receive_signal(0 ms), got {}", out[0]
-        );
-    }
 }

@@ -1,30 +1,23 @@
-use std::f64::consts::TAU;
-
 use patches_core::{
-    AudioEnvironment, ControlSignal, InstanceId, Module, ModuleDescriptor,
+    AudioEnvironment, InstanceId, Module, ModuleDescriptor,
     ModuleShape, ParameterDescriptor, ParameterKind, PortDescriptor,
+    PortConnectivity
 };
 use patches_core::parameter_map::{ParameterMap, ParameterValue};
+use crate::common::approximate::lookup_sine;
+use crate::common::frequency::{UnitPhaseAccumulator, FMMode};
 
 /// A sine wave oscillator whose frequency is set via the `"frequency"` parameter.
 ///
 /// Phase is accumulated continuously across calls so the waveform has no
-/// discontinuities between samples. Phase wraps within `[0, 2π)` to prevent
+/// discontinuities between samples. Phase wraps within `[0, 1)` to prevent
 /// floating-point drift over long runs.
 ///
 /// Constructed via the Module v2 protocol: `describe` → `prepare` →
 /// `update_validated_parameters`.
 pub struct SineOscillator {
     instance_id: InstanceId,
-    frequency: f64,
-    phase: f64,
-    /// Reciprocal of the sample rate, set in `prepare`.
-    /// Stored so `phase_increment` can be recalculated on frequency changes
-    /// without a division in the hot path.
-    sample_rate_reciprocal: f64,
-    /// `TAU * frequency * sample_rate_reciprocal`; recomputed whenever either
-    /// value changes. Used in `process` as a multiply-only phase step.
-    phase_increment: f64,
+    phase_accumulator: UnitPhaseAccumulator,
     descriptor: ModuleDescriptor,
 }
 
@@ -33,17 +26,30 @@ impl Module for SineOscillator {
         ModuleDescriptor {
             module_name: "SineOscillator",
             shape: shape.clone(),
-            inputs: vec![],
+            inputs: vec![
+                PortDescriptor { name: "voct", index: 0 },
+                PortDescriptor { name: "fm", index: 0 },
+            ],
             outputs: vec![PortDescriptor { name: "out", index: 0 }],
-            parameters: vec![ParameterDescriptor {
-                name: "frequency",
-                index: 0,
-                parameter_type: ParameterKind::Float {
-                    min: 0.01,
-                    max: 20_000.0,
-                    default: 440.0,
+            parameters: vec![
+                ParameterDescriptor {
+                    name: "frequency",
+                    index: 0,
+                    parameter_type: ParameterKind::Float {
+                        min: 0.01,
+                        max: 20_000.0,
+                        default: 440.0,
+                    },
                 },
-            }],
+                ParameterDescriptor {
+                    name: "fm_type",
+                    index: 0,
+                    parameter_type: ParameterKind::Enum {
+                        variants: &["linear", "logarithmic"],
+                        default: "linear",
+                    },
+                },
+            ],
             is_sink: false,
         }
     }
@@ -51,19 +57,31 @@ impl Module for SineOscillator {
     fn prepare(audio_environment: &AudioEnvironment, descriptor: ModuleDescriptor) -> Self {
         Self {
             instance_id: InstanceId::next(),
-            frequency: 0.0,
-            phase: 0.0,
-            sample_rate_reciprocal: 1.0 / audio_environment.sample_rate,
-            phase_increment: 0.0,
+            phase_accumulator: UnitPhaseAccumulator::new(audio_environment.sample_rate),
             descriptor,
         }
     }
 
     fn update_validated_parameters(&mut self, params: &ParameterMap) {
         if let Some(ParameterValue::Float(v)) = params.get("frequency") {
-            self.frequency = *v;
-            self.phase_increment = TAU * *v * self.sample_rate_reciprocal;
+            self.phase_accumulator.set_base_frequency(*v);
         }
+        if let Some(ParameterValue::Enum(v)) = params.get("fm_type") {
+            let mode = *v;
+            let fm_mode = match mode {
+                "linear" => FMMode::Linear,
+                "logarithmic" => FMMode::Exponential,
+                _ => return, // Ignore unknown enum variants.
+            };
+            self.phase_accumulator.set_fm_mode(fm_mode);
+        }
+    }
+
+    fn set_connectivity(&mut self, connectivity: PortConnectivity) {
+        self.phase_accumulator.set_modulation(
+            connectivity.inputs[0],
+            connectivity.inputs[1],
+        );
     }
 
     fn descriptor(&self) -> &ModuleDescriptor {
@@ -74,16 +92,14 @@ impl Module for SineOscillator {
         self.instance_id
     }
 
-    fn receive_signal(&mut self, signal: ControlSignal) {
-        if let ControlSignal::ParameterUpdate { name: "frequency", value: ParameterValue::Float(v) } = signal {
-            self.frequency = v;
-            self.phase_increment = TAU * v * self.sample_rate_reciprocal;
-        }
-    }
+    fn process(&mut self, inputs: &[f64], outputs: &mut [f64]) {
+        outputs[0] = lookup_sine(self.phase_accumulator.phase);
 
-    fn process(&mut self, _inputs: &[f64], outputs: &mut [f64]) {
-        outputs[0] = self.phase.sin();
-        self.phase = (self.phase + self.phase_increment) % TAU;
+        if self.phase_accumulator.is_modulating {
+            self.phase_accumulator.advance_modulating(inputs[0], inputs[1]);
+        } else {
+            self.phase_accumulator.advance();
+        }
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -95,7 +111,7 @@ impl Module for SineOscillator {
 mod tests {
 
     use super::*;
-    use patches_core::{AudioEnvironment, ControlSignal, Module, ModuleShape, Registry};
+    use patches_core::{AudioEnvironment, Module, ModuleShape, Registry};
     use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
     fn make_osc(frequency: f64) -> Box<dyn Module> {
@@ -129,37 +145,6 @@ mod tests {
         let a = make_osc(440.0);
         let b = make_osc(440.0);
         assert_ne!(a.instance_id(), b.instance_id());
-    }
-
-    #[test]
-    fn receive_signal_freq_updates_frequency() {
-        let mut osc = make_osc(440.0);
-        osc.receive_signal(ControlSignal::ParameterUpdate {
-            name: "frequency",
-            value: ParameterValue::Float(880.0),
-        });
-        let mut out = [0.0_f64; 1];
-        osc.process(&[], &mut out);
-        // At sample 0, phase=0 so sin(0)=0 regardless of frequency.
-        // At sample 1, the phase step reflects the updated 880 Hz.
-        osc.process(&[], &mut out);
-        let step_880 = TAU * 880.0 / 44100.0;
-        assert!((out[0] - step_880.sin()).abs() < 1e-10, "unexpected output: {}", out[0]);
-    }
-
-    #[test]
-    fn receive_signal_unknown_name_is_ignored() {
-        let mut osc = make_osc(440.0);
-        osc.receive_signal(ControlSignal::ParameterUpdate {
-            name: "gain",
-            value: ParameterValue::Float(0.5),
-        });
-        // frequency must remain 440 Hz
-        let mut out = [0.0_f64; 1];
-        osc.process(&[], &mut out); // phase 0
-        osc.process(&[], &mut out); // phase after one step at 440 Hz
-        let step_440 = TAU * 440.0 / 44100.0;
-        assert!((out[0] - step_440.sin()).abs() < 1e-10, "unexpected output: {}", out[0]);
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use patches_core::{
-    AudioEnvironment, ControlSignal, InstanceId, Module, ModuleDescriptor,
+    AudioEnvironment, InstanceId, Module, ModuleDescriptor,
     ModuleShape, ParameterDescriptor, ParameterKind, PortDescriptor,
 };
 use patches_core::parameter_map::{ParameterMap, ParameterValue};
@@ -62,8 +62,6 @@ impl Module for SawtoothOscillator {
     fn instance_id(&self) -> InstanceId {
         self.instance_id
     }
-
-    fn receive_signal(&mut self, _signal: ControlSignal) {}
 
     fn process(&mut self, inputs: &[f64], outputs: &mut [f64]) {
         let freq = C2_FREQ * 2_f64.powf(self.base_voct + inputs[0]);
@@ -131,8 +129,6 @@ impl Module for SquareOscillator {
     fn instance_id(&self) -> InstanceId {
         self.instance_id
     }
-
-    fn receive_signal(&mut self, _signal: ControlSignal) {}
 
     fn process(&mut self, inputs: &[f64], outputs: &mut [f64]) {
         let freq = C2_FREQ * 2_f64.powf(self.base_voct + inputs[0]);

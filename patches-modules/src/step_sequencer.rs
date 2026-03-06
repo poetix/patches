@@ -1,5 +1,5 @@
 use patches_core::{
-    AudioEnvironment, ControlSignal, InstanceId, Module, ModuleDescriptor, ModuleShape,
+    AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleShape,
     ParameterDescriptor, ParameterKind, PortDescriptor,
 };
 use patches_core::build_error::BuildError;
@@ -218,8 +218,6 @@ impl Module for StepSequencer {
     fn instance_id(&self) -> InstanceId {
         self.instance_id
     }
-
-    fn receive_signal(&mut self, _signal: ControlSignal) {}
 
     fn process(&mut self, inputs: &[f64], outputs: &mut [f64]) {
         // Guard: when the pattern is empty all outputs hold at rest values.

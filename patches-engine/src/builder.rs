@@ -2,7 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use patches_core::{
-    AudioEnvironment, ControlSignal, InstanceId, Module, ModuleGraph, ModuleShape, NodeId, Registry,
+    AudioEnvironment, ControlSignal, InstanceId, Module, ModuleGraph, ModuleShape, NodeId,
+    PortConnectivity, Registry,
 };
 use patches_core::parameter_map::ParameterMap;
 
@@ -171,6 +172,11 @@ pub struct NodeState {
     /// If the shape changes on the next build (same `NodeId`, same module type),
     /// the old instance is tombstoned and a fresh one is created with the new shape.
     pub shape: ModuleShape,
+    /// The port connectivity computed during the last build.
+    ///
+    /// Stored so that T-0080 can diff against it to emit connectivity updates only
+    /// when the wiring actually changes.
+    pub connectivity: PortConnectivity,
 }
 
 /// Planning state threaded across successive [`PatchBuilder::build_patch`] calls.
@@ -268,6 +274,15 @@ pub struct ExecutionPlan {
     /// New modules (in `new_modules`) do not appear here; their parameters are
     /// set during construction. Empty when no surviving module changed parameters.
     pub parameter_updates: Vec<(usize, ParameterMap)>,
+    /// Connectivity diffs to apply to surviving modules on plan adoption.
+    ///
+    /// Each entry is `(pool_index, new_connectivity)` for a surviving module
+    /// whose port connectivity changed since the previous build. Applied via
+    /// [`ModulePool::set_connectivity`] on the audio thread — infallible.
+    ///
+    /// New modules (in `new_modules`) do not appear here; their connectivity is
+    /// set during construction. Empty when wiring is unchanged.
+    pub connectivity_updates: Vec<(usize, PortConnectivity)>,
 }
 
 impl ExecutionPlan {
@@ -325,6 +340,7 @@ struct SlotBuildResult {
     slots: Vec<ModuleSlot>,
     new_modules: Vec<(usize, Box<dyn Module>)>,
     parameter_updates: Vec<(usize, ParameterMap)>,
+    connectivity_updates: Vec<(usize, PortConnectivity)>,
     node_states: HashMap<NodeId, NodeState>,
 }
 
@@ -383,7 +399,7 @@ impl PatchBuilder {
         let module_diff = prev_state.module_alloc.diff(&new_ids, self.module_pool_capacity)?;
 
         // Phase 6 – build ModuleSlots, collect new modules, record node states.
-        let SlotBuildResult { slots, new_modules, parameter_updates, node_states: new_node_states } = Self::build_slots(
+        let SlotBuildResult { slots, new_modules, parameter_updates, connectivity_updates, node_states: new_node_states } = Self::build_slots(
             graph,
             &order,
             &mut node_identity,
@@ -413,6 +429,7 @@ impl PatchBuilder {
                 new_modules,
                 tombstones,
                 parameter_updates,
+                connectivity_updates,
             },
             PlannerState {
                 nodes: new_node_states,
@@ -579,6 +596,7 @@ impl PatchBuilder {
         let mut slots = Vec::with_capacity(order.len());
         let mut new_modules: Vec<(usize, Box<dyn Module>)> = Vec::new();
         let mut parameter_updates: Vec<(usize, ParameterMap)> = Vec::new();
+        let mut connectivity_updates: Vec<(usize, PortConnectivity)> = Vec::new();
         let mut node_states: HashMap<NodeId, NodeState> = HashMap::with_capacity(order.len());
 
         for id in order {
@@ -659,18 +677,42 @@ impl PatchBuilder {
             let n_in = desc.inputs.len();
             let n_out = desc.outputs.len();
 
+            // Compute PortConnectivity for this node by scanning the edge list.
+            let mut connectivity = PortConnectivity::new(n_in, n_out);
+            for (from, out_name, out_idx, to, in_name, in_idx, _) in &edges {
+                if *to == *id {
+                    if let Some(i) = desc
+                        .inputs
+                        .iter()
+                        .position(|p| p.name == in_name.as_str() && p.index == *in_idx)
+                    {
+                        connectivity.inputs[i] = true;
+                    }
+                }
+                if *from == *id {
+                    if let Some(j) = desc
+                        .outputs
+                        .iter()
+                        .position(|p| p.name == out_name.as_str() && p.index == *out_idx)
+                    {
+                        connectivity.outputs[j] = true;
+                    }
+                }
+            }
+
             // If this node is new or type-changed, install the fresh module.
             // Surviving nodes stay in the pool untouched, but may need parameter updates.
             if !prev_state.module_alloc.pool_map.contains_key(&instance_id) {
                 let (_, fresh_opt) = node_identity.get_mut(id).unwrap();
-                let fresh = fresh_opt.take().ok_or_else(|| {
+                let mut fresh = fresh_opt.take().ok_or_else(|| {
                     BuildError::InternalError(format!(
                         "fresh module for new/type-changed node {id:?} is missing"
                     ))
                 })?;
+                fresh.set_connectivity(connectivity.clone());
                 new_modules.push((pool_index, fresh));
             } else {
-                // Surviving module: emit a parameter diff if any values changed.
+                // Surviving module: emit parameter and connectivity diffs if changed.
                 if let Some(prev_ns) = prev_state.nodes.get(id) {
                     let diff: ParameterMap = node
                         .parameter_map
@@ -680,6 +722,9 @@ impl PatchBuilder {
                         .collect();
                     if !diff.is_empty() {
                         parameter_updates.push((pool_index, diff));
+                    }
+                    if connectivity != prev_ns.connectivity {
+                        connectivity_updates.push((pool_index, connectivity.clone()));
                     }
                 }
             }
@@ -692,6 +737,7 @@ impl PatchBuilder {
                     pool_index,
                     parameter_map: node.parameter_map.clone(),
                     shape: desc.shape.clone(),
+                    connectivity,
                 },
             );
 
@@ -705,7 +751,7 @@ impl PatchBuilder {
             });
         }
 
-        Ok(SlotBuildResult { slots, new_modules, parameter_updates, node_states })
+        Ok(SlotBuildResult { slots, new_modules, parameter_updates, connectivity_updates, node_states })
     }
 }
 

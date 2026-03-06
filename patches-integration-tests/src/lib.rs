@@ -12,8 +12,9 @@ use patches_engine::{ExecutionPlan, ModulePool};
 ///   1. Tombstone removed modules and push them to the cleanup ring buffer.
 ///   2. Install pre-initialised new modules.
 ///   3. Apply parameter diffs to surviving modules.
-///   4. Zero cable buffer slots listed in `to_zero`.
-///   5. Replace the current plan.
+///   4. Apply connectivity updates to surviving modules.
+///   5. Zero cable buffer slots listed in `to_zero`.
+///   6. Replace the current plan.
 ///
 /// `stop` drops the cleanup producer (signalling the cleanup thread to exit)
 /// and joins the thread, guaranteeing all tombstoned modules have been dropped
@@ -90,6 +91,9 @@ impl HeadlessEngine {
         }
         for (idx, params) in &plan.parameter_updates {
             self.module_pool.update_parameters(*idx, params);
+        }
+        for (idx, conn) in plan.connectivity_updates.drain(..) {
+            self.module_pool.set_connectivity(idx, conn);
         }
         for &i in &plan.to_zero {
             self.buffer_pool[i] = [0.0; 2];

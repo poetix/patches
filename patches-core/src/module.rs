@@ -116,7 +116,7 @@ pub fn validate_parameters(
 /// least one outgoing cable.
 ///
 /// Construct with [`PortConnectivity::new`], which fills both slices with `false`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PortConnectivity {
     pub inputs: Box<[bool]>,
     pub outputs: Box<[bool]>,

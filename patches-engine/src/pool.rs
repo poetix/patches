@@ -1,4 +1,4 @@
-use patches_core::{ControlSignal, Module};
+use patches_core::{ControlSignal, Module, PortConnectivity};
 use patches_core::parameter_map::ParameterMap;
 
 /// Audio-thread-owned pool of module instances.
@@ -111,6 +111,18 @@ impl ModulePool {
     pub fn update_parameters(&mut self, idx: usize, params: &ParameterMap) {
         if let Some(m) = self.modules[idx].as_mut() {
             m.update_validated_parameters(params);
+        }
+    }
+
+    /// Deliver a connectivity update to the module at `idx`.
+    ///
+    /// Calls [`Module::set_connectivity`] on the module at `idx`.
+    /// This is infallible — no `Result` is returned. Does nothing if the slot
+    /// is empty (the module may have been tombstoned between the plan being built
+    /// and adopted).
+    pub fn set_connectivity(&mut self, idx: usize, conn: PortConnectivity) {
+        if let Some(m) = self.modules[idx].as_mut() {
+            m.set_connectivity(conn);
         }
     }
 

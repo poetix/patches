@@ -1,0 +1,62 @@
+digraph DemoSynth {
+  rankdir=LR;
+  node [shape=record, fontname="Helvetica"];
+
+  clock [label="{ClockSequencer|{<quaver> quaver}}"];
+
+  seq [label="{{<clock> clock}|StepSequencer|{<pitch> pitch|<trigger> trigger|<gate> gate}}"];
+
+  glide [label="{{<in> in}|Glide|{<out> out}}"];
+
+  lfo [label="{SineOscillator|{<out> out}}"];
+  lfo2 [label="{SineOscillator|{<out> out}}"];
+
+  saw [label="{{<voct> voct}|SawOsc|{<out> out}}"];
+  sq [label="{{<voct> voct|<pulse_width> pulse_width}|SquareOsc|{<out> out}}"];
+  sub [label="{{<voct> voct}|SubSaw|{<out> out}}"];
+
+  mix [label="{{<in0> in0|<in1> in1|<in2> in2}|Sum|{<out> out}}"];
+  mix2 [label="{{<in0> in0|<in1> in1}|Sum|{<out> out}}"];
+
+  env [label="{{<trigger> trigger|<gate> gate}|ADSR|{<out> out}}"];
+  filter_env [label="{{<trigger> trigger}|ADSR|{<out> out}}"];
+
+  filter [label="{{<in> in|<cutoff_cv> cutoff_cv|<res_cv> resonance_cv}|ResLPF|{<out> out}}"];
+
+  vca [label="{{<in> in|<cv> cv}|VCA|{<out> out}}"];
+
+  out [label="{{<left> left|<right> right}|AudioOut}"];
+
+  clock:quaver -> seq:clock;
+
+  seq:pitch -> glide:in;
+  glide:out -> saw:voct;
+  glide:out -> sq:voct;
+
+  seq:pitch -> sub:voct;
+
+  seq:trigger -> env:trigger;
+  seq:trigger -> filter_env:trigger;
+  seq:gate -> env:gate;
+
+  lfo:out -> sq:pulse_width [label="0.8"];
+
+  saw:out -> mix:in0 [label="0.3"];
+  sq:out -> mix:in1 [label="0.5"];
+  sub:out -> mix:in2 [label="0.2"];
+
+  mix:out -> filter:in;
+
+  glide:out -> mix2:in0;
+  lfo2:out -> mix2:in1;
+
+  mix2:out -> filter:cutoff_cv;
+  filter_env:out -> filter:res_cv;
+
+  filter:out -> vca:in;
+
+  env:out -> vca:cv;
+
+  vca:out -> out:left;
+  vca:out -> out:right;
+}

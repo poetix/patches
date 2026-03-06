@@ -6,6 +6,8 @@ case is live-coding performance: the patch graph can be rebuilt and swapped in
 without stopping the audio stream or resetting module state (oscillator phase,
 filter history, etc.).
 
+![A synth patch that patches can run](https://github.com/poetix/patches/blob/main/demo_synth.png?raw=true)
+
 ## Goals
 
 - **Patch DSL** — a DSL for describing signal graphs of audio modules

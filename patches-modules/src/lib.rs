@@ -8,6 +8,7 @@ pub mod sum;
 pub mod vca;
 pub mod waveforms;
 pub mod glide;
+pub mod common;
 
 pub use adsr_envelope::AdsrEnvelope;
 pub use audio_out::AudioOut;

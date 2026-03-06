@@ -15,7 +15,7 @@ use crate::parameter_map::{ParameterMap, ParameterValue};
 #[derive(Debug, Clone)]
 pub enum ControlSignal {
     /// A single named float parameter update (e.g. frequency, gain).
-    ParameterUpdate { name: &'static str, value: ParameterValue },
+    Float { name: &'static str, value: f64 },
 }
 
 /// Validate `params` against `descriptor`.

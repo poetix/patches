@@ -113,6 +113,9 @@ pub struct ResonantLowpass {
 
     // ── Update counter (CV path only) ─────────────────────────────────────
     update_counter: u32,
+
+    // ── Saturation ────────────────────────────────────────────────────────
+    saturate: bool,
 }
 
 impl ResonantLowpass {
@@ -170,6 +173,11 @@ impl Module for ResonantLowpass {
                         default: 0.0,
                     },
                 },
+                ParameterDescriptor {
+                    name: "saturate",
+                    index: 0,
+                    parameter_type: ParameterKind::Bool { default: false },
+                },
             ],
             is_sink: false,
         }
@@ -205,6 +213,7 @@ impl Module for ResonantLowpass {
             s2: 0.0,
             any_cv_connected: false,
             update_counter: 0,
+            saturate: false,
         }
     }
 
@@ -214,6 +223,9 @@ impl Module for ResonantLowpass {
         }
         if let Some(ParameterValue::Float(v)) = params.get("resonance") {
             self.resonance = *v;
+        }
+        if let Some(ParameterValue::Bool(v)) = params.get("saturate") {
+            self.saturate = *v;
         }
         // In the CV path the next update_counter == 0 will recompute using the
         // new base parameters combined with the live CV values. In the static
@@ -254,9 +266,9 @@ impl Module for ResonantLowpass {
             // ── Static path: coefficients do not change ───────────────────
             let x = inputs[0];
             let y = self.b0 * x + self.s1;
-            let y_sat = fast_tanh(y);
-            self.s1 = self.b1 * x - self.a1 * y_sat + self.s2;
-            self.s2 = self.b2 * x - self.a2 * y_sat;
+            let fb = if self.saturate { fast_tanh(y) } else { y };
+            self.s1 = self.b1 * x - self.a1 * fb + self.s2;
+            self.s2 = self.b2 * x - self.a2 * fb;
             outputs[0] = y;
             return;
         }
@@ -274,7 +286,7 @@ impl Module for ResonantLowpass {
             // Effective parameters: base values offset by CV.
             // cutoff_cv is V/oct: +1 V doubles the frequency.
             let effective_cutoff =
-                (self.cutoff * exp2(inputs[1])).clamp(20.0, self.sample_rate * 0.499);
+                (self.cutoff * inputs[1].exp2()).clamp(20.0, self.sample_rate * 0.499);
             let effective_resonance = (self.resonance + inputs[2]).clamp(0.0, 1.0);
 
             let (b0t, b1t, b2t, a1t, a2t) =
@@ -296,9 +308,9 @@ impl Module for ResonantLowpass {
         // Apply filter (Transposed Direct Form II).
         let x = inputs[0];
         let y = self.b0 * x + self.s1;
-        let y_sat = fast_tanh(y); // prevent runaway self-oscillation at high resonance
-        self.s1 = self.b1 * x - self.a1 * y_sat + self.s2;
-        self.s2 = self.b2 * x - self.a2 * y_sat;
+        let fb = if self.saturate { fast_tanh(y) } else { y };
+        self.s1 = self.b1 * x - self.a1 * fb + self.s2;
+        self.s2 = self.b2 * x - self.a2 * fb;
         outputs[0] = y;
 
         // Advance interpolation toward the target.

@@ -547,10 +547,7 @@ mod tests {
 
         plan.dispatch_signal(
             recv_id,
-            ControlSignal::ParameterUpdate {
-                name: "test",
-                value: ParameterValue::Float(0.0),
-            },
+            ControlSignal::Float { name: "test", value: 0.0 },
             &mut pool,
         );
 
@@ -584,10 +581,7 @@ mod tests {
         let unknown_id = InstanceId::next();
         plan.dispatch_signal(
             unknown_id,
-            ControlSignal::ParameterUpdate {
-                name: "test",
-                value: ParameterValue::Float(0.0),
-            },
+            ControlSignal::Float { name: "test", value: 0.0 },
             &mut pool,
         );
 
@@ -608,18 +602,12 @@ mod tests {
             engine
                 .send_signal(
                     recv_id,
-                    ControlSignal::ParameterUpdate {
-                        name: "frequency",
-                        value: ParameterValue::Float(i as f64),
-                    },
+                    ControlSignal::Float { name: "frequency", value: i as f64 },
                 )
                 .expect("push should succeed while buffer has space");
         }
 
-        let overflow = ControlSignal::ParameterUpdate {
-            name: "frequency",
-            value: ParameterValue::Float(999.0),
-        };
+        let overflow = ControlSignal::Float { name: "frequency", value: 999.0 };
         let result = engine.send_signal(recv_id, overflow);
         assert!(result.is_err(), "send_signal must return Err when the buffer is full");
     }

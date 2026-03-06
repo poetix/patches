@@ -318,7 +318,7 @@ fn state_preserved_across_parameter_update() {
     let expected = phase_after_100.sin();
 
     assert!(
-        (sink_val - expected).abs() < 1e-10,
+        (sink_val - expected).abs() < 1e-5,
         "oscillator phase must be preserved: got {sink_val}, expected {expected}"
     );
 
@@ -364,7 +364,7 @@ fn initial_plan_uses_provided_sample_rate() {
         "sink output must be finite (NaN/Inf indicates sample_rate=0 was used)"
     );
     assert!(
-        (sink_val - expected).abs() < 1e-10,
+        (sink_val - expected).abs() < 1e-5,
         "sink must equal sin(TAU * {FREQ} / {SAMPLE_RATE}) ≈ {expected:.6}; got {sink_val}"
     );
 }

@@ -14,6 +14,7 @@ static SINE_TABLE: LazyLock<Vec<f64>> = LazyLock::new(|| {
     (0..1024).map(|i| (i as f64 / 1024.0 * TAU).sin()).collect()
 });
 
+// Phase is always in [0, 1), so the caller can use it directly to index into a sine table without needing to wrap it.
 #[inline(always)]
 pub fn lookup_sine(phase: f64) -> f64 {
     let index = phase * 1024.0;

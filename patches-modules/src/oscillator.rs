@@ -132,10 +132,12 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_has_no_inputs_and_one_output() {
+    fn descriptor_has_two_inputs_and_one_output() {
         let osc = make_osc(440.0);
         let desc = osc.descriptor();
-        assert_eq!(desc.inputs.len(), 0);
+        assert_eq!(desc.inputs.len(), 2);
+        assert_eq!(desc.inputs[0].name, "voct");
+        assert_eq!(desc.inputs[1].name, "fm");
         assert_eq!(desc.outputs.len(), 1);
         assert_eq!(desc.outputs[0].name, "out");
     }

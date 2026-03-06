@@ -156,14 +156,14 @@ mod tests {
         AudioEnvironment, ControlSignal, InstanceId, Module, ModuleDescriptor, ModuleShape,
         PortDescriptor, Sink,
     };
-    use patches_core::parameter_map::{ParameterMap, ParameterValue};
+    use patches_core::parameter_map::ParameterMap;
 
     use super::*;
 
     // ── Test-only modules ─────────────────────────────────────────────────────
 
     /// Outputs a constant value on its single output port.
-    /// Responds to `ControlSignal::ParameterUpdate { name: "value", .. }` by
+    /// Responds to `ControlSignal::Float { name: "value", .. }` by
     /// updating the output value, letting tests observe signal delivery via
     /// `process` output rather than downcasting.
     struct ConstSource {
@@ -214,7 +214,7 @@ mod tests {
             outputs[0] = self.value;
         }
         fn receive_signal(&mut self, signal: ControlSignal) {
-            if let ControlSignal::ParameterUpdate { name: "value", value: ParameterValue::Float(v) } = signal {
+            if let ControlSignal::Float { name: "value", value: v } = signal {
                 self.value = v;
             }
         }
@@ -344,7 +344,7 @@ mod tests {
         pool.install(1, Box::new(ConstSource::new(1.0)));
         pool.tombstone(1);
         // Must not panic.
-        pool.receive_signal(1, ControlSignal::ParameterUpdate { name: "x", value: ParameterValue::Float(0.0) });
+        pool.receive_signal(1, ControlSignal::Float { name: "x", value: 0.0 });
     }
 
     #[test]
@@ -359,14 +359,14 @@ mod tests {
     fn receive_signal_on_empty_slot_is_noop() {
         let mut pool = ModulePool::new(4);
         // Must not panic.
-        pool.receive_signal(3, ControlSignal::ParameterUpdate { name: "x", value: ParameterValue::Float(0.0) });
+        pool.receive_signal(3, ControlSignal::Float { name: "x", value: 0.0 });
     }
 
     #[test]
     fn receive_signal_updates_module_state() {
         let mut pool = ModulePool::new(4);
         pool.install(0, Box::new(ConstSource::new(0.0)));
-        pool.receive_signal(0, ControlSignal::ParameterUpdate { name: "value", value: ParameterValue::Float(0.9) });
+        pool.receive_signal(0, ControlSignal::Float { name: "value", value: 0.9 });
         let mut out = [0.0_f64];
         pool.process(0, &[], &mut out);
         assert!((out[0] - 0.9).abs() < 1e-9, "process output should reflect the updated value");

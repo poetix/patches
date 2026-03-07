@@ -8,7 +8,7 @@ use patches_core::parameter_map::{ParameterMap, ParameterValue};
 /// A pre-parsed step in the sequencer pattern.
 #[derive(Debug, Clone, PartialEq)]
 enum Step {
-    /// A named note with a V/OCT pitch value (relative to C2=0.0).
+    /// A named note with a V/OCT pitch value (relative to C0=0.0).
     Note { voct: f64 },
     /// A rest: gate=0, trigger=0; pitch holds previous value.
     Rest,
@@ -86,7 +86,7 @@ fn parse_step(s: &str) -> Result<Step, ParseStepError> {
     }
 
     let semitone_index = semitone_base + accidental;
-    let voct = (octave as f64 - 2.0) + semitone_index as f64 / 12.0;
+    let voct = octave as f64 + semitone_index as f64 / 12.0;
     Ok(Step::Note { voct })
 }
 
@@ -99,7 +99,7 @@ fn parse_step(s: &str) -> Result<Step, ParseStepError> {
 ///   inputs[3] — reset
 ///
 /// Output ports:
-///   outputs[0] — pitch  (V/OCT, C2=0.0)
+///   outputs[0] — pitch  (V/OCT, C0=0.0)
 ///   outputs[1] — trigger (1.0 on the clock-advance sample, 0.0 otherwise)
 ///   outputs[2] — gate    (1.0 while a note or tie is active)
 pub struct StepSequencer {
@@ -333,18 +333,18 @@ mod tests {
 
     #[test]
     fn parse_note_c2() {
-        assert_eq!(parse_step("C2"), Ok(Step::Note { voct: 0.0 }));
+        assert_eq!(parse_step("C2"), Ok(Step::Note { voct: 2.0 }));
     }
 
     #[test]
     fn parse_note_c3() {
-        assert_eq!(parse_step("C3"), Ok(Step::Note { voct: 1.0 }));
+        assert_eq!(parse_step("C3"), Ok(Step::Note { voct: 3.0 }));
     }
 
     #[test]
     fn parse_note_sharp() {
-        // C#2: semitone 1, octave 2 → voct = 1/12
-        let expected = 1.0 / 12.0;
+        // C#2: semitone 1, octave 2 → voct = 2 + 1/12
+        let expected = 2.0 + 1.0 / 12.0;
         match parse_step("C#2").unwrap() {
             Step::Note { voct } => assert!((voct - expected).abs() < 1e-12),
             _ => panic!("expected Note"),
@@ -353,8 +353,8 @@ mod tests {
 
     #[test]
     fn parse_note_flat() {
-        // Bb3: B(11) + b(-1) = 10, octave 3 → voct = 1.0 + 10/12
-        let expected = 1.0 + 10.0 / 12.0;
+        // Bb3: B(11) + b(-1) = 10, octave 3 → voct = 3.0 + 10/12
+        let expected = 3.0 + 10.0 / 12.0;
         match parse_step("Bb3").unwrap() {
             Step::Note { voct } => assert!((voct - expected).abs() < 1e-12),
             _ => panic!("expected Note"),
@@ -446,14 +446,14 @@ mod tests {
         tick_ctrl(seq.as_mut(), 0.0, 0.0, 0.0, 0.0);
 
         // Before first clock: step_index=0 → C3 Note, but trigger_pending=false.
-        // playing=true, current_pitch=0.0 (C2), gate=1 (Note step), trigger=0.
+        // playing=true, current_pitch=0.0 (C0), gate=1 (Note step), trigger=0.
         let (pitch, trigger, gate) = tick(seq.as_mut(), 0.0);
         assert_eq!(gate, 1.0, "gate at step 0 (C3)");
         assert_eq!(trigger, 0.0, "no trigger before first clock");
-        assert_eq!(pitch, 0.0, "pitch is initial current_pitch C2");
+        assert_eq!(pitch, 0.0, "pitch is initial current_pitch C0");
 
         // Rising edge → advance to step 1 = D3
-        let d3 = 1.0 + 2.0 / 12.0; // (3-2) + semitone(D=2)/12
+        let d3 = 3.0 + 2.0 / 12.0; // octave 3 + semitone(D=2)/12
         let (pitch, trigger, gate) = tick(seq.as_mut(), 1.0);
         assert_eq!(gate, 1.0, "gate on D3");
         assert_eq!(trigger, 1.0, "trigger on D3 advance");
@@ -481,7 +481,7 @@ mod tests {
 
         // Clock low, then rising edge → wraps back to step 0 = C3
         tick(seq.as_mut(), 0.0);
-        let c3 = 1.0; // (3-2) + 0/12
+        let c3 = 3.0; // octave 3 + 0/12
         let (pitch, trigger, gate) = tick(seq.as_mut(), 1.0);
         assert_eq!(gate, 1.0, "gate on C3 re-entry");
         assert_eq!(trigger, 1.0, "trigger on C3 re-entry");
@@ -538,7 +538,7 @@ mod tests {
 
         // Next clock → advance from 0 to step 1 = D3
         let (pitch, trigger, gate) = tick(seq.as_mut(), 1.0);
-        let d3 = 1.0 + 2.0 / 12.0; // D3: (3-2) + semitone(D=2)/12
+        let d3 = 3.0 + 2.0 / 12.0; // D3: octave 3 + semitone(D=2)/12
         assert!((pitch - d3).abs() < 1e-12, "D3 voct after reset, got {}", pitch);
         assert_eq!(trigger, 1.0);
         assert_eq!(gate, 1.0);

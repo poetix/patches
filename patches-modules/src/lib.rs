@@ -6,34 +6,36 @@ pub mod oscillator;
 pub mod step_sequencer;
 pub mod sum;
 pub mod vca;
-pub mod waveforms;
 pub mod glide;
+pub mod lfo;
+pub mod tuner;
 pub mod common;
 
 pub use adsr_envelope::AdsrEnvelope;
 pub use audio_out::AudioOut;
 pub use clock_sequencer::ClockSequencer;
 pub use filter::ResonantLowpass;
-pub use oscillator::SineOscillator;
+pub use oscillator::Oscillator;
 pub use step_sequencer::StepSequencer;
 pub use sum::Sum;
 pub use vca::Vca;
-pub use waveforms::{SawtoothOscillator, SquareOscillator};
 pub use glide::Glide;
+pub use lfo::Lfo;
+pub use tuner::Tuner;
 
 pub fn default_registry() -> patches_core::Registry {
     let mut r = patches_core::Registry::new();
-    r.register::<SineOscillator>();
+    r.register::<Oscillator>();
     r.register::<Sum>();
     r.register::<Vca>();
     r.register::<AudioOut>();
-    r.register::<SawtoothOscillator>();
-    r.register::<SquareOscillator>();
     r.register::<AdsrEnvelope>();
     r.register::<ClockSequencer>();
     r.register::<StepSequencer>();
     r.register::<Glide>();
+    r.register::<Lfo>();
     r.register::<ResonantLowpass>();
+    r.register::<Tuner>();
     r
 }
 
@@ -50,17 +52,17 @@ mod tests {
         let params = ParameterMap::new();
 
         for name in &[
-            "SineOscillator",
+            "Oscillator",
             "Sum",
             "Vca",
             "AudioOut",
-            "SawtoothOscillator",
-            "SquareOscillator",
             "AdsrEnvelope",
             "ClockSequencer",
             "StepSequencer",
             "Glide",
+            "Lfo",
             "ResonantLowpass",
+            "Tuner",
         ] {
             assert!(
                 r.create(name, &env, &shape, &params).is_ok(),

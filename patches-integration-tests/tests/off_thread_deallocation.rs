@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 use patches_core::{AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleShape};
 use patches_core::parameter_map::ParameterMap;
 use patches_engine::{build_patch, PlannerState};
-use patches_modules::{AudioOut, SineOscillator};
+use patches_modules::{AudioOut, Oscillator};
 use patches_integration_tests::HeadlessEngine;
 
 // ── ThreadIdDropSpy ───────────────────────────────────────────────────────────
@@ -92,7 +92,7 @@ fn sine_out_graph() -> patches_core::ModuleGraph {
     graph
         .add_module(
             "osc",
-            SineOscillator::describe(&ModuleShape { channels: 0, length: 0 }),
+            Oscillator::describe(&ModuleShape { channels: 0, length: 0 }),
             &params,
         )
         .unwrap();
@@ -106,7 +106,7 @@ fn sine_out_graph() -> patches_core::ModuleGraph {
     graph
         .connect(
             &NodeId::from("osc"),
-            PortRef { name: "out", index: 0 },
+            PortRef { name: "sine", index: 0 },
             &NodeId::from("out"),
             PortRef { name: "left", index: 0 },
             1.0,
@@ -115,7 +115,7 @@ fn sine_out_graph() -> patches_core::ModuleGraph {
     graph
         .connect(
             &NodeId::from("osc"),
-            PortRef { name: "out", index: 0 },
+            PortRef { name: "sine", index: 0 },
             &NodeId::from("out"),
             PortRef { name: "right", index: 0 },
             1.0,
@@ -135,7 +135,7 @@ fn tombstoned_module_dropped_on_cleanup_thread() {
     let registry = patches_modules::default_registry();
     let graph = sine_out_graph();
 
-    // Build the initial plan (SineOscillator → AudioOut).
+    // Build the initial plan (Oscillator → AudioOut).
     let (plan_1, state_1) =
         build_patch(&graph, &registry, &ENV, &PlannerState::empty(), POOL_CAP, MODULE_CAP)
             .unwrap();

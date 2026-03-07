@@ -1,4 +1,10 @@
 
+/// Middle C0 frequency in Hz (MIDI note 0), used as the V/OCT reference pitch.
+/// V/OCT oscillators add the user-supplied `frequency_offset` to this value,
+/// so a `frequency_offset` of `0.0` places the oscillator at C0 (≈ 16.35 Hz)
+/// before any V/OCT input is applied.
+pub const C0_FREQ: f64 = 16.351_598;
+
 #[derive(PartialEq)]
 pub enum FMMode {
     Linear,
@@ -7,19 +13,19 @@ pub enum FMMode {
 
 pub struct UnitPhaseAccumulator {
     pub phase: f64,
-    phase_increment: f64,
+    pub phase_increment: f64,
     sample_rate_reciprocal: f64,
     frequency_control: FrequencyControl,
     pub is_modulating: bool,
 }
 
 impl UnitPhaseAccumulator {
-    pub fn new(sample_rate: f64) -> Self {
+    pub fn new(sample_rate: f64, reference_frequency: f64) -> Self {
         Self {
             phase: 0.0,
             phase_increment: 0.0,
             sample_rate_reciprocal: 1.0 / sample_rate,
-            frequency_control: FrequencyControl::new(),
+            frequency_control: FrequencyControl::new(reference_frequency),
             is_modulating: false,
         }
     }
@@ -38,9 +44,12 @@ impl UnitPhaseAccumulator {
         self.is_modulating = voct_modulating || fm_modulating;
     }
 
-    pub fn set_base_frequency(&mut self, frequency: f64) {
-        self.frequency_control.base_frequency = frequency;
-        self.update_phase_increment(frequency);
+    /// Set the frequency offset (Hz) added to the reference frequency.
+    /// Recomputes the static phase increment.
+    pub fn set_frequency_offset(&mut self, frequency_offset: f64) {
+        self.frequency_control.frequency_offset = frequency_offset;
+        let base = self.frequency_control.base_pitch();
+        self.update_phase_increment(base);
     }
 
     fn update_phase_increment(&mut self, frequency: f64) {
@@ -60,7 +69,8 @@ impl UnitPhaseAccumulator {
 }
 
 struct FrequencyControl {
-    pub base_frequency: f64,
+    reference_frequency: f64,
+    frequency_offset: f64,
     pub voct_modulating: bool,
     pub fm_modulating: bool,
     pub fm_mode: FMMode,
@@ -68,17 +78,22 @@ struct FrequencyControl {
 
 impl FrequencyControl {
 
-    fn new() -> Self {
+    fn new(reference_frequency: f64) -> Self {
         Self {
-            base_frequency: 440.0,
+            reference_frequency,
+            frequency_offset: 0.0,
             voct_modulating: false,
             fm_modulating: false,
             fm_mode: FMMode::Linear,
         }
     }
 
+    fn base_pitch(&self) -> f64 {
+        self.reference_frequency + self.frequency_offset
+    }
+
     fn compute(&self, voct_input: f64, fm_input: f64) -> f64 {
-        let mut frequency = self.base_frequency;
+        let mut frequency = self.base_pitch();
         let mut exp_mod = 0.0;
         if self.voct_modulating {
             exp_mod = voct_input;

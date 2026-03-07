@@ -1,32 +1,25 @@
-# demo_synth.yaml — 16-step minor-pentatonic phrase at 120 BPM
+# mutual_fm.yaml — two Oscillators applying logarithmic FM to each other
 #
 # Signal flow:
 #
-#   clock ──semiquaver──→ seq ──pitch──→ glide ──out──→ saw ──out──┐
-#                          │                    └──────→ sq  ──out──┤ scale 0.3/0.7
-#                          ├──trigger──→ env                lfo ──→ sq.pulse_width
-#                          └──gate────→ env ──out──→ vca.cv
-#                                               mix ──out──→ vca ──out──→ out.left
-#                                                                    └──→ out.right
-#
-# Hot-reload tips:
-#   - Change bpm to speed up or slow down the pattern.
-#   - Edit the steps list to try different melodies ("-" = rest, "_" = hold/tie).
-#   - Adjust attack/decay/sustain/release for a different envelope shape.
-#   - Change glide_ms to add or remove portamento between notes.
+#   sine1 ──sine──→ sine2.fm (scale 0.2)
+#   sine2 ──sine──→ sine1.fm (scale 0.2)
+#   sine1 ──sine──→ mix.in/0  (scale 0.5)
+#   sine2 ──sine──→ mix.in/1  (scale 0.5)
+#   mix ──out──→ out.left + out.right
 
 nodes:
   
   sine1:
-    module: SineOscillator
+    module: Oscillator
     params:
-      frequency: 110.0
+      frequency: 117.0
       fm_type: logarithmic
 
   sine2:
-    module: SineOscillator
+    module: Oscillator
     params:
-      frequency: 230.0
+      frequency: 118.0
       fm_type: logarithmic
       
   mix:
@@ -42,25 +35,25 @@ nodes:
 
 cables:
   - from: sine1
-    output: out
+    output: triangle
     to: sine2
-    input: fm
-    scale: 0.2
+    input: phase_mod
+    scale: 0.1
 
   - from: sine2
-    output: out
+    output: sine
     to: sine1
-    input: fm
-    scale: 0.2
+    input: phase_mod
+    scale: 0.1
 
   - from: sine1
-    output: out
+    output: triangle
     to: mix
     input: in/0
     scale: 0.5
 
   - from: sine2
-    output: out
+    output: triangle
     to: mix
     input: in/1
     scale: 0.5

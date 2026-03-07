@@ -6,8 +6,7 @@ use patches_core::{Module, ModuleGraph, ModuleShape, NodeId, PortRef};
 use patches_core::parameter_map::{ParameterMap, ParameterValue};
 use patches_engine::PatchEngine;
 use patches_modules::{
-    AdsrEnvelope, AudioOut, ClockSequencer, Glide, SawtoothOscillator, SineOscillator,
-    SquareOscillator, StepSequencer, Sum, Vca,
+    AdsrEnvelope, AudioOut, ClockSequencer, Glide, Oscillator, StepSequencer, Sum, Vca,
 };
 
 const BPM: f64 = 120.0;
@@ -58,15 +57,10 @@ fn build_graph() -> Result<ModuleGraph, Box<dyn std::error::Error>> {
 
     let mut lfo_params = ParameterMap::new();
     lfo_params.insert("frequency".to_string(), ParameterValue::Float(0.2));
-    graph.add_module(lfo.clone(), SineOscillator::describe(&ModuleShape { channels: 0, length: 0 }), &lfo_params)?;
+    graph.add_module(lfo.clone(), Oscillator::describe(&ModuleShape { channels: 0, length: 0 }), &lfo_params)?;
 
-    let mut saw_params = ParameterMap::new();
-    saw_params.insert("base_voct".to_string(), ParameterValue::Float(0.0));
-    graph.add_module(saw.clone(), SawtoothOscillator::describe(&ModuleShape { channels: 0, length: 0 }), &saw_params)?;
-
-    let mut sq_params = ParameterMap::new();
-    sq_params.insert("base_voct".to_string(), ParameterValue::Float(1.005));
-    graph.add_module(sq.clone(), SquareOscillator::describe(&ModuleShape { channels: 0, length: 0 }), &sq_params)?;
+    graph.add_module(saw.clone(), Oscillator::describe(&ModuleShape { channels: 0, length: 0 }), &ParameterMap::new())?;
+    graph.add_module(sq.clone(), Oscillator::describe(&ModuleShape { channels: 0, length: 0 }), &ParameterMap::new())?;
 
     graph.add_module(mix.clone(), Sum::describe(&ModuleShape { channels: 2, length: 0 }), &ParameterMap::new())?;
 
@@ -98,11 +92,11 @@ fn build_graph() -> Result<ModuleGraph, Box<dyn std::error::Error>> {
     graph.connect(&seq, p("gate"), &env, p("gate"), 1.0)?;
 
     // lfo -> sq.pulse_width
-    graph.connect(&lfo, p("out"), &sq, p("pulse_width"), 0.8)?;
-    // saw.out → mix.in[0]
-    graph.connect(&saw, p("out"), &mix, PortRef { name: "in", index: 0 }, 0.3)?;
-    // sq.out → mix.in[1]
-    graph.connect(&sq, p("out"), &mix, PortRef { name: "in", index: 1 }, 0.7)?;
+    graph.connect(&lfo, p("sine"), &sq, p("pulse_width"), 0.8)?;
+    // saw.sawtooth → mix.in[0]
+    graph.connect(&saw, p("sawtooth"), &mix, PortRef { name: "in", index: 0 }, 0.3)?;
+    // sq.square → mix.in[1]
+    graph.connect(&sq, p("square"), &mix, PortRef { name: "in", index: 1 }, 0.7)?;
 
     // mix.out → vca.in
     graph.connect(&mix, p("out"), &vca, p("in"), 1.0)?;

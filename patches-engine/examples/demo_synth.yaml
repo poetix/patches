@@ -2,9 +2,9 @@
 #
 # Signal flow:
 #
-#   clock ──semiquaver──→ seq ──pitch──→ glide ──out──→ saw ──out──┐
-#                          │                    └──────→ sq  ──out──┤ scale 0.3/0.7
-#                          ├──trigger──→ env                lfo ──→ sq.pulse_width
+#   clock ──semiquaver──→ seq ──pitch──→ glide ──out──→ saw ──sawtooth──┐
+#                          │                    └──────→ sq  ──square───┤ scale 0.3/0.5/0.2
+#                          ├──trigger──→ env         lfo ──sine──→ sq.pulse_width
 #                          └──gate────→ env ──out──→ vca.cv
 #                                               mix ──out──→ vca ──out──→ out.left
 #                                                                    └──→ out.right
@@ -51,29 +51,27 @@ nodes:
       glide_ms: 50.0
 
   lfo:
-    module: SineOscillator
+    module: Oscillator
     params:
       frequency: 0.4
 
   lfo2:
-    module: SineOscillator
+    module: Oscillator
     params:
       frequency: 0.1
 
   saw:
-    module: SawtoothOscillator
-    params:
-      base_voct: 0.0
+    module: Oscillator
+    frequency: 1.0
+
 
   sq:
-    module: SquareOscillator
-    params:
-      base_voct: 0.005
-  
+    module: Oscillator
+    frequency: 1.0
+
   sub:
-    module: SawtoothOscillator
-    params:
-      base_voct: -1
+    module: Oscillator
+    frequency: 1.0
 
   mix:
     module: Sum
@@ -153,25 +151,25 @@ cables:
     input: gate
 
   - from: lfo
-    output: out
+    output: sine
     to: sq
     input: pulse_width
     scale: 0.8
 
   - from: saw
-    output: out
+    output: sawtooth
     to: mix
     input: in
     scale: 0.3
 
   - from: sq
-    output: out
+    output: square
     to: mix
     input: in/1
     scale: 0.5
 
   - from: sub
-    output: out
+    output: sawtooth
     to: mix
     input: in/2
     scale: 0.2
@@ -192,7 +190,7 @@ cables:
     input: in/0
 
   - from: lfo2
-    output: out
+    output: sine
     to: mix2
     input: in/1
     scale: 1.0

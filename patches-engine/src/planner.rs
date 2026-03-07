@@ -268,7 +268,7 @@ mod tests {
         ModuleShape, NodeId, PortDescriptor, PortRef,
     };
     use patches_core::parameter_map::{ParameterMap, ParameterValue};
-    use patches_modules::{AudioOut, SineOscillator};
+    use patches_modules::{AudioOut, Oscillator};
 
     use super::*;
     use crate::builder::ExecutionPlan;
@@ -280,14 +280,14 @@ mod tests {
 
     fn simple_graph(freq: f64) -> ModuleGraph {
         let mut graph = ModuleGraph::new();
-        let osc_desc = SineOscillator::describe(&ModuleShape { channels: 0, length: 0 });
+        let osc_desc = Oscillator::describe(&ModuleShape { channels: 0, length: 0 });
         let out_desc = AudioOut::describe(&ModuleShape { channels: 0, length: 0 });
         let mut pm = ParameterMap::new();
         pm.insert("frequency".to_string(), ParameterValue::Float(freq));
         graph.add_module("osc", osc_desc, &pm).unwrap();
         graph.add_module("out", out_desc, &ParameterMap::new()).unwrap();
-        graph.connect(&NodeId::from("osc"), p("out"), &NodeId::from("out"), p("left"), 1.0).unwrap();
-        graph.connect(&NodeId::from("osc"), p("out"), &NodeId::from("out"), p("right"), 1.0).unwrap();
+        graph.connect(&NodeId::from("osc"), p("sine"), &NodeId::from("out"), p("left"), 1.0).unwrap();
+        graph.connect(&NodeId::from("osc"), p("sine"), &NodeId::from("out"), p("right"), 1.0).unwrap();
         graph
     }
 

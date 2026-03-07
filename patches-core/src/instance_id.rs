@@ -25,6 +25,13 @@ impl InstanceId {
     pub fn next() -> Self {
         Self(NEXT_INSTANCE_ID.fetch_add(1, Ordering::Relaxed))
     }
+
+    /// Return the raw counter value. Useful for seeding PRNGs; note the first
+    /// allocated ID has value `0`, so callers that need a non-zero seed should
+    /// add an offset (e.g. `as_u64() + 1`).
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
 }
 
 #[cfg(test)]

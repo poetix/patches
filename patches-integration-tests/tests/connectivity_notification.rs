@@ -6,7 +6,7 @@ use patches_core::{
 };
 use patches_core::parameter_map::{ParameterMap, ParameterValue};
 use patches_engine::{build_patch, PlannerState};
-use patches_modules::{AudioOut, SineOscillator};
+use patches_modules::{AudioOut, Oscillator};
 
 // ── constants ─────────────────────────────────────────────────────────────────
 
@@ -81,7 +81,7 @@ fn p(name: &'static str) -> PortRef {
 fn make_registry() -> Registry {
     let mut r = Registry::new();
     r.register::<Probe>();
-    r.register::<SineOscillator>();
+    r.register::<Oscillator>();
     r.register::<AudioOut>();
     r
 }
@@ -105,14 +105,14 @@ fn probe_to_out_graph() -> ModuleGraph {
     graph
 }
 
-/// SineOsc("osc") → probe.in, Probe("probe") → AudioOut("out").
+/// Osc("osc") → probe.in, Probe("probe") → AudioOut("out").
 /// Both probe.in and probe.out are connected.
 fn probe_with_input_graph() -> ModuleGraph {
     let mut graph = ModuleGraph::new();
     let mut params = ParameterMap::new();
     params.insert("frequency".to_string(), ParameterValue::Float(440.0));
     graph
-        .add_module("osc", SineOscillator::describe(&ModuleShape { channels: 0, length: 0 }), &params)
+        .add_module("osc", Oscillator::describe(&ModuleShape { channels: 0, length: 0 }), &params)
         .unwrap();
     graph
         .add_module("probe", Probe::describe(&ModuleShape { channels: 0, length: 0 }), &ParameterMap::new())
@@ -121,7 +121,7 @@ fn probe_with_input_graph() -> ModuleGraph {
         .add_module("out", AudioOut::describe(&ModuleShape { channels: 0, length: 0 }), &ParameterMap::new())
         .unwrap();
     graph
-        .connect(&NodeId::from("osc"), p("out"), &NodeId::from("probe"), p("in"), 1.0)
+        .connect(&NodeId::from("osc"), p("sine"), &NodeId::from("probe"), p("in"), 1.0)
         .unwrap();
     graph
         .connect(&NodeId::from("probe"), p("out"), &NodeId::from("out"), p("left"), 1.0)

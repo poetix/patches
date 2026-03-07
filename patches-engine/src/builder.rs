@@ -778,7 +778,7 @@ mod tests {
     use super::*;
     use patches_core::{AudioEnvironment, InstanceId, Module, ModuleShape, NodeId, PortRef};
     use patches_core::parameter_map::{ParameterMap, ParameterValue};
-    use patches_modules::{AudioOut, SawtoothOscillator, SineOscillator};
+    use patches_modules::{AudioOut, Oscillator, Sum};
 
     fn p(name: &'static str) -> PortRef {
         PortRef { name, index: 0 }
@@ -786,17 +786,17 @@ mod tests {
 
     fn sine_to_audio_out_graph() -> ModuleGraph {
         let mut graph = ModuleGraph::new();
-        let sine_desc = SineOscillator::describe(&ModuleShape { channels: 0, length: 0 });
+        let sine_desc = Oscillator::describe(&ModuleShape { channels: 0, length: 0 });
         let out_desc = AudioOut::describe(&ModuleShape { channels: 0, length: 0 });
         let mut sine_params = ParameterMap::new();
         sine_params.insert("frequency".to_string(), ParameterValue::Float(440.0));
         graph.add_module("a_sine", sine_desc, &sine_params).unwrap();
         graph.add_module("b_out", out_desc, &ParameterMap::new()).unwrap();
         graph
-            .connect(&NodeId::from("a_sine"), p("out"), &NodeId::from("b_out"), p("left"), 1.0)
+            .connect(&NodeId::from("a_sine"), p("sine"), &NodeId::from("b_out"), p("left"), 1.0)
             .unwrap();
         graph
-            .connect(&NodeId::from("a_sine"), p("out"), &NodeId::from("b_out"), p("right"), 1.0)
+            .connect(&NodeId::from("a_sine"), p("sine"), &NodeId::from("b_out"), p("right"), 1.0)
             .unwrap();
         graph
     }
@@ -884,7 +884,7 @@ mod tests {
     #[test]
     fn no_audio_out_returns_error() {
         let mut graph = ModuleGraph::new();
-        let sine_desc = SineOscillator::describe(&ModuleShape { channels: 0, length: 0 });
+        let sine_desc = Oscillator::describe(&ModuleShape { channels: 0, length: 0 });
         let mut p_map = ParameterMap::new();
         p_map.insert("frequency".to_string(), ParameterValue::Float(440.0));
         graph.add_module("sine", sine_desc, &p_map).unwrap();
@@ -899,7 +899,7 @@ mod tests {
     #[test]
     fn multiple_audio_out_returns_error() {
         let mut graph = ModuleGraph::new();
-        let sine_desc = SineOscillator::describe(&ModuleShape { channels: 0, length: 0 });
+        let sine_desc = Oscillator::describe(&ModuleShape { channels: 0, length: 0 });
         let out1_desc = AudioOut::describe(&ModuleShape { channels: 0, length: 0 });
         let out2_desc = AudioOut::describe(&ModuleShape { channels: 0, length: 0 });
         let mut p_map = ParameterMap::new();
@@ -907,10 +907,10 @@ mod tests {
         graph.add_module("sine", sine_desc, &p_map).unwrap();
         graph.add_module("out1", out1_desc, &ParameterMap::new()).unwrap();
         graph.add_module("out2", out2_desc, &ParameterMap::new()).unwrap();
-        graph.connect(&NodeId::from("sine"), p("out"), &NodeId::from("out1"), p("left"), 1.0).unwrap();
-        graph.connect(&NodeId::from("sine"), p("out"), &NodeId::from("out1"), p("right"), 1.0).unwrap();
-        graph.connect(&NodeId::from("sine"), p("out"), &NodeId::from("out2"), p("left"), 1.0).unwrap();
-        graph.connect(&NodeId::from("sine"), p("out"), &NodeId::from("out2"), p("right"), 1.0).unwrap();
+        graph.connect(&NodeId::from("sine"), p("sine"), &NodeId::from("out1"), p("left"), 1.0).unwrap();
+        graph.connect(&NodeId::from("sine"), p("sine"), &NodeId::from("out1"), p("right"), 1.0).unwrap();
+        graph.connect(&NodeId::from("sine"), p("sine"), &NodeId::from("out2"), p("left"), 1.0).unwrap();
+        graph.connect(&NodeId::from("sine"), p("sine"), &NodeId::from("out2"), p("right"), 1.0).unwrap();
         let registry = default_registry();
         let env = default_env();
         assert!(matches!(
@@ -923,14 +923,14 @@ mod tests {
     fn input_scale_is_applied_at_tick_time() {
         let make_graph = |scale: f64| {
             let mut g = ModuleGraph::new();
-            let sine_desc = SineOscillator::describe(&ModuleShape { channels: 0, length: 0 });
+            let sine_desc = Oscillator::describe(&ModuleShape { channels: 0, length: 0 });
             let out_desc = AudioOut::describe(&ModuleShape { channels: 0, length: 0 });
             let mut p_map = ParameterMap::new();
             p_map.insert("frequency".to_string(), ParameterValue::Float(440.0));
             g.add_module("sine", sine_desc, &p_map).unwrap();
             g.add_module("out", out_desc, &ParameterMap::new()).unwrap();
-            g.connect(&NodeId::from("sine"), p("out"), &NodeId::from("out"), p("left"), scale).unwrap();
-            g.connect(&NodeId::from("sine"), p("out"), &NodeId::from("out"), p("right"), scale).unwrap();
+            g.connect(&NodeId::from("sine"), p("sine"), &NodeId::from("out"), p("left"), scale).unwrap();
+            g.connect(&NodeId::from("sine"), p("sine"), &NodeId::from("out"), p("right"), scale).unwrap();
             g
         };
 
@@ -968,8 +968,8 @@ mod tests {
         // Graph A: two sines → AudioOut
         let mut graph_a = ModuleGraph::new();
         {
-            let sine_a = SineOscillator::describe(&ModuleShape { channels: 0, length: 0 });
-            let sine_b = SineOscillator::describe(&ModuleShape { channels: 0, length: 0 });
+            let sine_a = Oscillator::describe(&ModuleShape { channels: 0, length: 0 });
+            let sine_b = Oscillator::describe(&ModuleShape { channels: 0, length: 0 });
             let out_desc = AudioOut::describe(&ModuleShape { channels: 0, length: 0 });
             let mut pa = ParameterMap::new();
             pa.insert("frequency".to_string(), ParameterValue::Float(440.0));
@@ -979,10 +979,10 @@ mod tests {
             graph_a.add_module("sine_b", sine_b, &pb).unwrap();
             graph_a.add_module("out", out_desc, &ParameterMap::new()).unwrap();
             graph_a
-                .connect(&NodeId::from("sine_a"), p("out"), &NodeId::from("out"), p("left"), 1.0)
+                .connect(&NodeId::from("sine_a"), p("sine"), &NodeId::from("out"), p("left"), 1.0)
                 .unwrap();
             graph_a
-                .connect(&NodeId::from("sine_b"), p("out"), &NodeId::from("out"), p("right"), 1.0)
+                .connect(&NodeId::from("sine_b"), p("sine"), &NodeId::from("out"), p("right"), 1.0)
                 .unwrap();
         }
 
@@ -994,17 +994,17 @@ mod tests {
         // Graph B: only sine_a (sine_b removed)
         let mut graph_b = ModuleGraph::new();
         {
-            let sine_a = SineOscillator::describe(&ModuleShape { channels: 0, length: 0 });
+            let sine_a = Oscillator::describe(&ModuleShape { channels: 0, length: 0 });
             let out_desc = AudioOut::describe(&ModuleShape { channels: 0, length: 0 });
             let mut pa = ParameterMap::new();
             pa.insert("frequency".to_string(), ParameterValue::Float(440.0));
             graph_b.add_module("sine_a", sine_a, &pa).unwrap();
             graph_b.add_module("out", out_desc, &ParameterMap::new()).unwrap();
             graph_b
-                .connect(&NodeId::from("sine_a"), p("out"), &NodeId::from("out"), p("left"), 1.0)
+                .connect(&NodeId::from("sine_a"), p("sine"), &NodeId::from("out"), p("left"), 1.0)
                 .unwrap();
             graph_b
-                .connect(&NodeId::from("sine_a"), p("out"), &NodeId::from("out"), p("right"), 1.0)
+                .connect(&NodeId::from("sine_a"), p("sine"), &NodeId::from("out"), p("right"), 1.0)
                 .unwrap();
         }
 
@@ -1028,8 +1028,8 @@ mod tests {
 
         let build_two = |state: &PlannerState| {
             let mut g = ModuleGraph::new();
-            let s1 = SineOscillator::describe(&ModuleShape { channels: 0, length: 0 });
-            let s2 = SineOscillator::describe(&ModuleShape { channels: 0, length: 0 });
+            let s1 = Oscillator::describe(&ModuleShape { channels: 0, length: 0 });
+            let s2 = Oscillator::describe(&ModuleShape { channels: 0, length: 0 });
             let out = AudioOut::describe(&ModuleShape { channels: 0, length: 0 });
             let mut p1 = ParameterMap::new();
             p1.insert("frequency".to_string(), ParameterValue::Float(440.0));
@@ -1038,22 +1038,22 @@ mod tests {
             g.add_module("s1", s1, &p1).unwrap();
             g.add_module("s2", s2, &p2).unwrap();
             g.add_module("out", out, &ParameterMap::new()).unwrap();
-            g.connect(&NodeId::from("s1"), p("out"), &NodeId::from("out"), p("left"), 1.0).unwrap();
-            g.connect(&NodeId::from("s2"), p("out"), &NodeId::from("out"), p("right"), 1.0).unwrap();
+            g.connect(&NodeId::from("s1"), p("sine"), &NodeId::from("out"), p("left"), 1.0).unwrap();
+            g.connect(&NodeId::from("s2"), p("sine"), &NodeId::from("out"), p("right"), 1.0).unwrap();
             let (_, new_state) = builder.build_patch(&g, &registry, &env, state).unwrap();
             new_state
         };
 
         let build_one = |state: &PlannerState| {
             let mut g = ModuleGraph::new();
-            let s = SineOscillator::describe(&ModuleShape { channels: 0, length: 0 });
+            let s = Oscillator::describe(&ModuleShape { channels: 0, length: 0 });
             let out = AudioOut::describe(&ModuleShape { channels: 0, length: 0 });
             let mut pm = ParameterMap::new();
             pm.insert("frequency".to_string(), ParameterValue::Float(440.0));
             g.add_module("s1", s, &pm).unwrap();
             g.add_module("out", out, &ParameterMap::new()).unwrap();
-            g.connect(&NodeId::from("s1"), p("out"), &NodeId::from("out"), p("left"), 1.0).unwrap();
-            g.connect(&NodeId::from("s1"), p("out"), &NodeId::from("out"), p("right"), 1.0).unwrap();
+            g.connect(&NodeId::from("s1"), p("sine"), &NodeId::from("out"), p("left"), 1.0).unwrap();
+            g.connect(&NodeId::from("s1"), p("sine"), &NodeId::from("out"), p("right"), 1.0).unwrap();
             let (_, new_state) = builder.build_patch(&g, &registry, &env, state).unwrap();
             new_state
         };
@@ -1077,14 +1077,14 @@ mod tests {
     #[test]
     fn pool_exhausted_error_when_capacity_exceeded() {
         let mut graph = ModuleGraph::new();
-        let sine_desc = SineOscillator::describe(&ModuleShape { channels: 0, length: 0 });
+        let sine_desc = Oscillator::describe(&ModuleShape { channels: 0, length: 0 });
         let out_desc = AudioOut::describe(&ModuleShape { channels: 0, length: 0 });
         let mut pm = ParameterMap::new();
         pm.insert("frequency".to_string(), ParameterValue::Float(440.0));
         graph.add_module("sine", sine_desc, &pm).unwrap();
         graph.add_module("out", out_desc, &ParameterMap::new()).unwrap();
-        graph.connect(&NodeId::from("sine"), p("out"), &NodeId::from("out"), p("left"), 1.0).unwrap();
-        graph.connect(&NodeId::from("sine"), p("out"), &NodeId::from("out"), p("right"), 1.0).unwrap();
+        graph.connect(&NodeId::from("sine"), p("sine"), &NodeId::from("out"), p("left"), 1.0).unwrap();
+        graph.connect(&NodeId::from("sine"), p("sine"), &NodeId::from("out"), p("right"), 1.0).unwrap();
         let registry = default_registry();
         let env = default_env();
         assert!(matches!(
@@ -1139,8 +1139,8 @@ mod tests {
         // Graph with two sines.
         let mut graph_a = ModuleGraph::new();
         {
-            let s1 = SineOscillator::describe(&ModuleShape { channels: 0, length: 0 });
-            let s2 = SineOscillator::describe(&ModuleShape { channels: 0, length: 0 });
+            let s1 = Oscillator::describe(&ModuleShape { channels: 0, length: 0 });
+            let s2 = Oscillator::describe(&ModuleShape { channels: 0, length: 0 });
             let out = AudioOut::describe(&ModuleShape { channels: 0, length: 0 });
             let mut p1 = ParameterMap::new();
             p1.insert("frequency".to_string(), ParameterValue::Float(440.0));
@@ -1149,8 +1149,8 @@ mod tests {
             graph_a.add_module("s1", s1, &p1).unwrap();
             graph_a.add_module("s2", s2, &p2).unwrap();
             graph_a.add_module("out", out, &ParameterMap::new()).unwrap();
-            graph_a.connect(&NodeId::from("s1"), p("out"), &NodeId::from("out"), p("left"), 1.0).unwrap();
-            graph_a.connect(&NodeId::from("s2"), p("out"), &NodeId::from("out"), p("right"), 1.0).unwrap();
+            graph_a.connect(&NodeId::from("s1"), p("sine"), &NodeId::from("out"), p("left"), 1.0).unwrap();
+            graph_a.connect(&NodeId::from("s2"), p("sine"), &NodeId::from("out"), p("right"), 1.0).unwrap();
         }
         let (_plan_a, state_a) =
             builder.build_patch(&graph_a, &registry, &env, &PlannerState::empty()).unwrap();
@@ -1159,14 +1159,14 @@ mod tests {
         // Graph with only s1.
         let mut graph_b = ModuleGraph::new();
         {
-            let s1 = SineOscillator::describe(&ModuleShape { channels: 0, length: 0 });
+            let s1 = Oscillator::describe(&ModuleShape { channels: 0, length: 0 });
             let out = AudioOut::describe(&ModuleShape { channels: 0, length: 0 });
             let mut p1 = ParameterMap::new();
             p1.insert("frequency".to_string(), ParameterValue::Float(440.0));
             graph_b.add_module("s1", s1, &p1).unwrap();
             graph_b.add_module("out", out, &ParameterMap::new()).unwrap();
-            graph_b.connect(&NodeId::from("s1"), p("out"), &NodeId::from("out"), p("left"), 1.0).unwrap();
-            graph_b.connect(&NodeId::from("s1"), p("out"), &NodeId::from("out"), p("right"), 1.0).unwrap();
+            graph_b.connect(&NodeId::from("s1"), p("sine"), &NodeId::from("out"), p("left"), 1.0).unwrap();
+            graph_b.connect(&NodeId::from("s1"), p("sine"), &NodeId::from("out"), p("right"), 1.0).unwrap();
         }
         let (plan_b, _state_b) =
             builder.build_patch(&graph_b, &registry, &env, &state_a).unwrap();
@@ -1183,32 +1183,31 @@ mod tests {
         let env = default_env();
         let builder = default_builder();
 
-        // Graph A: SineOscillator at "osc".
+        // Graph A: Oscillator at "osc" (sine output).
         let mut graph_a = ModuleGraph::new();
         {
-            let sine = SineOscillator::describe(&ModuleShape { channels: 0, length: 0 });
+            let sine = Oscillator::describe(&ModuleShape { channels: 0, length: 0 });
             let out = AudioOut::describe(&ModuleShape { channels: 0, length: 0 });
             let mut pm = ParameterMap::new();
             pm.insert("frequency".to_string(), ParameterValue::Float(440.0));
             graph_a.add_module("osc", sine, &pm).unwrap();
             graph_a.add_module("out", out, &ParameterMap::new()).unwrap();
-            // SineOscillator has no inputs so we wire its "out" to both channels.
-            graph_a.connect(&NodeId::from("osc"), p("out"), &NodeId::from("out"), p("left"), 1.0).unwrap();
-            graph_a.connect(&NodeId::from("osc"), p("out"), &NodeId::from("out"), p("right"), 1.0).unwrap();
+            // Oscillator has a sine output; wire it to both channels.
+            graph_a.connect(&NodeId::from("osc"), p("sine"), &NodeId::from("out"), p("left"), 1.0).unwrap();
+            graph_a.connect(&NodeId::from("osc"), p("sine"), &NodeId::from("out"), p("right"), 1.0).unwrap();
         }
         let (_plan_a, state_a) =
             builder.build_patch(&graph_a, &registry, &env, &PlannerState::empty()).unwrap();
         let old_osc_id = state_a.nodes[&NodeId::from("osc")].instance_id;
         let old_osc_slot = state_a.nodes[&NodeId::from("osc")].pool_index;
 
-        // Graph B: SawtoothOscillator at "osc" (type changed).
+        // Graph B: Sum (1-channel) at "osc" (type changed from Oscillator).
         let mut graph_b = ModuleGraph::new();
         {
-            let saw = SawtoothOscillator::describe(&ModuleShape { channels: 0, length: 0 });
+            let sum = Sum::describe(&ModuleShape { channels: 1, length: 0 });
             let out = AudioOut::describe(&ModuleShape { channels: 0, length: 0 });
-            graph_b.add_module("osc", saw, &ParameterMap::new()).unwrap();
+            graph_b.add_module("osc", sum, &ParameterMap::new()).unwrap();
             graph_b.add_module("out", out, &ParameterMap::new()).unwrap();
-            // SawtoothOscillator has a "voct" input (wired to zero buffer implicitly).
             graph_b.connect(&NodeId::from("osc"), p("out"), &NodeId::from("out"), p("left"), 1.0).unwrap();
             graph_b.connect(&NodeId::from("osc"), p("out"), &NodeId::from("out"), p("right"), 1.0).unwrap();
         }
@@ -1224,7 +1223,7 @@ mod tests {
             plan_b.tombstones.contains(&old_osc_slot),
             "old osc pool slot must be tombstoned on type change"
         );
-        // Exactly one new module installed (the new SawtoothOscillator; AudioOut survives).
+        // Exactly one new module installed (the new Sum; AudioOut survives).
         assert_eq!(plan_b.new_modules.len(), 1, "only the type-changed node should be new");
     }
 
@@ -1344,19 +1343,19 @@ mod tests {
         // Rebuild with same topology but different frequency.
         let mut graph_b = ModuleGraph::new();
         {
-            let sine_desc = SineOscillator::describe(&ModuleShape { channels: 0, length: 0 });
+            let sine_desc = Oscillator::describe(&ModuleShape { channels: 0, length: 0 });
             let out_desc = AudioOut::describe(&ModuleShape { channels: 0, length: 0 });
             let mut sine_params = ParameterMap::new();
             sine_params.insert("frequency".to_string(), ParameterValue::Float(880.0));
             graph_b.add_module("a_sine", sine_desc, &sine_params).unwrap();
             graph_b.add_module("b_out", out_desc, &ParameterMap::new()).unwrap();
             graph_b
-                .connect(&NodeId::from("a_sine"), p("out"), &NodeId::from("b_out"), p("left"), 1.0)
+                .connect(&NodeId::from("a_sine"), p("sine"), &NodeId::from("b_out"), p("left"), 1.0)
                 .unwrap();
             graph_b
                 .connect(
                     &NodeId::from("a_sine"),
-                    p("out"),
+                    p("sine"),
                     &NodeId::from("b_out"),
                     p("right"),
                     1.0,
@@ -1418,8 +1417,8 @@ mod tests {
         // Graph A: sine_a (440 Hz) + sine_b (880 Hz) → AudioOut.
         let mut graph_a = ModuleGraph::new();
         {
-            let s_a = SineOscillator::describe(&ModuleShape { channels: 0, length: 0 });
-            let s_b = SineOscillator::describe(&ModuleShape { channels: 0, length: 0 });
+            let s_a = Oscillator::describe(&ModuleShape { channels: 0, length: 0 });
+            let s_b = Oscillator::describe(&ModuleShape { channels: 0, length: 0 });
             let out = AudioOut::describe(&ModuleShape { channels: 0, length: 0 });
             let mut pa = ParameterMap::new();
             pa.insert("frequency".to_string(), ParameterValue::Float(440.0));
@@ -1429,10 +1428,10 @@ mod tests {
             graph_a.add_module("s_b", s_b, &pb).unwrap();
             graph_a.add_module("out", out, &ParameterMap::new()).unwrap();
             graph_a
-                .connect(&NodeId::from("s_a"), p("out"), &NodeId::from("out"), p("left"), 1.0)
+                .connect(&NodeId::from("s_a"), p("sine"), &NodeId::from("out"), p("left"), 1.0)
                 .unwrap();
             graph_a
-                .connect(&NodeId::from("s_b"), p("out"), &NodeId::from("out"), p("right"), 1.0)
+                .connect(&NodeId::from("s_b"), p("sine"), &NodeId::from("out"), p("right"), 1.0)
                 .unwrap();
         }
         let (_plan_a, state_a) =
@@ -1442,8 +1441,8 @@ mod tests {
         // Graph B: sine_a (changed to 660 Hz) + new sine_c (1000 Hz), sine_b removed.
         let mut graph_b = ModuleGraph::new();
         {
-            let s_a = SineOscillator::describe(&ModuleShape { channels: 0, length: 0 });
-            let s_c = SineOscillator::describe(&ModuleShape { channels: 0, length: 0 });
+            let s_a = Oscillator::describe(&ModuleShape { channels: 0, length: 0 });
+            let s_c = Oscillator::describe(&ModuleShape { channels: 0, length: 0 });
             let out = AudioOut::describe(&ModuleShape { channels: 0, length: 0 });
             let mut pa = ParameterMap::new();
             pa.insert("frequency".to_string(), ParameterValue::Float(660.0));
@@ -1453,10 +1452,10 @@ mod tests {
             graph_b.add_module("s_c", s_c, &pc).unwrap();
             graph_b.add_module("out", out, &ParameterMap::new()).unwrap();
             graph_b
-                .connect(&NodeId::from("s_a"), p("out"), &NodeId::from("out"), p("left"), 1.0)
+                .connect(&NodeId::from("s_a"), p("sine"), &NodeId::from("out"), p("left"), 1.0)
                 .unwrap();
             graph_b
-                .connect(&NodeId::from("s_c"), p("out"), &NodeId::from("out"), p("right"), 1.0)
+                .connect(&NodeId::from("s_c"), p("sine"), &NodeId::from("out"), p("right"), 1.0)
                 .unwrap();
         }
         let (plan_b, _state_b) =
@@ -1477,9 +1476,9 @@ mod tests {
         assert!(has_s_a_update, "s_a parameter update must appear in parameter_updates");
         // s_c must not appear in parameter_updates (it is new, not surviving).
         assert_eq!(
-            plan_b.new_modules.iter().filter(|(_, m)| m.descriptor().module_name == "SineOscillator").count(),
+            plan_b.new_modules.iter().filter(|(_, m)| m.descriptor().module_name == "Oscillator").count(),
             1,
-            "exactly one new SineOscillator (s_c) in new_modules"
+            "exactly one new Oscillator (s_c) must appear in new_modules"
         );
     }
 }

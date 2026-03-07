@@ -3,7 +3,8 @@ use std::f64::consts::TAU;
 use patches_core::{AudioEnvironment, Module, ModuleGraph, ModuleShape, NodeId, PortRef};
 use patches_core::parameter_map::{ParameterMap, ParameterValue};
 use patches_engine::{build_patch, ExecutionPlan, ModulePool, PlannerState};
-use patches_modules::{AudioOut, SawtoothOscillator, SineOscillator, StepSequencer, Sum};
+use patches_modules::{AudioOut, Oscillator, StepSequencer, Sum};
+use patches_modules::common::frequency::C0_FREQ;
 
 // ── constants ─────────────────────────────────────────────────────────────────
 
@@ -21,40 +22,40 @@ fn p(name: &'static str) -> PortRef {
     PortRef { name, index: 0 }
 }
 
-/// SineOscillator → AudioOut.
+/// Oscillator → AudioOut (sine output).
 fn sine_out_graph(osc_id: &str, freq: f64) -> ModuleGraph {
     let mut graph = ModuleGraph::new();
     let mut params = ParameterMap::new();
     params.insert("frequency".to_string(), ParameterValue::Float(freq));
-    graph.add_module(osc_id, SineOscillator::describe(&ModuleShape { channels: 0, length: 0 }), &params).unwrap();
+    graph.add_module(osc_id, Oscillator::describe(&ModuleShape { channels: 0, length: 0 }), &params).unwrap();
     graph.add_module("out", AudioOut::describe(&ModuleShape { channels: 0, length: 0 }), &ParameterMap::new()).unwrap();
-    graph.connect(&NodeId::from(osc_id), p("out"), &NodeId::from("out"), p("left"), 1.0).unwrap();
-    graph.connect(&NodeId::from(osc_id), p("out"), &NodeId::from("out"), p("right"), 1.0).unwrap();
+    graph.connect(&NodeId::from(osc_id), p("sine"), &NodeId::from("out"), p("left"), 1.0).unwrap();
+    graph.connect(&NodeId::from(osc_id), p("sine"), &NodeId::from("out"), p("right"), 1.0).unwrap();
     graph
 }
 
-/// SineOsc("osc_a") + SineOsc("osc_b") → Sum(2) → AudioOut.
+/// Osc("osc_a") + Osc("osc_b") → Sum(2) → AudioOut.
 fn two_osc_graph(freq_a: f64, freq_b: f64) -> ModuleGraph {
     let mut graph = ModuleGraph::new();
     let mut pa = ParameterMap::new();
     pa.insert("frequency".to_string(), ParameterValue::Float(freq_a));
     let mut pb = ParameterMap::new();
     pb.insert("frequency".to_string(), ParameterValue::Float(freq_b));
-    graph.add_module("osc_a", SineOscillator::describe(&ModuleShape { channels: 0, length: 0 }), &pa).unwrap();
-    graph.add_module("osc_b", SineOscillator::describe(&ModuleShape { channels: 0, length: 0 }), &pb).unwrap();
+    graph.add_module("osc_a", Oscillator::describe(&ModuleShape { channels: 0, length: 0 }), &pa).unwrap();
+    graph.add_module("osc_b", Oscillator::describe(&ModuleShape { channels: 0, length: 0 }), &pb).unwrap();
     graph.add_module("mix", Sum::describe(&ModuleShape { channels: 2, length: 0 }), &ParameterMap::new()).unwrap();
     graph.add_module("out", AudioOut::describe(&ModuleShape { channels: 0, length: 0 }), &ParameterMap::new()).unwrap();
-    graph.connect(&NodeId::from("osc_a"), p("out"), &NodeId::from("mix"), PortRef { name: "in", index: 0 }, 1.0).unwrap();
-    graph.connect(&NodeId::from("osc_b"), p("out"), &NodeId::from("mix"), PortRef { name: "in", index: 1 }, 1.0).unwrap();
+    graph.connect(&NodeId::from("osc_a"), p("sine"), &NodeId::from("mix"), PortRef { name: "in", index: 0 }, 1.0).unwrap();
+    graph.connect(&NodeId::from("osc_b"), p("sine"), &NodeId::from("mix"), PortRef { name: "in", index: 1 }, 1.0).unwrap();
     graph.connect(&NodeId::from("mix"), p("out"), &NodeId::from("out"), p("left"), 1.0).unwrap();
     graph.connect(&NodeId::from("mix"), p("out"), &NodeId::from("out"), p("right"), 1.0).unwrap();
     graph
 }
 
-/// SawtoothOscillator (voct input unconnected) → AudioOut.
-fn sawtooth_out_graph() -> ModuleGraph {
+/// Sum(1-channel) → AudioOut. Used as a different module type in type-change tests.
+fn sum_out_graph() -> ModuleGraph {
     let mut graph = ModuleGraph::new();
-    graph.add_module("osc", SawtoothOscillator::describe(&ModuleShape { channels: 0, length: 0 }), &ParameterMap::new()).unwrap();
+    graph.add_module("osc", Sum::describe(&ModuleShape { channels: 1, length: 0 }), &ParameterMap::new()).unwrap();
     graph.add_module("out", AudioOut::describe(&ModuleShape { channels: 0, length: 0 }), &ParameterMap::new()).unwrap();
     graph.connect(&NodeId::from("osc"), p("out"), &NodeId::from("out"), p("left"), 1.0).unwrap();
     graph.connect(&NodeId::from("osc"), p("out"), &NodeId::from("out"), p("right"), 1.0).unwrap();
@@ -203,31 +204,31 @@ fn type_change_triggers_tombstone_and_new_module() {
 
     let old_osc_slot = state_a.nodes[&NodeId::from("osc")].pool_index;
 
-    // graph_b: same NodeId "osc" but SawtoothOscillator instead of SineOscillator.
-    let graph_b = sawtooth_out_graph();
+    // graph_b: same NodeId "osc" but Sum instead of Oscillator (type changed).
+    let graph_b = sum_out_graph();
     let (plan_b, state_b) =
         build_patch(&graph_b, &registry, &env(), &state_a, POOL_CAP, MODULE_CAP).unwrap();
 
     assert!(
         plan_b.tombstones.contains(&old_osc_slot),
-        "old SineOscillator slot must be tombstoned on type change"
+        "old Oscillator slot must be tombstoned on type change"
     );
 
     let new_osc_slot = state_b.nodes[&NodeId::from("osc")].pool_index;
     let new_module_slots: Vec<usize> = plan_b.new_modules.iter().map(|(idx, _)| *idx).collect();
     assert!(
         new_module_slots.contains(&new_osc_slot),
-        "new SawtoothOscillator must appear in new_modules"
+        "new Sum must appear in new_modules"
     );
 
-    // Verify the new module is actually a SawtoothOscillator.
+    // Verify the new module is actually a Sum.
     let new_osc = plan_b.new_modules.iter()
         .find(|(idx, _)| *idx == new_osc_slot)
         .map(|(_, m)| m)
         .unwrap();
     assert!(
-        new_osc.as_any().downcast_ref::<SawtoothOscillator>().is_some(),
-        "new module must be a SawtoothOscillator"
+        new_osc.as_any().downcast_ref::<Sum>().is_some(),
+        "new module must be a Sum"
     );
 }
 
@@ -305,9 +306,10 @@ fn state_preserved_across_parameter_update() {
 
     let sink_val = pool.read_sink_left();
 
-    // Expected: sin(phase accumulated after TICKS ticks at 440 Hz).
+    // Expected: sin(phase accumulated after TICKS ticks at C0_FREQ+440 Hz).
+    // Oscillator uses reference_frequency=C0_FREQ and frequency_offset=440.
     // Simulate the exact phase accumulation to match floating-point behavior.
-    let phi_440 = TAU * 440.0 / SAMPLE_RATE;
+    let phi_440 = TAU * (C0_FREQ + 440.0) / SAMPLE_RATE;
     let phase_after_100 = {
         let mut p = 0.0f64;
         for _ in 0..TICKS {
@@ -355,7 +357,8 @@ fn initial_plan_uses_provided_sample_rate() {
         plan.tick(&mut pool, &mut bufs, i % 2);
     }
 
-    let phi = TAU * FREQ / SAMPLE_RATE;
+    // Oscillator uses reference_frequency=C0_FREQ and frequency_offset=FREQ.
+    let phi = TAU * (C0_FREQ + FREQ) / SAMPLE_RATE;
     let expected = phi.sin();
     let sink_val = pool.read_sink_left();
 

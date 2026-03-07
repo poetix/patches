@@ -5,7 +5,7 @@ use std::time::Duration;
 use patches_core::{Module, ModuleGraph, ModuleShape, NodeId, PortRef};
 use patches_core::parameter_map::{ParameterMap, ParameterValue};
 use patches_engine::{build_patch, PlannerState, SoundEngine};
-use patches_modules::{AudioOut, Sum, SineOscillator};
+use patches_modules::{AudioOut, Sum, Oscillator};
 
 // A major third above 440 Hz: 440 * 2^(4/12)
 const FREQ_A4: f64 = 440.0;
@@ -23,14 +23,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut params_b = ParameterMap::new();
     params_b.insert("frequency".to_string(), ParameterValue::Float(FREQ_CS5));
 
-    graph.add_module(sine_a.clone(), SineOscillator::describe(&ModuleShape { channels: 0, length: 0 }), &params_a)?;
-    graph.add_module(sine_b.clone(), SineOscillator::describe(&ModuleShape { channels: 0, length: 0 }), &params_b)?;
+    graph.add_module(sine_a.clone(), Oscillator::describe(&ModuleShape { channels: 0, length: 0 }), &params_a)?;
+    graph.add_module(sine_b.clone(), Oscillator::describe(&ModuleShape { channels: 0, length: 0 }), &params_b)?;
     graph.add_module(mix.clone(), Sum::describe(&ModuleShape { channels: 2, length: 0 }), &ParameterMap::new())?;
     graph.add_module(out.clone(), AudioOut::describe(&ModuleShape { channels: 0, length: 0 }), &ParameterMap::new())?;
 
     let p = |name| PortRef { name, index: 0 };
-    graph.connect(&sine_a, p("out"), &mix, PortRef { name: "in", index: 0 }, 0.5)?;
-    graph.connect(&sine_b, p("out"), &mix, PortRef { name: "in", index: 1 }, 0.5)?;
+    graph.connect(&sine_a, p("sine"), &mix, PortRef { name: "in", index: 0 }, 0.5)?;
+    graph.connect(&sine_b, p("sine"), &mix, PortRef { name: "in", index: 1 }, 0.5)?;
     graph.connect(&mix, p("out"), &out, p("left"), 1.0)?;
     graph.connect(&mix, p("out"), &out, p("right"), 1.0)?;
 

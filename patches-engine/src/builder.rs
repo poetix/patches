@@ -214,12 +214,17 @@ impl PlannerState {
 pub struct ModuleSlot {
     /// Index into the audio-thread-owned module pool (`[Option<Box<dyn Module>>]`).
     pub pool_index: usize,
-    /// Indices into the [`ExecutionPlan`] buffer pool — one per input port.
-    pub input_buffers: Vec<usize>,
-    /// Scaling factors applied to each input at read-time — one per input port.
+    /// Inputs whose cable scale is exactly `1.0`: `(scratch_index, buf_index)`.
     ///
-    /// `1.0` for unconnected inputs; the edge's scale for connected inputs.
-    pub input_scales: Vec<f64>,
+    /// Segregated at plan-build time so [`ExecutionPlan::tick`] can copy these
+    /// without a multiply.  Unconnected ports (which read from the permanent-zero
+    /// buffer slot 0 with an implicit scale of 1.0) are included here.
+    pub unscaled_inputs: Vec<(usize, usize)>,
+    /// Inputs whose cable scale differs from `1.0`: `(scratch_index, buf_index, scale)`.
+    ///
+    /// Segregated at plan-build time so the multiply-accumulate path in
+    /// [`ExecutionPlan::tick`] operates on a compact, branch-free list.
+    pub scaled_inputs: Vec<(usize, usize, f64)>,
     /// Indices into the [`ExecutionPlan`] buffer pool — one per output port.
     pub output_buffers: Vec<usize>,
     /// Pre-allocated scratch space for reading input values before `process`.
@@ -298,8 +303,11 @@ impl ExecutionPlan {
         let ri = 1 - wi;
 
         for slot in self.slots.iter_mut() {
-            for (j, &buf_idx) in slot.input_buffers.iter().enumerate() {
-                slot.input_scratch[j] = buffer_pool[buf_idx][ri] * slot.input_scales[j];
+            for &(j, buf_idx) in &slot.unscaled_inputs {
+                slot.input_scratch[j] = buffer_pool[buf_idx][ri];
+            }
+            for &(j, buf_idx, scale) in &slot.scaled_inputs {
+                slot.input_scratch[j] = buffer_pool[buf_idx][ri] * scale;
             }
             pool.process(slot.pool_index, &slot.input_scratch, &mut slot.output_scratch);
             for (j, &buf_idx) in slot.output_buffers.iter().enumerate() {
@@ -611,8 +619,9 @@ impl PatchBuilder {
                 ))
             })?;
 
-            // Build input buffer assignments from the edge list.
-            let (input_buffers, input_scales): (Vec<usize>, Vec<f64>) = desc
+            // Build input buffer assignments from the edge list, then partition
+            // by scale so tick() can run separate branch-free loops.
+            let resolved_inputs: Vec<(usize, f64)> = desc
                 .inputs
                 .iter()
                 .map(|port| {
@@ -654,9 +663,17 @@ impl PatchBuilder {
                         .unwrap_or((0, 1.0));
                     Ok(result)
                 })
-                .collect::<Result<Vec<_>, BuildError>>()?
-                .into_iter()
-                .unzip();
+                .collect::<Result<Vec<_>, BuildError>>()?;
+
+            let mut unscaled_inputs: Vec<(usize, usize)> = Vec::new();
+            let mut scaled_inputs: Vec<(usize, usize, f64)> = Vec::new();
+            for (j, (buf_idx, scale)) in resolved_inputs.into_iter().enumerate() {
+                if scale == 1.0 {
+                    unscaled_inputs.push((j, buf_idx));
+                } else {
+                    scaled_inputs.push((j, buf_idx, scale));
+                }
+            }
 
             let output_buffers: Vec<usize> = desc
                 .outputs
@@ -743,8 +760,8 @@ impl PatchBuilder {
 
             slots.push(ModuleSlot {
                 pool_index,
-                input_buffers,
-                input_scales,
+                unscaled_inputs,
+                scaled_inputs,
                 output_buffers,
                 input_scratch: vec![0.0; n_in],
                 output_scratch: vec![0.0; n_out],
@@ -859,8 +876,10 @@ mod tests {
             .unwrap();
 
         let sine_out_buf = plan.slots[sine_idx].output_buffers[0];
-        let left_buf = plan.slots[audio_out_idx].input_buffers[0];
-        let right_buf = plan.slots[audio_out_idx].input_buffers[1];
+        // Both inputs are scale=1.0 fanouts; find them in unscaled_inputs by scratch index.
+        let ao = &plan.slots[audio_out_idx];
+        let left_buf = ao.unscaled_inputs.iter().find(|&&(j, _)| j == 0).unwrap().1;
+        let right_buf = ao.unscaled_inputs.iter().find(|&&(j, _)| j == 1).unwrap().1;
 
         assert_eq!(sine_out_buf, left_buf, "left input must use sine output buffer");
         assert_eq!(sine_out_buf, right_buf, "right input must use sine output buffer");

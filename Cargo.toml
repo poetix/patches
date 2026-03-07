@@ -7,3 +7,6 @@ members = [
     "patches-player",
 ]
 resolver = "2"
+
+[profile.release]
+debug = 1  # line-level debug info for profiling symbols

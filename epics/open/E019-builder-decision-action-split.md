@@ -2,7 +2,7 @@
 id: "E019"
 title: Builder refactor — separate decision phase from action phase
 created: 2026-03-08
-tickets: ["0096", "0097", "0098", "0099"]
+tickets: ["0096", "0097", "0098", "0099", "0100", "0101"]
 ---
 
 ## Summary
@@ -34,12 +34,14 @@ ticket because it touches every module implementation.
 
 ## Tickets
 
-| ID   | Title                                                                 | Priority | Depends on |
-|------|-----------------------------------------------------------------------|----------|------------|
-| 0096 | Externally-assigned `InstanceId`: remove auto-mint from constructors  | high     | —          |
-| 0097 | Extract `resolve_input_buffers` and `partition_inputs`                | medium   | —          |
-| 0098 | Extract `compute_connectivity`                                        | medium   | —          |
-| 0099 | Extract and test `classify_nodes` decision function                   | high     | 0096       |
+| ID   | Title                                                                | Priority | Depends on |
+|------|----------------------------------------------------------------------|----------|------------|
+| 0096 | Externally-assigned `InstanceId`: remove auto-mint from constructors | high     | —          |
+| 0097 | Extract `resolve_input_buffers` and `partition_inputs`               | medium   | —          |
+| 0098 | Extract `compute_connectivity`                                       | medium   | —          |
+| 0099 | Extract and test `classify_nodes` decision function                  | high     | 0096       |
+| 0100 | Build edge lookup caches to eliminate O(N·E) scans                  | medium   | 0099       |
+| 0101 | Encapsulate edge lookup caches in `GraphIndex` / `ResolvedGraph`     | low      | 0100       |
 
 ## Definition of done
 

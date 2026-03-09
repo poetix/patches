@@ -331,11 +331,8 @@ impl ExecutionPlan {
 
 // ── Intermediate build results ────────────────────────────────────────────────
 
-/// Maps each [`NodeId`] to its assigned [`InstanceId`] and, for new or
-/// type-changed nodes, the freshly-instantiated module (absent for survivors).
-type NodeIdentityMap = HashMap<NodeId, (InstanceId, Option<Box<dyn Module>>)>;
-
-/// Result of Phase 4 (buffer allocation), passed into Phase 6 (slot building).
+/// Result of the buffer allocation phase, passed into the action phase of
+/// [`PatchBuilder::build_patch`].
 struct BufferAllocation {
     output_buf: HashMap<(NodeId, usize), usize>,
     to_zero: Vec<usize>,
@@ -343,13 +340,27 @@ struct BufferAllocation {
     next_hwm: usize,
 }
 
-/// Result of Phase 6 (slot building).
-struct SlotBuildResult {
-    slots: Vec<ModuleSlot>,
-    new_modules: Vec<(usize, Box<dyn Module>)>,
-    parameter_updates: Vec<(usize, ParameterMap)>,
-    connectivity_updates: Vec<(usize, PortConnectivity)>,
-    node_states: HashMap<NodeId, NodeState>,
+/// Per-node decision produced by [`classify_nodes`].
+///
+/// The decision phase is pure: it reads the graph and previous state but does
+/// not mint [`InstanceId`]s or call `registry.create`. Both side effects happen
+/// in the action phase that follows.
+pub(crate) enum NodeDecision<'a> {
+    /// Node is new, or its module type or shape changed.
+    /// A fresh module must be instantiated in the action phase.
+    Install {
+        module_name: &'static str,
+        shape: &'a ModuleShape,
+        params: &'a ParameterMap,
+    },
+    /// Node is surviving. The existing module stays in the pool.
+    /// Non-empty `param_diff` or `connectivity_changed == true` means diffs
+    /// must be applied on plan adoption.
+    Update {
+        instance_id: InstanceId,
+        param_diff: ParameterMap,
+        connectivity_changed: bool,
+    },
 }
 
 // ── Decision-phase helpers ────────────────────────────────────────────────────
@@ -453,6 +464,60 @@ fn partition_inputs(resolved: Vec<(usize, f64)>) -> PartitionedInputs {
     (unscaled, scaled)
 }
 
+/// Classify every node in `order` as [`NodeDecision::Install`] or [`NodeDecision::Update`]
+/// by diffing against `prev_state`.
+///
+/// - A node absent from `prev_state.nodes` → `Install`.
+/// - A node whose `module_name` or `shape` changed → `Install`.
+/// - Otherwise → `Update`, with a key-by-key parameter diff and a boolean
+///   indicating whether the computed [`PortConnectivity`] changed.
+///
+/// Pure: no [`InstanceId`]s are minted, no modules are instantiated.
+fn classify_nodes<'a>(
+    graph: &'a ModuleGraph,
+    order: &[NodeId],
+    edges: &[(NodeId, String, u32, NodeId, String, u32, f64)],
+    prev_state: &PlannerState,
+) -> Result<Vec<(NodeId, NodeDecision<'a>)>, BuildError> {
+    let mut decisions = Vec::with_capacity(order.len());
+
+    for id in order {
+        let node = graph.get_node(id).ok_or_else(|| {
+            BuildError::InternalError(format!("node {id:?} missing from graph"))
+        })?;
+        let desc = &node.module_descriptor;
+
+        let decision = match prev_state.nodes.get(id) {
+            Some(prev_ns)
+                if prev_ns.module_name == desc.module_name && prev_ns.shape == desc.shape =>
+            {
+                // Surviving node: compute parameter diff and connectivity diff.
+                let param_diff: ParameterMap = node
+                    .parameter_map
+                    .iter()
+                    .filter(|(k, v)| prev_ns.parameter_map.get(*k) != Some(v))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                let new_connectivity = compute_connectivity(desc, id, edges);
+                let connectivity_changed = new_connectivity != prev_ns.connectivity;
+                NodeDecision::Update { instance_id: prev_ns.instance_id, param_diff, connectivity_changed }
+            }
+            _ => {
+                // New, type-changed, or shape-changed node → fresh installation.
+                NodeDecision::Install {
+                    module_name: desc.module_name,
+                    shape: &desc.shape,
+                    params: &node.parameter_map,
+                }
+            }
+        };
+
+        decisions.push((id.clone(), decision));
+    }
+
+    Ok(decisions)
+}
+
 // ── PatchBuilder ──────────────────────────────────────────────────────────────
 
 /// Produces [`ExecutionPlan`]s from [`ModuleGraph`]s, diffing against the
@@ -489,33 +554,139 @@ impl PatchBuilder {
     ) -> Result<(ExecutionPlan, PlannerState), BuildError> {
         let node_ids = graph.node_ids();
 
-        // Phase 1 – assign stable InstanceIds; instantiate new/type-changed modules.
-        let mut node_identity =
-            self.assign_instance_ids(graph, &node_ids, prev_state, registry, env)?;
-
-        // Phase 2 – locate the single sink node.
+        // Phase 1 – locate the single sink node.
         let sink = Self::find_sink(graph, &node_ids)?;
 
-        // Phase 3 – sort into execution order and record the sink's position.
+        // Phase 2 – sort into execution order and record the sink's position.
         let (order, audio_out_index) = Self::compute_order(&node_ids, &sink)?;
 
-        // Phase 4 – assign stable cable buffer indices.
+        // Phase 3 – assign stable cable buffer indices.
         let buf_alloc = self.allocate_buffers(graph, &order, &prev_state.buffer_alloc)?;
 
-        // Phase 5 – assign stable module pool slots.
-        let new_ids: HashSet<InstanceId> =
-            node_ids.iter().map(|id| node_identity[id].0).collect();
+        // ── Decision phase ───────────────────────────────────────────────────
+        // Classify each node as Install or Update; compute param/connectivity
+        // diffs for survivors. Pure: no InstanceIds minted, no modules created.
+        let edges = graph.edge_list();
+        let decisions = classify_nodes(graph, &order, &edges, prev_state)?;
+
+        // ── Action phase ─────────────────────────────────────────────────────
+
+        // Step A – mint InstanceIds for Install nodes and instantiate fresh modules.
+        let mut instance_ids: HashMap<NodeId, InstanceId> =
+            HashMap::with_capacity(decisions.len());
+        let mut fresh_modules: HashMap<NodeId, Box<dyn Module>> =
+            HashMap::with_capacity(decisions.len());
+
+        for (id, decision) in &decisions {
+            match decision {
+                NodeDecision::Install { module_name, shape, params } => {
+                    let new_id = InstanceId::next();
+                    let m = registry
+                        .create(module_name, env, shape, params, new_id)
+                        .map_err(|e| BuildError::ModuleCreationError(e.to_string()))?;
+                    instance_ids.insert(id.clone(), new_id);
+                    fresh_modules.insert(id.clone(), m);
+                }
+                NodeDecision::Update { instance_id, .. } => {
+                    instance_ids.insert(id.clone(), *instance_id);
+                }
+            }
+        }
+
+        // Step B – assign stable module pool slots.
+        let new_ids: HashSet<InstanceId> = instance_ids.values().copied().collect();
         let module_diff = prev_state.module_alloc.diff(&new_ids, self.module_pool_capacity)?;
 
-        // Phase 6 – build ModuleSlots, collect new modules, record node states.
-        let SlotBuildResult { slots, new_modules, parameter_updates, connectivity_updates, node_states: new_node_states } = Self::build_slots(
-            graph,
-            &order,
-            &mut node_identity,
-            &buf_alloc.output_buf,
-            &module_diff,
-            prev_state,
-        )?;
+        // Step C – assemble ModuleSlots, NodeStates, and collect diff vectors.
+        let mut slots: Vec<ModuleSlot> = Vec::with_capacity(order.len());
+        let mut new_modules: Vec<(usize, Box<dyn Module>)> = Vec::new();
+        let mut parameter_updates: Vec<(usize, ParameterMap)> = Vec::new();
+        let mut connectivity_updates: Vec<(usize, PortConnectivity)> = Vec::new();
+        let mut node_states: HashMap<NodeId, NodeState> = HashMap::with_capacity(order.len());
+
+        for (id, decision) in decisions {
+            let node = graph.get_node(&id).ok_or_else(|| {
+                BuildError::InternalError(format!("node {id:?} missing from graph"))
+            })?;
+            let desc = &node.module_descriptor;
+            let instance_id = instance_ids[&id];
+            let pool_index = *module_diff.slot_map.get(&instance_id).ok_or_else(|| {
+                BuildError::InternalError(format!(
+                    "instance {instance_id:?} missing from module_diff slot_map"
+                ))
+            })?;
+
+            let resolved_inputs =
+                resolve_input_buffers(desc, &id, &edges, &buf_alloc.output_buf, graph)?;
+            let (unscaled_inputs, scaled_inputs) = partition_inputs(resolved_inputs);
+
+            let output_buffers: Vec<usize> = desc
+                .outputs
+                .iter()
+                .enumerate()
+                .map(|(port_idx, _)| {
+                    buf_alloc
+                        .output_buf
+                        .get(&(id.clone(), port_idx))
+                        .copied()
+                        .ok_or_else(|| {
+                            BuildError::InternalError(format!(
+                                "buffer for ({id:?}, {port_idx}) not found"
+                            ))
+                        })
+                })
+                .collect::<Result<_, _>>()?;
+
+            let n_in = desc.inputs.len();
+            let n_out = desc.outputs.len();
+
+            let connectivity = match &decision {
+                NodeDecision::Install { .. } => {
+                    let c = compute_connectivity(desc, &id, &edges);
+                    let mut fresh = fresh_modules.remove(&id).ok_or_else(|| {
+                        BuildError::InternalError(format!(
+                            "fresh module for install node {id:?} is missing"
+                        ))
+                    })?;
+                    fresh.set_connectivity(c.clone());
+                    new_modules.push((pool_index, fresh));
+                    c
+                }
+                NodeDecision::Update { param_diff, connectivity_changed, .. } => {
+                    if !param_diff.is_empty() {
+                        parameter_updates.push((pool_index, param_diff.clone()));
+                    }
+                    if *connectivity_changed {
+                        let c = compute_connectivity(desc, &id, &edges);
+                        connectivity_updates.push((pool_index, c.clone()));
+                        c
+                    } else {
+                        prev_state.nodes[&id].connectivity.clone()
+                    }
+                }
+            };
+
+            node_states.insert(
+                id.clone(),
+                NodeState {
+                    module_name: desc.module_name,
+                    instance_id,
+                    pool_index,
+                    parameter_map: node.parameter_map.clone(),
+                    shape: desc.shape.clone(),
+                    connectivity,
+                },
+            );
+
+            slots.push(ModuleSlot {
+                pool_index,
+                unscaled_inputs,
+                scaled_inputs,
+                output_buffers,
+                input_scratch: vec![0.0; n_in],
+                output_scratch: vec![0.0; n_out],
+            });
+        }
 
         let tombstones = module_diff.tombstoned;
 
@@ -524,7 +695,7 @@ impl PatchBuilder {
         let mut dispatch: Vec<(InstanceId, usize)> = slots
             .iter()
             .zip(order.iter())
-            .map(|(slot, id)| (node_identity[id].0, slot.pool_index))
+            .map(|(slot, id)| (instance_ids[id], slot.pool_index))
             .collect();
         dispatch.sort_unstable_by_key(|(id, _)| *id);
         let signal_dispatch = dispatch.into_boxed_slice();
@@ -541,7 +712,7 @@ impl PatchBuilder {
                 connectivity_updates,
             },
             PlannerState {
-                nodes: new_node_states,
+                nodes: node_states,
                 buffer_alloc: BufferAllocState {
                     output_buf: buf_alloc.output_buf,
                     freelist: buf_alloc.freelist,
@@ -556,54 +727,7 @@ impl PatchBuilder {
         ))
     }
 
-    /// Phase 1: Walk every node in the graph, decide whether it is surviving or
-    /// new/type-changed, and (where needed) instantiate a fresh module via `registry`.
-    ///
-    /// Returns a [`NodeIdentityMap`] from `NodeId` to `(InstanceId, Option<fresh module>)`.
-    fn assign_instance_ids(
-        &self,
-        graph: &ModuleGraph,
-        node_ids: &[NodeId],
-        prev_state: &PlannerState,
-        registry: &Registry,
-        env: &AudioEnvironment,
-    ) -> Result<NodeIdentityMap, BuildError> {
-        let mut node_identity = HashMap::with_capacity(node_ids.len());
-
-        for id in node_ids {
-            let node = graph.get_node(id).ok_or_else(|| {
-                BuildError::InternalError(format!("node {id:?} missing from graph"))
-            })?;
-            let module_name = node.module_descriptor.module_name;
-
-            let (instance_id, fresh) = if let Some(prev) = prev_state.nodes.get(id) {
-                if prev.module_name == module_name && prev.shape == node.module_descriptor.shape {
-                    // Surviving: same NodeId, same module type, same shape — reuse identity.
-                    (prev.instance_id, None)
-                } else {
-                    // Type-changed or shape-changed: mint a new id then instantiate.
-                    let new_id = InstanceId::next();
-                    let m = registry
-                        .create(module_name, env, &node.module_descriptor.shape, &node.parameter_map, new_id)
-                        .map_err(|e| BuildError::ModuleCreationError(e.to_string()))?;
-                    (new_id, Some(m))
-                }
-            } else {
-                // New node: mint a new id then instantiate.
-                let new_id = InstanceId::next();
-                let m = registry
-                    .create(module_name, env, &node.module_descriptor.shape, &node.parameter_map, new_id)
-                    .map_err(|e| BuildError::ModuleCreationError(e.to_string()))?;
-                (new_id, Some(m))
-            };
-
-            node_identity.insert(id.clone(), (instance_id, fresh));
-        }
-
-        Ok(node_identity)
-    }
-
-    /// Phase 2: Find exactly one sink node (`is_sink == true`) in the graph.
+    /// Phase 1: Find exactly one sink node (`is_sink == true`) in the graph.
     ///
     /// Returns [`BuildError::NoAudioOut`] or [`BuildError::MultipleAudioOut`] if
     /// the sink count is not exactly one.
@@ -691,135 +815,40 @@ impl PatchBuilder {
         Ok(BufferAllocation { output_buf, to_zero, freelist, next_hwm })
     }
 
-    /// Phase 6: Build one [`ModuleSlot`] per node, collect fresh modules for
-    /// installation, and record updated [`NodeState`]s.
-    fn build_slots(
-        graph: &ModuleGraph,
-        order: &[NodeId],
-        node_identity: &mut NodeIdentityMap,
-        output_buf: &HashMap<(NodeId, usize), usize>,
-        module_diff: &ModuleAllocDiff,
-        prev_state: &PlannerState,
-    ) -> Result<SlotBuildResult, BuildError> {
-        let edges = graph.edge_list();
-        let mut slots = Vec::with_capacity(order.len());
-        let mut new_modules: Vec<(usize, Box<dyn Module>)> = Vec::new();
-        let mut parameter_updates: Vec<(usize, ParameterMap)> = Vec::new();
-        let mut connectivity_updates: Vec<(usize, PortConnectivity)> = Vec::new();
-        let mut node_states: HashMap<NodeId, NodeState> = HashMap::with_capacity(order.len());
+}
 
-        for id in order {
-            let node = graph.get_node(id).ok_or_else(|| {
-                BuildError::InternalError(format!("node {id:?} missing from graph"))
-            })?;
-            let desc = &node.module_descriptor;
-            let instance_id = node_identity[id].0;
-            let pool_index = *module_diff.slot_map.get(&instance_id).ok_or_else(|| {
-                BuildError::InternalError(format!(
-                    "instance {instance_id:?} missing from module_diff slot_map"
-                ))
-            })?;
-
-            // Build input buffer assignments from the edge list, then partition
-            // by scale so tick() can run separate branch-free loops.
-            let resolved_inputs = resolve_input_buffers(desc, id, &edges, output_buf, graph)?;
-            let (unscaled_inputs, scaled_inputs) = partition_inputs(resolved_inputs);
-
-            let output_buffers: Vec<usize> = desc
+/// Compute [`PortConnectivity`] for a single node by scanning the edge list.
+///
+/// An input port is marked connected if at least one edge in `edges` targets
+/// this node at that port (matched by name **and** index). An output port is
+/// marked connected if at least one edge originates from this node at that port.
+fn compute_connectivity(
+    desc: &patches_core::ModuleDescriptor,
+    node_id: &NodeId,
+    edges: &[(NodeId, String, u32, NodeId, String, u32, f64)],
+) -> PortConnectivity {
+    let mut connectivity = PortConnectivity::new(desc.inputs.len(), desc.outputs.len());
+    for (from, out_name, out_idx, to, in_name, in_idx, _) in edges {
+        if to == node_id {
+            if let Some(i) = desc
+                .inputs
+                .iter()
+                .position(|p| p.name == in_name.as_str() && p.index == *in_idx)
+            {
+                connectivity.inputs[i] = true;
+            }
+        }
+        if from == node_id {
+            if let Some(j) = desc
                 .outputs
                 .iter()
-                .enumerate()
-                .map(|(port_idx, _)| {
-                    output_buf
-                        .get(&(id.clone(), port_idx))
-                        .copied()
-                        .ok_or_else(|| {
-                            BuildError::InternalError(format!(
-                                "buffer for ({id:?}, {port_idx}) not found"
-                            ))
-                        })
-                })
-                .collect::<Result<_, _>>()?;
-
-            let n_in = desc.inputs.len();
-            let n_out = desc.outputs.len();
-
-            // Compute PortConnectivity for this node by scanning the edge list.
-            let mut connectivity = PortConnectivity::new(n_in, n_out);
-            for (from, out_name, out_idx, to, in_name, in_idx, _) in &edges {
-                if *to == *id {
-                    if let Some(i) = desc
-                        .inputs
-                        .iter()
-                        .position(|p| p.name == in_name.as_str() && p.index == *in_idx)
-                    {
-                        connectivity.inputs[i] = true;
-                    }
-                }
-                if *from == *id {
-                    if let Some(j) = desc
-                        .outputs
-                        .iter()
-                        .position(|p| p.name == out_name.as_str() && p.index == *out_idx)
-                    {
-                        connectivity.outputs[j] = true;
-                    }
-                }
+                .position(|p| p.name == out_name.as_str() && p.index == *out_idx)
+            {
+                connectivity.outputs[j] = true;
             }
-
-            // If this node is new or type-changed, install the fresh module.
-            // Surviving nodes stay in the pool untouched, but may need parameter updates.
-            if !prev_state.module_alloc.pool_map.contains_key(&instance_id) {
-                let (_, fresh_opt) = node_identity.get_mut(id).unwrap();
-                let mut fresh = fresh_opt.take().ok_or_else(|| {
-                    BuildError::InternalError(format!(
-                        "fresh module for new/type-changed node {id:?} is missing"
-                    ))
-                })?;
-                fresh.set_connectivity(connectivity.clone());
-                new_modules.push((pool_index, fresh));
-            } else {
-                // Surviving module: emit parameter and connectivity diffs if changed.
-                if let Some(prev_ns) = prev_state.nodes.get(id) {
-                    let diff: ParameterMap = node
-                        .parameter_map
-                        .iter()
-                        .filter(|(k, v)| prev_ns.parameter_map.get(*k) != Some(v))
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect();
-                    if !diff.is_empty() {
-                        parameter_updates.push((pool_index, diff));
-                    }
-                    if connectivity != prev_ns.connectivity {
-                        connectivity_updates.push((pool_index, connectivity.clone()));
-                    }
-                }
-            }
-
-            node_states.insert(
-                id.clone(),
-                NodeState {
-                    module_name: desc.module_name,
-                    instance_id,
-                    pool_index,
-                    parameter_map: node.parameter_map.clone(),
-                    shape: desc.shape.clone(),
-                    connectivity,
-                },
-            );
-
-            slots.push(ModuleSlot {
-                pool_index,
-                unscaled_inputs,
-                scaled_inputs,
-                output_buffers,
-                input_scratch: vec![0.0; n_in],
-                output_scratch: vec![0.0; n_out],
-            });
         }
-
-        Ok(SlotBuildResult { slots, new_modules, parameter_updates, connectivity_updates, node_states })
     }
+    connectivity
 }
 
 /// Convenience wrapper around [`PatchBuilder::build_patch`].
@@ -1726,5 +1755,349 @@ mod tests {
         let (unscaled, scaled) = partition_inputs(vec![(2, 1.0), (4, 0.25), (6, 1.0), (8, -1.0)]);
         assert_eq!(unscaled, vec![(0, 2), (2, 6)]);
         assert_eq!(scaled, vec![(1, 4, 0.25), (3, 8, -1.0)]);
+    }
+
+    // ---- compute_connectivity tests ----
+
+    fn two_port_desc() -> ModuleDescriptor {
+        ModuleDescriptor {
+            module_name: "Test",
+            shape: ModuleShape { channels: 0, length: 0 },
+            inputs: vec![
+                PortDescriptor { name: "in", index: 0 },
+                PortDescriptor { name: "in", index: 1 },
+            ],
+            outputs: vec![
+                PortDescriptor { name: "out", index: 0 },
+                PortDescriptor { name: "out", index: 1 },
+            ],
+            parameters: vec![],
+            is_sink: false,
+        }
+    }
+
+    #[test]
+    fn connectivity_no_edges_all_false() {
+        let desc = two_port_desc();
+        let node = NodeId::from("n");
+        let c = compute_connectivity(&desc, &node, &[]);
+        assert!(!c.inputs[0] && !c.inputs[1] && !c.outputs[0] && !c.outputs[1]);
+    }
+
+    #[test]
+    fn connectivity_single_input_connected() {
+        let desc = two_port_desc();
+        let node = NodeId::from("n");
+        let other = NodeId::from("src");
+        let edges = vec![(other, "out".to_string(), 0, node.clone(), "in".to_string(), 0, 1.0)];
+        let c = compute_connectivity(&desc, &node, &edges);
+        assert!(c.inputs[0]);
+        assert!(!c.inputs[1] && !c.outputs[0] && !c.outputs[1]);
+    }
+
+    #[test]
+    fn connectivity_single_output_connected() {
+        let desc = two_port_desc();
+        let node = NodeId::from("n");
+        let other = NodeId::from("dst");
+        let edges = vec![(node.clone(), "out".to_string(), 1, other, "in".to_string(), 0, 1.0)];
+        let c = compute_connectivity(&desc, &node, &edges);
+        assert!(c.outputs[1]);
+        assert!(!c.inputs[0] && !c.inputs[1] && !c.outputs[0]);
+    }
+
+    #[test]
+    fn connectivity_multiple_ports_correct_subset() {
+        let desc = two_port_desc();
+        let node = NodeId::from("n");
+        let src = NodeId::from("src");
+        let dst = NodeId::from("dst");
+        let edges = vec![
+            (src.clone(), "out".to_string(), 0, node.clone(), "in".to_string(), 1, 1.0),
+            (node.clone(), "out".to_string(), 0, dst.clone(), "in".to_string(), 0, 1.0),
+        ];
+        let c = compute_connectivity(&desc, &node, &edges);
+        assert!(!c.inputs[0] && c.inputs[1]);
+        assert!(c.outputs[0] && !c.outputs[1]);
+    }
+
+    #[test]
+    fn connectivity_edges_for_other_nodes_ignored() {
+        let desc = two_port_desc();
+        let node = NodeId::from("n");
+        let a = NodeId::from("a");
+        let b = NodeId::from("b");
+        // Edge entirely between other nodes — should not affect `node`.
+        let edges = vec![(a.clone(), "out".to_string(), 0, b.clone(), "in".to_string(), 0, 1.0)];
+        let c = compute_connectivity(&desc, &node, &edges);
+        assert!(!c.inputs[0] && !c.inputs[1] && !c.outputs[0] && !c.outputs[1]);
+    }
+
+    #[test]
+    fn connectivity_no_false_positive_same_name_different_index() {
+        let desc = two_port_desc();
+        let node = NodeId::from("n");
+        let src = NodeId::from("src");
+        // Edge connects to "in" index 1, but desc has "in" at index 0 and index 1.
+        // Only index 1 should be marked.
+        let edges = vec![(src, "out".to_string(), 0, node.clone(), "in".to_string(), 1, 1.0)];
+        let c = compute_connectivity(&desc, &node, &edges);
+        assert!(!c.inputs[0], "in/0 must not be marked");
+        assert!(c.inputs[1], "in/1 must be marked");
+    }
+
+    // ---- classify_nodes tests (T-0099) ----
+
+    fn shape_zero() -> ModuleShape {
+        ModuleShape { channels: 0, length: 0 }
+    }
+
+    /// Build a PlannerState with a single NodeState for `node_id`.
+    fn prev_with_node(
+        node_id: &NodeId,
+        module_name: &'static str,
+        shape: ModuleShape,
+        params: ParameterMap,
+        connectivity: PortConnectivity,
+    ) -> PlannerState {
+        let instance_id = InstanceId::next();
+        let mut state = PlannerState::empty();
+        state.nodes.insert(
+            node_id.clone(),
+            NodeState {
+                module_name,
+                instance_id,
+                pool_index: 0,
+                parameter_map: params,
+                shape,
+                connectivity,
+            },
+        );
+        state
+    }
+
+    #[test]
+    fn classify_new_node_is_install() {
+        let mut graph = ModuleGraph::new();
+        let desc = Oscillator::describe(&shape_zero());
+        let mut params = ParameterMap::new();
+        params.insert("frequency".to_string(), ParameterValue::Float(440.0));
+        graph.add_module("osc", desc, &params).unwrap();
+
+        let order = vec![NodeId::from("osc")];
+        let edges = graph.edge_list();
+        let decisions =
+            classify_nodes(&graph, &order, &edges, &PlannerState::empty()).unwrap();
+
+        assert_eq!(decisions.len(), 1);
+        match &decisions[0].1 {
+            NodeDecision::Install { module_name, .. } => {
+                assert_eq!(*module_name, "Oscillator");
+            }
+            NodeDecision::Update { .. } => panic!("expected Install"),
+        }
+    }
+
+    #[test]
+    fn classify_type_changed_node_is_install() {
+        let mut graph = ModuleGraph::new();
+        let out_desc = AudioOut::describe(&shape_zero());
+        graph.add_module("x", out_desc, &ParameterMap::new()).unwrap();
+
+        let osc_desc = Oscillator::describe(&shape_zero());
+        let prev = prev_with_node(
+            &NodeId::from("x"),
+            osc_desc.module_name,
+            shape_zero(),
+            ParameterMap::new(),
+            PortConnectivity::new(osc_desc.inputs.len(), osc_desc.outputs.len()),
+        );
+
+        let order = vec![NodeId::from("x")];
+        let edges = graph.edge_list();
+        let decisions = classify_nodes(&graph, &order, &edges, &prev).unwrap();
+        assert!(matches!(decisions[0].1, NodeDecision::Install { .. }));
+    }
+
+    #[test]
+    fn classify_shape_changed_node_is_install() {
+        let new_shape = ModuleShape { channels: 2, length: 0 };
+        let mut graph = ModuleGraph::new();
+        let desc = Sum::describe(&new_shape);
+        graph.add_module("s", desc.clone(), &ParameterMap::new()).unwrap();
+
+        let old_shape = ModuleShape { channels: 1, length: 0 };
+        let prev = prev_with_node(
+            &NodeId::from("s"),
+            desc.module_name,
+            old_shape,
+            ParameterMap::new(),
+            PortConnectivity::new(desc.inputs.len(), desc.outputs.len()),
+        );
+
+        let order = vec![NodeId::from("s")];
+        let edges = graph.edge_list();
+        let decisions = classify_nodes(&graph, &order, &edges, &prev).unwrap();
+        assert!(matches!(decisions[0].1, NodeDecision::Install { .. }));
+    }
+
+    #[test]
+    fn classify_surviving_no_changes_is_update_with_empty_diff() {
+        let mut graph = ModuleGraph::new();
+        let desc = AudioOut::describe(&shape_zero());
+        graph.add_module("out", desc.clone(), &ParameterMap::new()).unwrap();
+
+        let prev = prev_with_node(
+            &NodeId::from("out"),
+            desc.module_name,
+            shape_zero(),
+            ParameterMap::new(),
+            PortConnectivity::new(desc.inputs.len(), desc.outputs.len()),
+        );
+
+        let order = vec![NodeId::from("out")];
+        let edges = graph.edge_list();
+        let decisions = classify_nodes(&graph, &order, &edges, &prev).unwrap();
+
+        match &decisions[0].1 {
+            NodeDecision::Update { param_diff, connectivity_changed, .. } => {
+                assert!(param_diff.is_empty());
+                assert!(!connectivity_changed);
+            }
+            NodeDecision::Install { .. } => panic!("expected Update"),
+        }
+    }
+
+    #[test]
+    fn classify_surviving_param_changed_produces_diff() {
+        let desc = Oscillator::describe(&shape_zero());
+        let mut old_params = ParameterMap::new();
+        old_params.insert("frequency".to_string(), ParameterValue::Float(440.0));
+        let mut new_params = ParameterMap::new();
+        new_params.insert("frequency".to_string(), ParameterValue::Float(880.0));
+
+        let mut graph = ModuleGraph::new();
+        graph.add_module("osc", desc.clone(), &new_params).unwrap();
+
+        let prev = prev_with_node(
+            &NodeId::from("osc"),
+            desc.module_name,
+            shape_zero(),
+            old_params,
+            PortConnectivity::new(desc.inputs.len(), desc.outputs.len()),
+        );
+
+        let order = vec![NodeId::from("osc")];
+        let edges = graph.edge_list();
+        let decisions = classify_nodes(&graph, &order, &edges, &prev).unwrap();
+
+        match &decisions[0].1 {
+            NodeDecision::Update { param_diff, .. } => {
+                assert!(!param_diff.is_empty());
+                assert_eq!(param_diff.get("frequency"), Some(&ParameterValue::Float(880.0)));
+            }
+            _ => panic!("expected Update"),
+        }
+    }
+
+    #[test]
+    fn classify_surviving_edge_added_connectivity_changed() {
+        let osc_desc = Oscillator::describe(&shape_zero());
+        let out_desc = AudioOut::describe(&shape_zero());
+
+        let mut graph = ModuleGraph::new();
+        let mut params = ParameterMap::new();
+        params.insert("frequency".to_string(), ParameterValue::Float(440.0));
+        graph.add_module("osc", osc_desc.clone(), &params).unwrap();
+        graph.add_module("out", out_desc.clone(), &ParameterMap::new()).unwrap();
+        graph.connect(&NodeId::from("osc"), p("sine"), &NodeId::from("out"), p("left"), 1.0).unwrap();
+
+        // prev: osc had no connected outputs
+        let prev = prev_with_node(
+            &NodeId::from("osc"),
+            osc_desc.module_name,
+            shape_zero(),
+            params,
+            PortConnectivity::new(osc_desc.inputs.len(), osc_desc.outputs.len()),
+        );
+
+        let order = vec![NodeId::from("osc"), NodeId::from("out")];
+        let edges = graph.edge_list();
+        let decisions = classify_nodes(&graph, &order, &edges, &prev).unwrap();
+
+        let osc = decisions.iter().find(|(id, _)| id == &NodeId::from("osc")).unwrap();
+        match &osc.1 {
+            NodeDecision::Update { connectivity_changed, .. } => {
+                assert!(*connectivity_changed, "osc output newly connected");
+            }
+            _ => panic!("expected Update"),
+        }
+    }
+
+    #[test]
+    fn classify_surviving_edge_removed_connectivity_changed() {
+        let osc_desc = Oscillator::describe(&shape_zero());
+        let out_desc = AudioOut::describe(&shape_zero());
+
+        // New graph has no connection
+        let mut graph = ModuleGraph::new();
+        let mut params = ParameterMap::new();
+        params.insert("frequency".to_string(), ParameterValue::Float(440.0));
+        graph.add_module("osc", osc_desc.clone(), &params).unwrap();
+        graph.add_module("out", out_desc.clone(), &ParameterMap::new()).unwrap();
+
+        // prev: osc output[0] was connected
+        let mut prev_conn = PortConnectivity::new(osc_desc.inputs.len(), osc_desc.outputs.len());
+        prev_conn.outputs[0] = true;
+        let prev = prev_with_node(
+            &NodeId::from("osc"),
+            osc_desc.module_name,
+            shape_zero(),
+            params,
+            prev_conn,
+        );
+
+        let order = vec![NodeId::from("osc"), NodeId::from("out")];
+        let edges = graph.edge_list();
+        let decisions = classify_nodes(&graph, &order, &edges, &prev).unwrap();
+
+        let osc = decisions.iter().find(|(id, _)| id == &NodeId::from("osc")).unwrap();
+        match &osc.1 {
+            NodeDecision::Update { connectivity_changed, .. } => {
+                assert!(*connectivity_changed, "osc output no longer connected");
+            }
+            _ => panic!("expected Update"),
+        }
+    }
+
+    #[test]
+    fn classify_multiple_nodes_each_classified_independently() {
+        let osc_desc = Oscillator::describe(&shape_zero());
+        let out_desc = AudioOut::describe(&shape_zero());
+
+        let mut graph = ModuleGraph::new();
+        let mut params = ParameterMap::new();
+        params.insert("frequency".to_string(), ParameterValue::Float(440.0));
+        graph.add_module("osc", osc_desc.clone(), &params).unwrap();
+        graph.add_module("out", out_desc.clone(), &ParameterMap::new()).unwrap();
+
+        // prev_state: osc is surviving; "out" is new
+        let prev = prev_with_node(
+            &NodeId::from("osc"),
+            osc_desc.module_name,
+            shape_zero(),
+            params,
+            PortConnectivity::new(osc_desc.inputs.len(), osc_desc.outputs.len()),
+        );
+
+        let order = vec![NodeId::from("osc"), NodeId::from("out")];
+        let edges = graph.edge_list();
+        let decisions = classify_nodes(&graph, &order, &edges, &prev).unwrap();
+
+        assert_eq!(decisions.len(), 2);
+        let osc = decisions.iter().find(|(id, _)| id == &NodeId::from("osc")).unwrap();
+        let out = decisions.iter().find(|(id, _)| id == &NodeId::from("out")).unwrap();
+        assert!(matches!(osc.1, NodeDecision::Update { .. }), "osc should survive");
+        assert!(matches!(out.1, NodeDecision::Install { .. }), "out is new");
     }
 }

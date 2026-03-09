@@ -365,6 +365,52 @@ type PartitionedInputs = (Vec<(usize, usize)>, Vec<(usize, usize, f64)>);
 ///
 /// Returns [`BuildError::InternalError`] if a referenced source node, output port, or
 /// buffer allocation is missing.
+/// Look up the buffer index for a single edge's source port, returning `(buffer_index, scale)`.
+///
+/// Performs three fallible lookups in sequence:
+/// 1. Source node in `graph`.
+/// 2. Output port by name and index within that node's descriptor.
+/// 3. Pre-allocated buffer slot in `output_buf`.
+fn resolve_edge_to_buffer(
+    from: &NodeId,
+    out_name: &str,
+    out_idx: u32,
+    scale: f64,
+    output_buf: &HashMap<(NodeId, usize), usize>,
+    graph: &ModuleGraph,
+) -> Result<(usize, f64), BuildError> {
+    let from_node = graph
+        .get_node(from)
+        .ok_or_else(|| BuildError::InternalError(format!("node {from:?} missing from graph")))?;
+    let out_port_idx = from_node
+        .module_descriptor
+        .outputs
+        .iter()
+        .position(|p| p.name == out_name && p.index == out_idx)
+        .ok_or_else(|| {
+            BuildError::InternalError(format!(
+                "output port {out_name:?}/{out_idx} not found on node {from:?}"
+            ))
+        })?;
+    let buf = output_buf
+        .get(&(from.clone(), out_port_idx))
+        .copied()
+        .ok_or_else(|| {
+            BuildError::InternalError(format!(
+                "buffer for ({from:?}, {out_port_idx}) not found"
+            ))
+        })?;
+    Ok((buf, scale))
+}
+
+/// Resolve each input port of `desc` on `node_id` to a `(buffer_index, scale)` pair.
+///
+/// Scans `edges` for edges targeting `node_id`, matches them to input ports by name and
+/// index, and looks up the source's buffer in `output_buf`. Unconnected ports default to
+/// `(0, 1.0)` — the permanent-zero slot with implicit scale 1.0.
+///
+/// Returns [`BuildError::InternalError`] if a referenced source node, output port, or
+/// buffer allocation is missing.
 fn resolve_input_buffers(
     desc: &patches_core::ModuleDescriptor,
     node_id: &NodeId,
@@ -375,41 +421,16 @@ fn resolve_input_buffers(
     desc.inputs
         .iter()
         .map(|port| {
-            let result = edges
+            edges
                 .iter()
                 .find(|(_, _, _, to, in_name, in_idx, _)| {
                     *to == *node_id && in_name == port.name && *in_idx == port.index
                 })
                 .map(|(from, out_name, out_idx, _, _, _, scale)| {
-                    let from_node = graph.get_node(from).ok_or_else(|| {
-                        BuildError::InternalError(format!(
-                            "node {from:?} missing from graph"
-                        ))
-                    })?;
-                    let from_desc = &from_node.module_descriptor;
-                    let out_port_idx = from_desc
-                        .outputs
-                        .iter()
-                        .position(|p| p.name == out_name.as_str() && p.index == *out_idx)
-                        .ok_or_else(|| {
-                            BuildError::InternalError(format!(
-                                "output port {:?}/{} not found on node {from:?}",
-                                out_name, out_idx
-                            ))
-                        })?;
-                    let buf = output_buf
-                        .get(&(from.clone(), out_port_idx))
-                        .copied()
-                        .ok_or_else(|| {
-                            BuildError::InternalError(format!(
-                                "buffer for ({from:?}, {out_port_idx}) not found"
-                            ))
-                        })?;
-                    Ok((buf, *scale))
+                    resolve_edge_to_buffer(from, out_name, *out_idx, *scale, output_buf, graph)
                 })
-                .transpose()?
-                .unwrap_or((0, 1.0));
-            Ok(result)
+                .transpose()
+                .map(|opt| opt.unwrap_or((0, 1.0)))
         })
         .collect()
 }

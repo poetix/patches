@@ -352,6 +352,86 @@ struct SlotBuildResult {
     node_states: HashMap<NodeId, NodeState>,
 }
 
+// ── Decision-phase helpers ────────────────────────────────────────────────────
+
+type EdgeList = Vec<(NodeId, String, u32, NodeId, String, u32, f64)>;
+type PartitionedInputs = (Vec<(usize, usize)>, Vec<(usize, usize, f64)>);
+
+/// Resolve each input port of `desc` on `node_id` to a `(buffer_index, scale)` pair.
+///
+/// Scans `edges` for edges targeting `node_id`, matches them to input ports by name and
+/// index, and looks up the source's buffer in `output_buf`. Unconnected ports default to
+/// `(0, 1.0)` — the permanent-zero slot with implicit scale 1.0.
+///
+/// Returns [`BuildError::InternalError`] if a referenced source node, output port, or
+/// buffer allocation is missing.
+fn resolve_input_buffers(
+    desc: &patches_core::ModuleDescriptor,
+    node_id: &NodeId,
+    edges: &EdgeList,
+    output_buf: &HashMap<(NodeId, usize), usize>,
+    graph: &ModuleGraph,
+) -> Result<Vec<(usize, f64)>, BuildError> {
+    desc.inputs
+        .iter()
+        .map(|port| {
+            let result = edges
+                .iter()
+                .find(|(_, _, _, to, in_name, in_idx, _)| {
+                    *to == *node_id && in_name == port.name && *in_idx == port.index
+                })
+                .map(|(from, out_name, out_idx, _, _, _, scale)| {
+                    let from_node = graph.get_node(from).ok_or_else(|| {
+                        BuildError::InternalError(format!(
+                            "node {from:?} missing from graph"
+                        ))
+                    })?;
+                    let from_desc = &from_node.module_descriptor;
+                    let out_port_idx = from_desc
+                        .outputs
+                        .iter()
+                        .position(|p| p.name == out_name.as_str() && p.index == *out_idx)
+                        .ok_or_else(|| {
+                            BuildError::InternalError(format!(
+                                "output port {:?}/{} not found on node {from:?}",
+                                out_name, out_idx
+                            ))
+                        })?;
+                    let buf = output_buf
+                        .get(&(from.clone(), out_port_idx))
+                        .copied()
+                        .ok_or_else(|| {
+                            BuildError::InternalError(format!(
+                                "buffer for ({from:?}, {out_port_idx}) not found"
+                            ))
+                        })?;
+                    Ok((buf, *scale))
+                })
+                .transpose()?
+                .unwrap_or((0, 1.0));
+            Ok(result)
+        })
+        .collect()
+}
+
+/// Partition resolved `(buffer_index, scale)` pairs into unscaled and scaled lists.
+///
+/// Entries with `scale == 1.0` go into the unscaled list as `(scratch_index, buf_index)`.
+/// Entries with any other scale go into the scaled list as `(scratch_index, buf_index, scale)`.
+/// The scratch index is the position of each entry in `resolved` (0-based).
+fn partition_inputs(resolved: Vec<(usize, f64)>) -> PartitionedInputs {
+    let mut unscaled = Vec::new();
+    let mut scaled = Vec::new();
+    for (j, (buf_idx, scale)) in resolved.into_iter().enumerate() {
+        if scale == 1.0 {
+            unscaled.push((j, buf_idx));
+        } else {
+            scaled.push((j, buf_idx, scale));
+        }
+    }
+    (unscaled, scaled)
+}
+
 // ── PatchBuilder ──────────────────────────────────────────────────────────────
 
 /// Produces [`ExecutionPlan`]s from [`ModuleGraph`]s, diffing against the
@@ -621,59 +701,8 @@ impl PatchBuilder {
 
             // Build input buffer assignments from the edge list, then partition
             // by scale so tick() can run separate branch-free loops.
-            let resolved_inputs: Vec<(usize, f64)> = desc
-                .inputs
-                .iter()
-                .map(|port| {
-                    let result = edges
-                        .iter()
-                        .find(|(_, _, _, to, in_name, in_idx, _)| {
-                            *to == *id && in_name == port.name && *in_idx == port.index
-                        })
-                        .map(|(from, out_name, out_idx, _, _, _, scale)| {
-                            let from_node = graph.get_node(from).ok_or_else(|| {
-                                BuildError::InternalError(format!(
-                                    "node {from:?} missing from graph"
-                                ))
-                            })?;
-                            let from_desc = &from_node.module_descriptor;
-                            let out_port_idx = from_desc
-                                .outputs
-                                .iter()
-                                .position(|p| {
-                                    p.name == out_name.as_str() && p.index == *out_idx
-                                })
-                                .ok_or_else(|| {
-                                    BuildError::InternalError(format!(
-                                        "output port {:?}/{} not found on node {from:?}",
-                                        out_name, out_idx
-                                    ))
-                                })?;
-                            let buf = output_buf
-                                .get(&(from.clone(), out_port_idx))
-                                .copied()
-                                .ok_or_else(|| {
-                                    BuildError::InternalError(format!(
-                                        "buffer for ({from:?}, {out_port_idx}) not found"
-                                    ))
-                                })?;
-                            Ok((buf, *scale))
-                        })
-                        .transpose()?
-                        .unwrap_or((0, 1.0));
-                    Ok(result)
-                })
-                .collect::<Result<Vec<_>, BuildError>>()?;
-
-            let mut unscaled_inputs: Vec<(usize, usize)> = Vec::new();
-            let mut scaled_inputs: Vec<(usize, usize, f64)> = Vec::new();
-            for (j, (buf_idx, scale)) in resolved_inputs.into_iter().enumerate() {
-                if scale == 1.0 {
-                    unscaled_inputs.push((j, buf_idx));
-                } else {
-                    scaled_inputs.push((j, buf_idx, scale));
-                }
-            }
+            let resolved_inputs = resolve_input_buffers(desc, id, &edges, output_buf, graph)?;
+            let (unscaled_inputs, scaled_inputs) = partition_inputs(resolved_inputs);
 
             let output_buffers: Vec<usize> = desc
                 .outputs
@@ -793,7 +822,7 @@ pub fn build_patch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use patches_core::{AudioEnvironment, InstanceId, Module, ModuleShape, NodeId, PortRef};
+    use patches_core::{AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleShape, NodeId, PortDescriptor, PortRef};
     use patches_core::parameter_map::{ParameterMap, ParameterValue};
     use patches_modules::{AudioOut, Oscillator, Sum};
 
@@ -1499,5 +1528,182 @@ mod tests {
             1,
             "exactly one new Oscillator (s_c) must appear in new_modules"
         );
+    }
+
+    // ── resolve_input_buffers unit tests (T-0097) ─────────────────────────────
+
+    /// Build a minimal two-node graph: one source with one output, one sink with one input.
+    fn two_node_graph() -> (ModuleGraph, NodeId, NodeId) {
+        let src_desc = ModuleDescriptor {
+            module_name: "Src",
+            shape: ModuleShape { channels: 0, length: 0 },
+            inputs: vec![],
+            outputs: vec![PortDescriptor { name: "out", index: 0 }],
+            parameters: vec![],
+            is_sink: false,
+        };
+        let dst_desc = ModuleDescriptor {
+            module_name: "Dst",
+            shape: ModuleShape { channels: 0, length: 0 },
+            inputs: vec![PortDescriptor { name: "in", index: 0 }],
+            outputs: vec![],
+            parameters: vec![],
+            is_sink: true,
+        };
+        let mut graph = ModuleGraph::new();
+        graph.add_module("src", src_desc, &ParameterMap::new()).unwrap();
+        graph.add_module("dst", dst_desc, &ParameterMap::new()).unwrap();
+        let src_id = NodeId::from("src");
+        let dst_id = NodeId::from("dst");
+        (graph, src_id, dst_id)
+    }
+
+    #[test]
+    fn resolve_unconnected_port_returns_zero_buffer_scale_one() {
+        let (graph, _, dst_id) = two_node_graph();
+        let dst_desc = graph.get_node(&dst_id).unwrap().module_descriptor.clone();
+        let edges = vec![];
+        let output_buf = HashMap::new();
+
+        let result = resolve_input_buffers(&dst_desc, &dst_id, &edges, &output_buf, &graph)
+            .expect("resolve should succeed");
+
+        assert_eq!(result, vec![(0, 1.0)], "unconnected port must map to (0, 1.0)");
+    }
+
+    #[test]
+    fn resolve_connected_port_returns_correct_buffer_and_scale() {
+        let (graph, src_id, dst_id) = two_node_graph();
+        let dst_desc = graph.get_node(&dst_id).unwrap().module_descriptor.clone();
+
+        let edges = vec![(
+            src_id.clone(), "out".to_string(), 0u32,
+            dst_id.clone(), "in".to_string(), 0u32,
+            0.5f64,
+        )];
+        let mut output_buf = HashMap::new();
+        output_buf.insert((src_id.clone(), 0), 7usize);
+
+        let result = resolve_input_buffers(&dst_desc, &dst_id, &edges, &output_buf, &graph)
+            .expect("resolve should succeed");
+
+        assert_eq!(result, vec![(7, 0.5)], "connected port must resolve to buffer 7 scale 0.5");
+    }
+
+    #[test]
+    fn resolve_multiple_ports_independently() {
+        let src_desc = ModuleDescriptor {
+            module_name: "Src2",
+            shape: ModuleShape { channels: 0, length: 0 },
+            inputs: vec![],
+            outputs: vec![
+                PortDescriptor { name: "a", index: 0 },
+                PortDescriptor { name: "b", index: 0 },
+            ],
+            parameters: vec![],
+            is_sink: false,
+        };
+        let dst_desc_data = ModuleDescriptor {
+            module_name: "Dst2",
+            shape: ModuleShape { channels: 0, length: 0 },
+            inputs: vec![
+                PortDescriptor { name: "x", index: 0 },
+                PortDescriptor { name: "y", index: 0 },
+            ],
+            outputs: vec![],
+            parameters: vec![],
+            is_sink: true,
+        };
+        let mut graph = ModuleGraph::new();
+        graph.add_module("src2", src_desc, &ParameterMap::new()).unwrap();
+        graph.add_module("dst2", dst_desc_data, &ParameterMap::new()).unwrap();
+        let src_id = NodeId::from("src2");
+        let dst_id = NodeId::from("dst2");
+        let dst_desc = graph.get_node(&dst_id).unwrap().module_descriptor.clone();
+
+        // Wire src.a → dst.x (buf 3, scale 1.0) and src.b → dst.y (buf 4, scale 2.0).
+        let edges = vec![
+            (src_id.clone(), "a".to_string(), 0u32, dst_id.clone(), "x".to_string(), 0u32, 1.0f64),
+            (src_id.clone(), "b".to_string(), 0u32, dst_id.clone(), "y".to_string(), 0u32, 2.0f64),
+        ];
+        let mut output_buf = HashMap::new();
+        output_buf.insert((src_id.clone(), 0), 3usize);
+        output_buf.insert((src_id.clone(), 1), 4usize);
+
+        let result = resolve_input_buffers(&dst_desc, &dst_id, &edges, &output_buf, &graph)
+            .expect("resolve should succeed");
+
+        assert_eq!(result, vec![(3, 1.0), (4, 2.0)]);
+    }
+
+    #[test]
+    fn resolve_missing_source_node_returns_internal_error() {
+        let (graph, src_id, dst_id) = two_node_graph();
+        let dst_desc = graph.get_node(&dst_id).unwrap().module_descriptor.clone();
+
+        // Edge references a "ghost" node not in the graph.
+        let ghost_id = NodeId::from("ghost");
+        let edges = vec![(
+            ghost_id.clone(), "out".to_string(), 0u32,
+            dst_id.clone(), "in".to_string(), 0u32,
+            1.0f64,
+        )];
+        let output_buf = HashMap::new();
+
+        let result = resolve_input_buffers(&dst_desc, &dst_id, &edges, &output_buf, &graph);
+        assert!(
+            matches!(result, Err(BuildError::InternalError(_))),
+            "missing source node must return InternalError"
+        );
+    }
+
+    #[test]
+    fn resolve_missing_buffer_returns_internal_error() {
+        let (graph, src_id, dst_id) = two_node_graph();
+        let dst_desc = graph.get_node(&dst_id).unwrap().module_descriptor.clone();
+
+        let edges = vec![(
+            src_id.clone(), "out".to_string(), 0u32,
+            dst_id.clone(), "in".to_string(), 0u32,
+            1.0f64,
+        )];
+        // output_buf is empty — buffer for src port 0 is missing.
+        let output_buf = HashMap::new();
+
+        let result = resolve_input_buffers(&dst_desc, &dst_id, &edges, &output_buf, &graph);
+        assert!(
+            matches!(result, Err(BuildError::InternalError(_))),
+            "missing buffer allocation must return InternalError"
+        );
+    }
+
+    // ── partition_inputs unit tests (T-0097) ──────────────────────────────────
+
+    #[test]
+    fn partition_empty_produces_two_empty_lists() {
+        let (unscaled, scaled) = partition_inputs(vec![]);
+        assert!(unscaled.is_empty());
+        assert!(scaled.is_empty());
+    }
+
+    #[test]
+    fn partition_scale_one_goes_to_unscaled() {
+        let (unscaled, scaled) = partition_inputs(vec![(5, 1.0), (7, 1.0)]);
+        assert_eq!(unscaled, vec![(0, 5), (1, 7)]);
+        assert!(scaled.is_empty());
+    }
+
+    #[test]
+    fn partition_non_one_scale_goes_to_scaled() {
+        let (unscaled, scaled) = partition_inputs(vec![(3, 0.5)]);
+        assert!(unscaled.is_empty());
+        assert_eq!(scaled, vec![(0, 3, 0.5)]);
+    }
+
+    #[test]
+    fn partition_mixed_produces_correct_split() {
+        let (unscaled, scaled) = partition_inputs(vec![(2, 1.0), (4, 0.25), (6, 1.0), (8, -1.0)]);
+        assert_eq!(unscaled, vec![(0, 2), (2, 6)]);
+        assert_eq!(scaled, vec![(1, 4, 0.25), (3, 8, -1.0)]);
     }
 }

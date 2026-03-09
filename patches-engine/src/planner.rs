@@ -311,9 +311,9 @@ mod tests {
             }
         }
 
-        fn prepare(_env: &AudioEnvironment, descriptor: ModuleDescriptor) -> Self {
+        fn prepare(_env: &AudioEnvironment, descriptor: ModuleDescriptor, instance_id: InstanceId) -> Self {
             Self {
-                instance_id: InstanceId::next(),
+                instance_id,
                 descriptor,
                 count: 0,
             }
@@ -471,9 +471,9 @@ mod tests {
             }
         }
 
-        fn prepare(_env: &AudioEnvironment, descriptor: ModuleDescriptor) -> Self {
+        fn prepare(_env: &AudioEnvironment, descriptor: ModuleDescriptor, instance_id: InstanceId) -> Self {
             Self {
-                instance_id: InstanceId::next(),
+                instance_id,
                 descriptor,
                 received_count: Arc::new(AtomicUsize::new(0)),
             }

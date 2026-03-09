@@ -163,12 +163,17 @@ pub trait Module: Send {
     where
         Self: Sized;
 
-    /// Allocate and initialise a new instance, storing `audio_environment` and `descriptor`.
-    /// All other fields should be set to their default/zero values.
+    /// Allocate and initialise a new instance, storing `audio_environment`, `descriptor`,
+    /// and the externally-minted `instance_id`. All other fields should be set to their
+    /// default/zero values.
     ///
     /// This is infallible; parameter validation is deferred to
     /// [`update_validated_parameters`](Module::update_validated_parameters).
-    fn prepare(audio_environment: &AudioEnvironment, descriptor: ModuleDescriptor) -> Self
+    fn prepare(
+        audio_environment: &AudioEnvironment,
+        descriptor: ModuleDescriptor,
+        instance_id: InstanceId,
+    ) -> Self
     where
         Self: Sized;
 
@@ -191,11 +196,12 @@ pub trait Module: Send {
         Ok(())
     }
 
-    /// Construct a fully initialised instance from an audio environment, shape, and parameters.
+    /// Construct a fully initialised instance from an audio environment, shape, parameters,
+    /// and an externally-minted `instance_id`.
     ///
     /// The default implementation:
     /// 1. Calls [`describe`](Module::describe) to obtain the descriptor.
-    /// 2. Calls [`prepare`](Module::prepare).
+    /// 2. Calls [`prepare`](Module::prepare) with the given `instance_id`.
     /// 3. Fills any missing parameters using the defaults declared in the descriptor.
     /// 4. Calls [`update_parameters`](Module::update_parameters) (validates then applies).
     ///
@@ -204,12 +210,13 @@ pub trait Module: Send {
         audio_environment: &AudioEnvironment,
         shape: &ModuleShape,
         params: &ParameterMap,
+        instance_id: InstanceId,
     ) -> Result<Self, BuildError>
     where
         Self: Sized,
     {
         let descriptor = Self::describe(shape);
-        let mut instance = Self::prepare(audio_environment, descriptor);
+        let mut instance = Self::prepare(audio_environment, descriptor, instance_id);
 
         // Fill in any missing parameters using the descriptor's declared defaults.
         let mut filled = params.clone();

@@ -1,6 +1,7 @@
 use std::marker::PhantomData;
 use crate::audio_environment::AudioEnvironment;
 use crate::build_error::BuildError;
+use crate::instance_id::InstanceId;
 use crate::module::Module;
 use crate::module_descriptor::{ModuleDescriptor, ModuleShape};
 use crate::parameter_map::ParameterMap;
@@ -13,6 +14,7 @@ pub trait ModuleBuilder: Send + Sync {
         audio_environment: &AudioEnvironment,
         shape: &ModuleShape,
         params: &ParameterMap,
+        instance_id: InstanceId,
     ) -> Result<Box<dyn Module>, BuildError>;
 }
 
@@ -31,8 +33,9 @@ where
         audio_environment: &AudioEnvironment,
         shape: &ModuleShape,
         params: &ParameterMap,
+        instance_id: InstanceId,
     ) -> Result<Box<dyn Module>, BuildError> {
-        Ok(Box::new(T::build(audio_environment, shape, params)?))
+        Ok(Box::new(T::build(audio_environment, shape, params, instance_id)?))
     }
 }
 
@@ -61,9 +64,10 @@ mod tests {
         fn prepare(
             _audio_environment: &AudioEnvironment,
             descriptor: ModuleDescriptor,
+            instance_id: InstanceId,
         ) -> Self {
             Self {
-                instance_id: InstanceId::next(),
+                instance_id,
                 descriptor,
             }
         }
@@ -92,7 +96,7 @@ mod tests {
         let shape = ModuleShape { channels: 2, length: 0 };
         let params = ParameterMap::new();
         let builder = Builder::<TestModule>(PhantomData);
-        let module = builder.build(&audio_environment, &shape, &params).unwrap();
+        let module = builder.build(&audio_environment, &shape, &params, InstanceId::next()).unwrap();
 
         assert_eq!(module.descriptor().module_name, "TestModule");
         assert_eq!(module.descriptor().shape.channels, 2);

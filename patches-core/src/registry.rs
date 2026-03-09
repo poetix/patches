@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use crate::audio_environment::AudioEnvironment;
 use crate::build_error::BuildError;
+use crate::instance_id::InstanceId;
 use crate::module::Module;
 use crate::module_builder::{Builder, ModuleBuilder};
 use crate::module_descriptor::{ModuleDescriptor, ModuleShape};
@@ -44,13 +45,14 @@ impl Registry {
         audio_environment: &AudioEnvironment,
         shape: &ModuleShape,
         params: &ParameterMap,
+        instance_id: InstanceId,
     ) -> Result<Box<dyn Module>, BuildError> {
         let builder = self
             .builders
             .get(name)
             .ok_or_else(|| BuildError::UnknownModule { name: name.to_string() })?;
 
-        builder.build(audio_environment, shape, params)
+        builder.build(audio_environment, shape, params, instance_id)
     }
 }
 
@@ -79,9 +81,10 @@ mod tests {
         fn prepare(
             _audio_environment: &AudioEnvironment,
             descriptor: ModuleDescriptor,
+            instance_id: InstanceId,
         ) -> Self {
             Self {
-                instance_id: InstanceId::next(),
+                instance_id,
                 descriptor,
             }
         }
@@ -112,7 +115,7 @@ mod tests {
         let shape = ModuleShape { channels: 2, length: 0 };
         let params = ParameterMap::new();
         let audio_environment = AudioEnvironment { sample_rate: 44100.0 };
-        let module = registry.create("TestModule", &audio_environment, &shape, &params).unwrap();
+        let module = registry.create("TestModule", &audio_environment, &shape, &params, InstanceId::next()).unwrap();
 
         assert_eq!(module.descriptor().module_name, "TestModule");
         assert_eq!(module.descriptor().shape.channels, 2);

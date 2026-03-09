@@ -30,9 +30,9 @@ impl Module for AudioOut {
         }
     }
 
-    fn prepare(_audio_environment: &AudioEnvironment, descriptor: ModuleDescriptor) -> Self {
+    fn prepare(_audio_environment: &AudioEnvironment, descriptor: ModuleDescriptor, instance_id: InstanceId) -> Self {
         Self {
-            instance_id: InstanceId::next(),
+            instance_id,
             descriptor,
             last_left: 0.0,
             last_right: 0.0,
@@ -89,6 +89,7 @@ mod tests {
             &AudioEnvironment { sample_rate: 44100.0 },
             &ModuleShape { channels: 0, length: 0 },
             &ParameterMap::new(),
+            InstanceId::next(),
         ).unwrap()
     }
 

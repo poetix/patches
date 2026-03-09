@@ -405,8 +405,8 @@ mod tests {
             }
         }
 
-        fn prepare(_env: &AudioEnvironment, descriptor: ModuleDescriptor) -> Self {
-            Self { instance_id: InstanceId::next(), descriptor }
+        fn prepare(_env: &AudioEnvironment, descriptor: ModuleDescriptor, instance_id: InstanceId) -> Self {
+            Self { instance_id, descriptor }
         }
 
         fn update_validated_parameters(&mut self, _params: &ParameterMap) {}
@@ -437,8 +437,8 @@ mod tests {
             }
         }
 
-        fn prepare(_env: &AudioEnvironment, descriptor: ModuleDescriptor) -> Self {
-            Self { instance_id: InstanceId::next(), descriptor }
+        fn prepare(_env: &AudioEnvironment, descriptor: ModuleDescriptor, instance_id: InstanceId) -> Self {
+            Self { instance_id, descriptor }
         }
 
         fn update_validated_parameters(&mut self, _params: &ParameterMap) {}
@@ -469,8 +469,8 @@ mod tests {
             }
         }
 
-        fn prepare(_env: &AudioEnvironment, descriptor: ModuleDescriptor) -> Self {
-            Self { instance_id: InstanceId::next(), descriptor }
+        fn prepare(_env: &AudioEnvironment, descriptor: ModuleDescriptor, instance_id: InstanceId) -> Self {
+            Self { instance_id, descriptor }
         }
 
         fn update_validated_parameters(&mut self, _params: &ParameterMap) {}

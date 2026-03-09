@@ -183,13 +183,13 @@ impl Module for ResonantLowpass {
         }
     }
 
-    fn prepare(audio_environment: &AudioEnvironment, descriptor: ModuleDescriptor) -> Self {
+    fn prepare(audio_environment: &AudioEnvironment, descriptor: ModuleDescriptor, instance_id: InstanceId) -> Self {
         let default_cutoff = 1000.0;
         let default_resonance = 0.0;
         let (b0, b1, b2, a1, a2) =
             compute_biquad_lowpass(default_cutoff, default_resonance, audio_environment.sample_rate);
         Self {
-            instance_id: InstanceId::next(),
+            instance_id,
             descriptor,
             sample_rate: audio_environment.sample_rate,
             cutoff: default_cutoff,
@@ -352,6 +352,7 @@ mod tests {
             &AudioEnvironment { sample_rate },
             &ModuleShape { channels: 0, length: 0 },
             &params,
+            InstanceId::next(),
         )
         .unwrap()
     }

@@ -200,8 +200,8 @@ mod tests {
                 is_sink: false,
             }
         }
-        fn prepare(_env: &AudioEnvironment, descriptor: ModuleDescriptor) -> Self {
-            Self { id: InstanceId::next(), value: 0.0, desc: descriptor }
+        fn prepare(_env: &AudioEnvironment, descriptor: ModuleDescriptor, instance_id: InstanceId) -> Self {
+            Self { id: instance_id, value: 0.0, desc: descriptor }
         }
         fn update_validated_parameters(&mut self, _params: &ParameterMap) {}
         fn descriptor(&self) -> &ModuleDescriptor {
@@ -260,8 +260,8 @@ mod tests {
                 is_sink: true,
             }
         }
-        fn prepare(_env: &AudioEnvironment, descriptor: ModuleDescriptor) -> Self {
-            Self { id: InstanceId::next(), last: 0.0, desc: descriptor }
+        fn prepare(_env: &AudioEnvironment, descriptor: ModuleDescriptor, instance_id: InstanceId) -> Self {
+            Self { id: instance_id, last: 0.0, desc: descriptor }
         }
         fn update_validated_parameters(&mut self, _params: &ParameterMap) {}
         fn descriptor(&self) -> &ModuleDescriptor {

@@ -480,20 +480,20 @@ impl PatchBuilder {
                     // Surviving: same NodeId, same module type, same shape — reuse identity.
                     (prev.instance_id, None)
                 } else {
-                    // Type-changed or shape-changed: instantiate new.
+                    // Type-changed or shape-changed: mint a new id then instantiate.
+                    let new_id = InstanceId::next();
                     let m = registry
-                        .create(module_name, env, &node.module_descriptor.shape, &node.parameter_map)
+                        .create(module_name, env, &node.module_descriptor.shape, &node.parameter_map, new_id)
                         .map_err(|e| BuildError::ModuleCreationError(e.to_string()))?;
-                    let id = m.instance_id();
-                    (id, Some(m))
+                    (new_id, Some(m))
                 }
             } else {
-                // New node: instantiate.
+                // New node: mint a new id then instantiate.
+                let new_id = InstanceId::next();
                 let m = registry
-                    .create(module_name, env, &node.module_descriptor.shape, &node.parameter_map)
+                    .create(module_name, env, &node.module_descriptor.shape, &node.parameter_map, new_id)
                     .map_err(|e| BuildError::ModuleCreationError(e.to_string()))?;
-                let id = m.instance_id();
-                (id, Some(m))
+                (new_id, Some(m))
             };
 
             node_identity.insert(id.clone(), (instance_id, fresh));

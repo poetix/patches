@@ -61,9 +61,9 @@ impl Module for ClockSequencer {
         }
     }
 
-    fn prepare(audio_environment: &AudioEnvironment, descriptor: ModuleDescriptor) -> Self {
+    fn prepare(audio_environment: &AudioEnvironment, descriptor: ModuleDescriptor, instance_id: InstanceId) -> Self {
         Self {
-            instance_id: InstanceId::next(),
+            instance_id,
             descriptor,
             sample_rate: audio_environment.sample_rate,
             bpm: 0.0,
@@ -167,6 +167,7 @@ mod tests {
             &AudioEnvironment { sample_rate: 44100.0 },
             &ModuleShape { channels: 0, length: 0 },
             &params,
+            InstanceId::next(),
         ).unwrap()
     }
 
@@ -207,6 +208,7 @@ mod tests {
             &AudioEnvironment { sample_rate: 1.0 },
             &ModuleShape { channels: 0, length: 0 },
             &params,
+            InstanceId::next(),
         ).unwrap();
 
         let mut outputs = [0.0f64; 4];

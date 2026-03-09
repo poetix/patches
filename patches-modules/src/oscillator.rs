@@ -83,9 +83,9 @@ impl Module for Oscillator {
         }
     }
 
-    fn prepare(audio_environment: &AudioEnvironment, descriptor: ModuleDescriptor) -> Self {
+    fn prepare(audio_environment: &AudioEnvironment, descriptor: ModuleDescriptor, instance_id: InstanceId) -> Self {
         Self {
-            instance_id: InstanceId::next(),
+            instance_id,
             phase_accumulator: UnitPhaseAccumulator::new(audio_environment.sample_rate, C0_FREQ),
             descriptor,
             out_sine: false,
@@ -197,6 +197,7 @@ mod tests {
             &AudioEnvironment { sample_rate },
             &ModuleShape { channels: 0, length: 0 },
             &params,
+            InstanceId::next(),
         ).unwrap()
     }
 

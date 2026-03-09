@@ -28,9 +28,9 @@ impl Module for Vca {
         }
     }
 
-    fn prepare(_audio_environment: &AudioEnvironment, descriptor: ModuleDescriptor) -> Self {
+    fn prepare(_audio_environment: &AudioEnvironment, descriptor: ModuleDescriptor, instance_id: InstanceId) -> Self {
         Self {
-            instance_id: InstanceId::next(),
+            instance_id,
             descriptor,
         }
     }
@@ -70,6 +70,7 @@ mod tests {
             &AudioEnvironment { sample_rate: 44100.0 },
             &ModuleShape { channels: 0, length: 0 },
             &ParameterMap::new(),
+            InstanceId::next(),
         ).unwrap()
     }
 

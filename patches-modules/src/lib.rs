@@ -41,7 +41,7 @@ pub fn default_registry() -> patches_core::Registry {
 
 #[cfg(test)]
 mod tests {
-    use patches_core::{AudioEnvironment, ModuleShape};
+    use patches_core::{AudioEnvironment, InstanceId, ModuleShape};
     use patches_core::parameter_map::ParameterMap;
 
     #[test]
@@ -65,7 +65,7 @@ mod tests {
             "Tuner",
         ] {
             assert!(
-                r.create(name, &env, &shape, &params).is_ok(),
+                r.create(name, &env, &shape, &params, InstanceId::next()).is_ok(),
                 "default_registry() missing module: {name}",
             );
         }

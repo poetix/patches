@@ -32,10 +32,10 @@ impl Module for Sum {
         }
     }
 
-    fn prepare(_audio_environment: &AudioEnvironment, descriptor: ModuleDescriptor) -> Self {
+    fn prepare(_audio_environment: &AudioEnvironment, descriptor: ModuleDescriptor, instance_id: InstanceId) -> Self {
         let size = descriptor.shape.channels;
         Self {
-            instance_id: InstanceId::next(),
+            instance_id,
             size,
             descriptor,
         }
@@ -76,6 +76,7 @@ mod tests {
             &AudioEnvironment { sample_rate: 44100.0 },
             &ModuleShape { channels, length: 0 },
             &ParameterMap::new(),
+            InstanceId::next(),
         ).unwrap()
     }
 

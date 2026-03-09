@@ -99,8 +99,7 @@ impl Module for Lfo {
         }
     }
 
-    fn prepare(audio_environment: &AudioEnvironment, descriptor: ModuleDescriptor) -> Self {
-        let instance_id = InstanceId::next();
+    fn prepare(audio_environment: &AudioEnvironment, descriptor: ModuleDescriptor, instance_id: InstanceId) -> Self {
         let prng_state = instance_id.as_u64() + 1; // +1 ensures non-zero (xorshift64 requires state != 0)
         Self {
             instance_id,
@@ -236,6 +235,7 @@ mod tests {
             &AudioEnvironment { sample_rate },
             &ModuleShape { channels: 0, length: 0 },
             &params,
+            InstanceId::next(),
         ).unwrap()
     }
 
@@ -328,6 +328,7 @@ mod tests {
             &AudioEnvironment { sample_rate },
             &ModuleShape { channels: 0, length: 0 },
             &params,
+            InstanceId::next(),
         ).unwrap();
         lfo_shifted.set_connectivity(all_outputs_connected());
 
@@ -367,6 +368,7 @@ mod tests {
             &AudioEnvironment { sample_rate },
             &ModuleShape { channels: 0, length: 0 },
             &params,
+            InstanceId::next(),
         ).unwrap();
         lfo.set_connectivity(PortConnectivity {
             inputs: vec![false, false].into_boxed_slice(),
@@ -399,6 +401,7 @@ mod tests {
             &AudioEnvironment { sample_rate },
             &ModuleShape { channels: 0, length: 0 },
             &params,
+            InstanceId::next(),
         ).unwrap();
         lfo.set_connectivity(PortConnectivity {
             inputs: vec![false, false].into_boxed_slice(),

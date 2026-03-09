@@ -60,9 +60,9 @@ impl Module for Tuner {
         }
     }
 
-    fn prepare(_audio_environment: &AudioEnvironment, descriptor: ModuleDescriptor) -> Self {
+    fn prepare(_audio_environment: &AudioEnvironment, descriptor: ModuleDescriptor, instance_id: InstanceId) -> Self {
         Self {
-            instance_id: InstanceId::next(),
+            instance_id,
             descriptor,
             octave: 0,
             semi: 0,
@@ -115,6 +115,7 @@ mod tests {
             &AudioEnvironment { sample_rate: 44100.0 },
             &ModuleShape { channels: 0, length: 0 },
             &params,
+            InstanceId::next(),
         ).unwrap()
     }
 

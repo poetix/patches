@@ -60,9 +60,9 @@ impl Module for Glide {
         }
     }
 
-    fn prepare(audio_environment: &AudioEnvironment, descriptor: ModuleDescriptor) -> Self {
+    fn prepare(audio_environment: &AudioEnvironment, descriptor: ModuleDescriptor, instance_id: InstanceId) -> Self {
         Self {
-            instance_id: InstanceId::next(),
+            instance_id,
             descriptor,
             voct: 0.0,
             alpha: 0.01,
@@ -119,6 +119,7 @@ mod tests {
             &AudioEnvironment { sample_rate },
             &ModuleShape { channels: 0, length: 0 },
             &params,
+            InstanceId::next(),
         ).unwrap()
     }
 

@@ -37,9 +37,9 @@ impl Module for Probe {
         }
     }
 
-    fn prepare(_env: &AudioEnvironment, descriptor: ModuleDescriptor) -> Self {
+    fn prepare(_env: &AudioEnvironment, descriptor: ModuleDescriptor, instance_id: InstanceId) -> Self {
         Self {
-            instance_id: InstanceId::next(),
+            instance_id,
             descriptor,
             connectivity_history: Vec::new(),
         }

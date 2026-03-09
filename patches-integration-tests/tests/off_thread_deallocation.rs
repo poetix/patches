@@ -51,9 +51,9 @@ impl Module for ThreadIdDropSpy {
         }
     }
 
-    fn prepare(_env: &AudioEnvironment, descriptor: ModuleDescriptor) -> Self {
+    fn prepare(_env: &AudioEnvironment, descriptor: ModuleDescriptor, instance_id: InstanceId) -> Self {
         Self {
-            instance_id: InstanceId::next(),
+            instance_id,
             descriptor,
             drop_thread: Arc::new(Mutex::new(None)),
         }

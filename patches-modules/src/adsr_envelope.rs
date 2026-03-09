@@ -79,9 +79,9 @@ impl Module for AdsrEnvelope {
         }
     }
 
-    fn prepare(audio_environment: &AudioEnvironment, descriptor: ModuleDescriptor) -> Self {
+    fn prepare(audio_environment: &AudioEnvironment, descriptor: ModuleDescriptor, instance_id: InstanceId) -> Self {
         Self {
-            instance_id: InstanceId::next(),
+            instance_id,
             descriptor,
             attack_secs: 0.0,
             decay_secs: 0.0,
@@ -206,6 +206,7 @@ mod tests {
             &AudioEnvironment { sample_rate: 10.0 },
             &ModuleShape { channels: 0, length: 0 },
             &params,
+            InstanceId::next(),
         ).unwrap()
     }
 
@@ -347,6 +348,7 @@ mod tests {
             &AudioEnvironment { sample_rate: 44100.0 },
             &ModuleShape { channels: 0, length: 0 },
             &ParameterMap::new(),
+            InstanceId::next(),
         ).unwrap();
         let desc = m.descriptor();
         assert_eq!(desc.inputs.len(), 2);
@@ -363,8 +365,8 @@ mod tests {
         let env = AudioEnvironment { sample_rate: 44100.0 };
         let shape = ModuleShape { channels: 0, length: 0 };
         let params = ParameterMap::new();
-        let a = r.create("AdsrEnvelope", &env, &shape, &params).unwrap();
-        let b = r.create("AdsrEnvelope", &env, &shape, &params).unwrap();
+        let a = r.create("AdsrEnvelope", &env, &shape, &params, InstanceId::next()).unwrap();
+        let b = r.create("AdsrEnvelope", &env, &shape, &params, InstanceId::next()).unwrap();
         assert_ne!(a.instance_id(), b.instance_id());
     }
 }

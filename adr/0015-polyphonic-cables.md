@@ -77,44 +77,45 @@ as today, but each slot now holds a `CableValue` rather than a bare `f64`. The
 bytes), but cable count is small relative to sample count and the total pool fits
 comfortably in L1/L2.
 
-### Port objects replace input/output slices
+### Port objects stored on the module
 
 `Module::process` currently receives pre-gathered `&[f64]` inputs and writes to
-`&mut [f64]` outputs. Under this design, modules receive pre-built port objects
-and the current pool slices:
+`&mut [f64]` outputs. Under this design the signature is reduced to just the pool
+slices:
 
 ```rust
 fn process(
     &mut self,
-    inputs: &[InputPort],
     pool_read: &[CableValue],
-    outputs: &[OutputPort],
     pool_write: &mut [CableValue],
 );
 ```
 
-`InputPort` and `OutputPort` contain only indices and are built once at plan-build
-time by `build_slots`, stored in `ModuleSlot`, and passed unchanged on every tick.
-No allocation occurs on the audio thread. The pool slices are the only call-site
-arguments that change between ticks (as `wi`/`ri` flip). Inside `process()` a
-module reads via `input.read(pool_read)` and writes via `output.write(pool_write,
-value)`.
+`InputPort` and `OutputPort` are built once at plan-build time and broadcast to
+each module via a new trait method called at plan-accept, on the same cadence as
+parameter updates and connectivity notifications:
 
-`InputPort` encapsulates a cable index and the per-connection scale factor that
-today lives in `ModuleSlot::scaled_inputs`:
+```rust
+fn set_ports(&mut self, inputs: &[InputPort], outputs: &[OutputPort]);
+```
+
+This call supersedes the existing `set_connectivity` callback: connectivity state
+is implicit in `InputPort::is_connected()` and `OutputPort::is_connected()`, so no
+separate connectivity notification is needed.
+
+`InputPort` encapsulates a cable index, the per-connection scale factor, and a
+connected flag:
 
 ```rust
 pub struct InputPort {
     cable_idx: usize,  // index into the read half of the pool
     scale: f64,        // 1.0 for unscaled connections
+    connected: bool,
 }
-```
 
-Modules never see `CableValue` directly. `InputPort` exposes typed read methods
-that return plain `f64` or `[f64; 16]`:
-
-```rust
 impl InputPort {
+    pub fn is_connected(&self) -> bool { self.connected }
+
     /// For ports declared `CableKind::Mono`. Panics in debug if the cable is poly
     /// (which graph validation makes unreachable in release builds).
     pub fn read_mono(&self, pool: &[CableValue]) -> f64 {
@@ -129,12 +130,63 @@ impl InputPort {
         std::array::from_fn(|i| vs[i] * self.scale)
     }
 }
+
+pub struct OutputPort {
+    cable_idx: usize,
+    connected: bool,
+}
+
+impl OutputPort {
+    pub fn is_connected(&self) -> bool { self.connected }
+
+    pub fn write(&self, pool: &mut [CableValue], value: CableValue) {
+        pool[self.cable_idx] = value;
+    }
+}
 ```
 
 Because graph validation has already confirmed the cable type matches the port
 declaration, the `unreachable!()` arm is dead code; the compiler eliminates the
 branch. There is no double dispatch: the module calls `read_mono` or `read_poly`
 knowing exactly what it will receive.
+
+Module authors store port objects as named fields in their module struct. There is
+no requirement to index into a slice by a constant — the module's own field names
+serve as port identifiers:
+
+```rust
+struct MyOscillator {
+    voct_in: InputPort,
+    fm_in: InputPort,
+    audio_out: OutputPort,
+    // ... DSP state
+}
+
+impl Module for MyOscillator {
+    fn set_ports(&mut self, inputs: &[InputPort], outputs: &[OutputPort]) {
+        self.voct_in  = inputs[VOCT_IN];
+        self.fm_in    = inputs[FM_IN];
+        self.audio_out = outputs[AUDIO_OUT];
+    }
+
+    fn process(&mut self, pool_read: &[CableValue], pool_write: &mut [CableValue]) {
+        if !self.voct_in.is_connected() { return; }
+        let v = self.voct_in.read_mono(pool_read);
+        // ...
+        self.audio_out.write(pool_write, CableValue::Mono(sample));
+    }
+}
+```
+
+`set_ports` is called once per plan refresh before any ticks run under the new
+plan. This is the same ordering constraint that already governs parameter updates
+and (formerly) connectivity notifications — it is an existing solved problem, not
+a new class of risk. The planner's plan-accept sequence is:
+
+1. Accept new plan from ring buffer.
+2. Apply parameter updates (`set_parameter` calls).
+3. Broadcast port objects (`set_ports` calls).
+4. Begin ticking under the new plan.
 
 For poly cables, scale is a uniform gain across all 16 channels — one multiply per
 voice, a loop the compiler can auto-vectorize. `[f64; 16]` is returned by value;
@@ -152,10 +204,8 @@ segregation was introduced to eliminate. If profiling later shows this matters, 
 planner can emit two concrete `InputPort` types so unscaled ports skip the multiply
 entirely.
 
-`OutputPort::write(value: CableValue)` writes to the write-half of the pool
-(`wi`). Fan-out (one output connected to multiple inputs) is free in the read
-direction: multiple `InputPort`s pointing at the same cable index all read the
-same slot.
+Fan-out (one output connected to multiple inputs) is free in the read direction:
+multiple `InputPort`s pointing at the same cable index all read the same slot.
 
 Borrow-checker safety is maintained by indexing: `InputPort` and `OutputPort`
 hold cable pool indices, not references. The read-half and write-half are
@@ -164,13 +214,15 @@ both `&pool_r` and `&mut pool_w` can be held simultaneously without aliasing.
 
 ### Migration shim for existing modules
 
-To avoid rewriting all modules at once, `Module` provides a blanket default for
-the new signature that pre-reads all inputs into a `[f64]` scratch buffer and
-post-writes from `[f64]` outputs. Modules using the old `&[f64]` / `&mut [f64]`
-convention continue to work correctly on mono-only signals. They receive zero for
-channels beyond channel 0 on a poly input and their output is emitted as mono.
+To avoid rewriting all modules at once, a `MonoShim<M>` wrapper type is provided
+that stores port objects in internal `Vec<InputPort>` / `Vec<OutputPort>` fields,
+implements `set_ports`, and provides an adapter `process()` that pre-reads all
+connected mono inputs into a `[f64]` scratch buffer and calls the old
+`process_mono(&[f64], &mut [f64])` signature. Modules using the old convention
+continue to work correctly on mono-only signals. They receive zero for channels
+beyond channel 0 on a poly input and their output is emitted as mono.
 
-Poly-aware modules override the new signature directly.
+Poly-aware modules implement `set_ports` and `process` directly.
 
 ### Poly-aware module convention
 
@@ -178,13 +230,15 @@ A module that supports polyphony reads the channel count from its first relevant
 input:
 
 ```rust
-fn process(&mut self, inputs: &[InputPort<'_>], outputs: &[OutputPort<'_>]) {
-    match inputs[VOCT].read() {
-        CableValue::Mono(v) => { /* single-voice path */ }
-        CableValue::Poly(vs) => {
-            for (ch, &v) in vs.iter().enumerate() {
-                // per-voice arithmetic — tight loop, compiler-vectorizable
-            }
+fn process(&mut self, pool_read: &[CableValue], pool_write: &mut [CableValue]) {
+    match self.voct_in.read_poly(pool_read) {
+        // read_poly returns [f64; 16]; mono case is handled via the mono path
+    }
+    // or, for a module that handles both:
+    if self.voct_in.is_connected() {
+        let vs: [f64; 16] = self.voct_in.read_poly(pool_read);
+        for (ch, v) in vs.iter().enumerate() {
+            // per-voice arithmetic — tight loop, compiler-vectorizable
         }
     }
 }
@@ -227,9 +281,22 @@ planner allocates the buffer pool slot for the declared cable type.
   reverb send) remain mono. Only connections that carry per-voice data need poly
   cables. The DSL author opts in per-connection.
 
-- **Scaling-in-read eliminates the gather phase.** `InputPort::read_scaled()`
+- **Scaling-in-read eliminates the gather phase.** `InputPort::read_mono/poly()`
   replaces the pre-gather loop in the tick body. The scatter phase (writing module
   outputs to the pool) is unchanged.
+
+- **`process()` signature is minimal.** Only the pool slices — the only
+  call-site data that changes between ticks — are passed as arguments. Port
+  objects are part of the module's own state, accessed via `self`.
+
+- **`is_connected()` is first-class.** Modules can cheaply skip computation when
+  an input has no cable without maintaining separate connectivity state.
+
+- **Named port fields are self-documenting.** Module struct definitions directly
+  reflect I/O topology; no parallel array of index constants is needed.
+
+- **`set_connectivity` is subsumed.** Port objects carry connectivity state;
+  the separate connectivity notification callback is no longer needed.
 
 - **`ModuleShape::channels` is unaffected.** It continues to parameterise module
   structure (variable-arity modules such as mix buses) and is independent of
@@ -237,9 +304,9 @@ planner allocates the buffer pool slot for the declared cable type.
 
 ### Costs
 
-- **`Module::process` signature changes.** This is a breaking change to the core
-  trait. The migration shim reduces blast radius, but poly-aware modules must be
-  rewritten.
+- **`Module::process` and trait signatures change.** This is a breaking change to
+  the core trait. The `MonoShim` wrapper reduces blast radius, but poly-aware
+  modules must be rewritten.
 
 - **Buffer pool slots are larger.** `[CableValue; 2]` ≈ 272 bytes vs `[f64; 2]`
   = 16 bytes. For a 64-cable graph, the pool grows from 1 KB to ~17 KB — still
@@ -280,6 +347,12 @@ planner allocates the buffer pool slot for the declared cable type.
   `InputPort` behaviour. It is deferred until parallel execution is planned. Padding
   slice boundaries to cache lines at that point would also eliminate false sharing
   between threads, as noted in the design desiderata.
+
+  Port objects stored on the module do not complicate this picture. In the parallel
+  case, each module's `process()` is called by one thread; `self` is exclusively
+  owned by that thread for the duration of the call. `set_ports` is called during
+  plan-accept, which is a sequential single-thread operation before any parallel
+  tick begins. There is no new synchronisation requirement.
 
 - **`read_mono`/`read_poly` contain an `unreachable!()` arm.** Because graph
   validation guarantees cable types are correct before any module runs, the
@@ -326,3 +399,49 @@ buffers to hold 16-channel data. Avoids changing the `process()` signature.
 However, it retains the gather pass as a separate loop (today's 36% tick overhead)
 and prevents modules from choosing their path based on the actual cable type.
 Rejected.
+
+### Pass port objects as arguments to `process()`
+
+An earlier version of this ADR passed port objects as slices to `process()` on
+every tick:
+
+```rust
+fn process(
+    &mut self,
+    inputs: &[InputPort],
+    pool_read: &[CableValue],
+    outputs: &[OutputPort],
+    pool_write: &mut [CableValue],
+);
+```
+
+`InputPort` and `OutputPort` would be stored in `ModuleSlot` and passed unchanged
+on each call (only the pool slices change between ticks as `wi`/`ri` flip).
+
+This was rejected in favour of storing ports on the module for the following
+reasons:
+
+- **`process()` arguments that never change are noise.** Port objects are stable
+  between plan refreshes. Passing them on every tick conveys no new information
+  and adds four parameters to the hottest call in the system.
+- **Modules access ports by index constant, not by name.** Accessing
+  `inputs[VOCT_IN]` requires a separately maintained index constant; storing
+  `self.voct_in` requires none. The struct definition becomes the port manifest.
+- **`is_connected()` has no natural representation.** An unconnected port either
+  must be represented by a sentinel `InputPort` in the slice or by a shorter slice
+  with a separate index mapping. Both are more awkward than a `connected: bool`
+  field on a named port struct.
+- **The broadcast-at-plan-accept pattern already exists.** Parameter updates and
+  (formerly) connectivity notifications are already delivered to modules at
+  plan-accept time. Delivering port objects on the same cadence is a natural
+  extension — it is not a new category of synchronisation requirement.
+
+### `is_connected()` flag on passed-in `InputPort` (hybrid)
+
+A lighter variant of the above: keep port objects as `process()` arguments but add
+a `connected: bool` field to `InputPort` so modules can call `is_connected()`
+without storing separate connectivity state. This was considered as a way to
+capture the ergonomic benefit of `is_connected()` without moving port state into
+the module. It is strictly dominated by the chosen design: it retains the
+unchanged-arguments-on-every-tick cost and the index-constant boilerplate, while
+only partially addressing the ergonomic gap. Rejected.

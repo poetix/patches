@@ -2,7 +2,8 @@
 id: "E018"
 title: Oversampling mode
 created: 2026-03-07
-tickets: ["0092", "0093", "0094"]
+updated: 2026-03-08
+tickets: ["0092", "0093", "0094", "0095"]
 ---
 
 ## Summary
@@ -20,13 +21,13 @@ at start-up; it cannot change at runtime without restarting the engine.
 
 Each 2× decimation stage uses the Regalia-Mitra polyphase decomposition:
 
-```
+```text
 H(z) = ½ · [A₀(z²) + z⁻¹ · A₁(z²)]
 ```
 
 A₀ and A₁ are cascades of first-order all-pass sections in the w = z² domain:
 
-```
+```text
 G(w) = (a + w⁻¹) / (1 + a·w⁻¹)
 ```
 
@@ -54,13 +55,21 @@ correctly, filter coefficients are correct). No `Module` trait changes required.
 oversampled-rate samples internally (`control_period * N`), preserving the same
 wall-clock control frequency regardless of oversampling setting.
 
+## Implementation plan
+
+The filter implementation is intentionally split from the processing-flow
+wiring. T-0093 introduces a naive no-op decimator (every-Nth-sample) to settle
+the API and `AudioCallback` inner loop; T-0095 then replaces the internals with
+the real polyphase IIR filter without touching anything else.
+
 ## Tickets
 
-| ID   | Title                                         | Priority | Depends on |
-|------|-----------------------------------------------|----------|------------|
-| 0092 | `OversamplingFactor` type and engine wiring   | high     | —          |
-| 0093 | Polyphase IIR half-band `Decimator`           | high     | 0092       |
-| 0094 | Wire `Decimator` into `AudioCallback`         | high     | 0093       |
+| ID   | Title                                                    | Priority | Depends on |
+|------|----------------------------------------------------------|----------|------------|
+| 0092 | `OversamplingFactor` type and engine wiring              | high     | —          |
+| 0093 | Naive `Decimator` type (no-op downsampling)              | high     | 0092       |
+| 0094 | Wire `Decimator` into `AudioCallback`                    | high     | 0093       |
+| 0095 | Replace naive `Decimator` with polyphase IIR half-band   | high     | 0094       |
 
 ## Definition of done
 

@@ -74,6 +74,9 @@ struct FrequencyControl {
     pub voct_modulating: bool,
     pub fm_modulating: bool,
     pub fm_mode: FMMode,
+    // Cache for the exp2 result: only recomputed when exp_mod changes.
+    last_exp_mod: f64,
+    cached_exp2: f64,
 }
 
 impl FrequencyControl {
@@ -85,6 +88,8 @@ impl FrequencyControl {
             voct_modulating: false,
             fm_modulating: false,
             fm_mode: FMMode::Linear,
+            last_exp_mod: f64::NAN, // sentinel: forces first computation
+            cached_exp2: 1.0,
         }
     }
 
@@ -92,7 +97,7 @@ impl FrequencyControl {
         self.reference_frequency + self.frequency_offset
     }
 
-    fn compute(&self, voct_input: f64, fm_input: f64) -> f64 {
+    fn compute(&mut self, voct_input: f64, fm_input: f64) -> f64 {
         let mut frequency = self.base_pitch();
         let mut exp_mod = 0.0;
         if self.voct_modulating {
@@ -102,7 +107,11 @@ impl FrequencyControl {
             exp_mod += fm_input;
         }
         if exp_mod != 0.0 {
-            frequency *= exp_mod.exp2();
+            if exp_mod != self.last_exp_mod {
+                self.cached_exp2 = exp_mod.exp2();
+                self.last_exp_mod = exp_mod;
+            }
+            frequency *= self.cached_exp2;
         }
         if self.fm_modulating && self.fm_mode == FMMode::Linear {
             frequency += fm_input * 10.0;

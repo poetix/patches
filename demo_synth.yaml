@@ -6,18 +6,23 @@
 #                      │                    └──→ tune_saw ──out──→ saw ──saw───┤ mix (0.3/0.5/0.2)
 #                      │                    └──→ tune_sub ──out──→ sub ──sine──┘
 #                      │
-#                      ├──trigger──→ env        lfo ──triangle──→ sq.pulse_width (scale 0.4)
+#                      ├──trigger──→ env        lfo ──triangle──→ sq.pulse_width (scale 0.2)
 #                      ├──gate────→ env
 #                      ├──trigger──→ filter_env
 #                      └──gate────→ filter_env
 #
-#   mix ──out──→ filter ──out──→ vca ──out──→ out.left / out.right
-#
-#   glide.out ──→ cutoff_mix.in/0  (V/oct pitch tracking)
-#   lfo.saw_up ──→ cutoff_mix.in/1  (slow LFO sweep, scale 0.5)
-#   cutoff_mix ──out──→ filter.cutoff_cv
-#   filter_env ──out──→ filter.resonance_cv  (scale 0.5)
-#   env ──→ vca.cv
+#   mix ──out──→ filter ──out──→ vca ──out──→ final_mix.in/0
+#                                                              └──→ out.left / out.right
+#   glide.out ──→ cutoff_mix.in/0  (V/oct pitch tracking)        ↑
+#   lfo.random ──→ cutoff_mix.in/1  (slow LFO sweep, scale 0.5)  │
+#   cutoff_mix ──out──→ filter.cutoff_cv                          │
+#   filter_env ──out──→ filter.resonance_cv  (scale 0.5)          │
+#   env ──→ vca.cv                                                │
+#                                                                  │
+#   clock ──beat──→ kick_env ──out──→ kick_vca ──out──→ final_mix.in/1
+#                                         ↑
+#   kick_osc ──sine──→ kick_vca.in
+#   lfo.saw_down ──→ kick_osc.voct (scale 0.3, pitch drop on each LFO cycle)
 #
 # tune_saw: +7 semitones (perfect 5th) + 12 cents detune above sq
 # tune_sub: -1 octave below sq
@@ -28,12 +33,13 @@
 #   - Adjust lfo.rate (Hz) to change the pulse-width and filter sweep speed.
 #   - Adjust tune_saw.cent to widen or narrow the detune on the sawtooth.
 #   - Raise filter.resonance for a more aggressive character.
+#   - Adjust kick_env.decay to tighten or lengthen the kick.
 
 nodes:
   clock:
     module: ClockSequencer
     params:
-      bpm: 110.0
+      bpm: 80.0
       beats_per_bar: 4
       quavers_per_beat: 2
 
@@ -42,22 +48,22 @@ nodes:
     length: 16
     params:
       steps:
-        - C4
+        - C2
+        - B2
+        - C3
+        - C2
+        - B2
+        - Ab2
+        - C2
+        - Ab2
+        - C2
+        - G2
+        - Ab2
+        - C2
+        - G2
+        - E2
         - "_"
-        - B3
-        - G3
-        - A3
-        - "_"
-        - E3
-        - "-"
-        - "-"
-        - C4
-        - B3
-        - G3
-        - A3
-        - "_"
-        - E3
-        - "-"
+        - E2
 
   glide:
     module: Glide
@@ -67,7 +73,7 @@ nodes:
   lfo:
     module: Lfo
     params:
-      rate: 0.3
+      rate: 3.0
 
   tune_saw:
     module: Tuner
@@ -108,14 +114,6 @@ nodes:
       sustain: 0.35
       release: 0.18
 
-  filter_env:
-    module: AdsrEnvelope
-    params:
-      attack: 0.1
-      decay: 0.12
-      sustain: 0.8
-      release: 0.25
-
   filter:
     module: ResonantLowpass
     params:
@@ -126,12 +124,32 @@ nodes:
   vca:
     module: Vca
 
+  kick_osc:
+    module: Oscillator
+    params:
+      frequency: 80.0
+
+  kick_env:
+    module: AdsrEnvelope
+    params:
+      attack: 0.002
+      decay: 0.12
+      sustain: 0.0
+      release: 0.08
+
+  kick_vca:
+    module: Vca
+
+  final_mix:
+    module: Sum
+    channels: 2
+
   out:
     module: AudioOut
 
 cables:
   - from: clock
-    output: quaver
+    output: semiquaver
     to: seq
     input: clock
 
@@ -178,22 +196,12 @@ cables:
     to: env
     input: gate
 
-  - from: seq
-    output: trigger
-    to: filter_env
-    input: trigger
-
-  - from: seq
-    output: gate
-    to: filter_env
-    input: gate
-
   # LFO modulation
   - from: lfo
     output: triangle
     to: sq
     input: pulse_width
-    scale: 0.4
+    scale: 0.2
 
   # Oscillator mix (sawtooth 5th + square root + sine sub)
   - from: saw
@@ -226,7 +234,7 @@ cables:
     input: in/0
 
   - from: lfo
-    output: saw_up
+    output: sine
     to: cutoff_mix
     input: in/1
     scale: 0.5
@@ -235,12 +243,6 @@ cables:
     output: out
     to: filter
     input: cutoff_cv
-
-  - from: filter_env
-    output: out
-    to: filter
-    input: resonance_cv
-    scale: 0.8
 
   - from: filter
     output: out
@@ -254,10 +256,54 @@ cables:
 
   - from: vca
     output: out
+    to: final_mix
+    input: in/0
+    scale: 0.3
+
+  # Kick drum — triggered on every beat, pitch-dropped by lfo.saw_down
+  - from: clock
+    output: beat
+    to: kick_env
+    input: trigger
+
+  - from: clock
+    output: beat
+    to: lfo
+    input: sync
+
+  - from: clock
+    output: beat
+    to: kick_env
+    input: gate
+
+  - from: lfo
+    output: saw_down
+    to: kick_osc
+    input: voct
+    scale: 0.3
+
+  - from: kick_osc
+    output: sine
+    to: kick_vca
+    input: in
+
+  - from: kick_env
+    output: out
+    to: kick_vca
+    input: cv
+
+  - from: kick_vca
+    output: out
+    to: final_mix
+    input: in/1
+    scale: 0.7
+
+  - from: final_mix
+    output: out
     to: out
     input: left
 
-  - from: vca
+  - from: final_mix
     output: out
     to: out
     input: right

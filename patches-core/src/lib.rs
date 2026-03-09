@@ -7,10 +7,6 @@ pub mod registries;
 
 // ── Crate-internal path aliases ───────────────────────────────────────────────
 // These make `crate::X::Y` paths work inside this crate; they are not public API.
-pub(crate) use graphs::planner;
-pub(crate) use modules::instance_id;
-pub(crate) use modules::module_descriptor;
-pub(crate) use registries::module_builder;
 
 // ── Public API ────────────────────────────────────────────────────────────────
 pub use audio_environment::AudioEnvironment;

@@ -2,7 +2,8 @@ use std::f64::consts::TAU;
 
 use patches_core::{AudioEnvironment, Module, ModuleGraph, ModuleShape, NodeId, PortRef};
 use patches_core::parameter_map::{ParameterMap, ParameterValue};
-use patches_engine::{build_patch, ExecutionPlan, ModulePool, PlannerState};
+use patches_core::PlannerState;
+use patches_engine::{build_patch, ExecutionPlan, ModulePool};
 use patches_modules::{AudioOut, Oscillator, StepSequencer, Sum};
 use patches_modules::common::frequency::C0_FREQ;
 

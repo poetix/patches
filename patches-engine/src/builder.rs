@@ -2,9 +2,10 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use patches_core::{
-    AudioEnvironment, BufferAllocState, ControlSignal, GraphIndex, InstanceId, Module,
-    ModuleAllocState, ModuleGraph, ModuleShape, NodeId, NodeState, PlanError, PlannerState,
-    PortConnectivity, Registry, ResolvedGraph,
+    make_decisions, PlanDecisions,
+    AudioEnvironment, BufferAllocState, ControlSignal, InstanceId,
+    Module, ModuleAllocState, ModuleGraph, NodeDecision, NodeId, NodeState, PlanError,
+    PlannerState, PortConnectivity, Registry, ResolvedGraph,
 };
 use patches_core::parameter_map::ParameterMap;
 
@@ -47,8 +48,11 @@ impl std::error::Error for BuildError {}
 impl From<PlanError> for BuildError {
     fn from(e: PlanError) -> Self {
         match e {
+            PlanError::NoSink => BuildError::NoAudioOut,
+            PlanError::MultipleSinks => BuildError::MultipleAudioOut,
+            PlanError::BufferPoolExhausted => BuildError::PoolExhausted,
             PlanError::ModulePoolExhausted => BuildError::ModulePoolExhausted,
-            PlanError::InternalError(msg) => BuildError::InternalError(msg),
+            PlanError::Internal(msg) => BuildError::InternalError(msg),
         }
     }
 }
@@ -173,50 +177,6 @@ impl ExecutionPlan {
     }
 }
 
-// ── Intermediate build results ────────────────────────────────────────────────
-
-/// Result of the buffer allocation phase, passed into the action phase of
-/// [`PatchBuilder::build_patch`].
-struct BufferAllocation {
-    output_buf: HashMap<(NodeId, usize), usize>,
-    to_zero: Vec<usize>,
-    freelist: Vec<usize>,
-    next_hwm: usize,
-}
-
-/// Everything produced by [`PatchBuilder::make_decisions`] and consumed by
-/// the action phase of [`PatchBuilder::build_patch`].
-struct PlanDecisions<'a> {
-    index: GraphIndex<'a>,
-    order: Vec<NodeId>,
-    audio_out_index: usize,
-    buf_alloc: BufferAllocation,
-    decisions: Vec<(NodeId, NodeDecision<'a>)>,
-}
-
-/// Per-node decision produced by [`classify_nodes`].
-///
-/// The decision phase is pure: it reads the graph and previous state but does
-/// not mint [`InstanceId`]s or call `registry.create`. Both side effects happen
-/// in the action phase that follows.
-pub(crate) enum NodeDecision<'a> {
-    /// Node is new, or its module type or shape changed.
-    /// A fresh module must be instantiated in the action phase.
-    Install {
-        module_name: &'static str,
-        shape: &'a ModuleShape,
-        params: &'a ParameterMap,
-    },
-    /// Node is surviving. The existing module stays in the pool.
-    /// Non-empty `param_diff` or `connectivity_changed == true` means diffs
-    /// must be applied on plan adoption.
-    Update {
-        instance_id: InstanceId,
-        param_diff: ParameterMap,
-        connectivity_changed: bool,
-    },
-}
-
 // ── Decision-phase helpers ────────────────────────────────────────────────────
 
 type PartitionedInputs = (Vec<(usize, usize)>, Vec<(usize, usize, f64)>);
@@ -237,59 +197,6 @@ fn partition_inputs(resolved: Vec<(usize, f64)>) -> PartitionedInputs {
         }
     }
     (unscaled, scaled)
-}
-
-/// Classify every node in `order` as [`NodeDecision::Install`] or [`NodeDecision::Update`]
-/// by diffing against `prev_state`.
-///
-/// - A node absent from `prev_state.nodes` → `Install`.
-/// - A node whose `module_name` or `shape` changed → `Install`.
-/// - Otherwise → `Update`, with a key-by-key parameter diff and a boolean
-///   indicating whether the computed [`PortConnectivity`] changed.
-///
-/// Pure: no [`InstanceId`]s are minted, no modules are instantiated.
-fn classify_nodes<'a>(
-    index: &GraphIndex<'a>,
-    order: &[NodeId],
-    prev_state: &PlannerState,
-) -> Result<Vec<(NodeId, NodeDecision<'a>)>, BuildError> {
-    let mut decisions = Vec::with_capacity(order.len());
-
-    for id in order {
-        let node = index.get_node(id).ok_or_else(|| {
-            BuildError::InternalError(format!("node {id:?} missing from graph"))
-        })?;
-        let desc = &node.module_descriptor;
-
-        let decision = match prev_state.nodes.get(id) {
-            Some(prev_ns)
-                if prev_ns.module_name == desc.module_name && prev_ns.shape == desc.shape =>
-            {
-                // Surviving node: compute parameter diff and connectivity diff.
-                let param_diff: ParameterMap = node
-                    .parameter_map
-                    .iter()
-                    .filter(|(k, v)| prev_ns.parameter_map.get(*k) != Some(v))
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-                let new_connectivity = index.compute_connectivity(desc, id);
-                let connectivity_changed = new_connectivity != prev_ns.connectivity;
-                NodeDecision::Update { instance_id: prev_ns.instance_id, param_diff, connectivity_changed }
-            }
-            _ => {
-                // New, type-changed, or shape-changed node → fresh installation.
-                NodeDecision::Install {
-                    module_name: desc.module_name,
-                    shape: &desc.shape,
-                    params: &node.parameter_map,
-                }
-            }
-        };
-
-        decisions.push((id.clone(), decision));
-    }
-
-    Ok(decisions)
 }
 
 // ── PatchBuilder ──────────────────────────────────────────────────────────────
@@ -328,7 +235,7 @@ impl PatchBuilder {
     ) -> Result<(ExecutionPlan, PlannerState), BuildError> {
         // ── Decision phase ───────────────────────────────────────────────────
         let PlanDecisions { index, order, audio_out_index, buf_alloc, decisions } =
-            self.make_decisions(graph, prev_state)?;
+            make_decisions(graph, prev_state, self.pool_capacity).map_err(BuildError::from)?;
 
         // ── Action phase ─────────────────────────────────────────────────────
 
@@ -490,113 +397,6 @@ impl PatchBuilder {
                 },
             },
         ))
-    }
-
-    /// Index the graph, sort nodes into execution order, allocate cable buffers,
-    /// and classify every node as [`NodeDecision::Install`] or [`NodeDecision::Update`].
-    ///
-    /// Groups the pure, allocation-free preparation work so that [`build_patch`](Self::build_patch)
-    /// can be read as two clearly separated phases: decision and action.
-    fn make_decisions<'a>(
-        &self,
-        graph: &'a ModuleGraph,
-        prev_state: &PlannerState,
-    ) -> Result<PlanDecisions<'a>, BuildError> {
-        let index = GraphIndex::build(graph);
-        let node_ids = graph.node_ids();
-        let sink = Self::find_sink(graph, &node_ids)?;
-        let (order, audio_out_index) = Self::compute_order(&node_ids, &sink)?;
-        let buf_alloc = self.allocate_buffers(&index, &order, &prev_state.buffer_alloc)?;
-        let decisions = classify_nodes(&index, &order, prev_state)?;
-        Ok(PlanDecisions { index, order, audio_out_index, buf_alloc, decisions })
-    }
-
-    /// Phase 1: Find exactly one sink node (`is_sink == true`) in the graph.
-    ///
-    /// Returns [`BuildError::NoAudioOut`] or [`BuildError::MultipleAudioOut`] if
-    /// the sink count is not exactly one.
-    fn find_sink(graph: &ModuleGraph, node_ids: &[NodeId]) -> Result<NodeId, BuildError> {
-        let sinks: Vec<NodeId> = node_ids
-            .iter()
-            .filter(|id| {
-                graph.get_node(id).map(|n| n.module_descriptor.is_sink).unwrap_or(false)
-            })
-            .cloned()
-            .collect();
-
-        match sinks.len() {
-            0 => Err(BuildError::NoAudioOut),
-            1 => Ok(sinks.into_iter().next().unwrap()),
-            _ => Err(BuildError::MultipleAudioOut),
-        }
-    }
-
-    /// Phase 3: Sort `node_ids` into ascending [`NodeId`] order and return the
-    /// sorted vec together with the index of `sink` within it.
-    fn compute_order(
-        node_ids: &[NodeId],
-        sink: &NodeId,
-    ) -> Result<(Vec<NodeId>, usize), BuildError> {
-        let mut order = node_ids.to_vec();
-        order.sort_unstable();
-        let audio_out_index = order
-            .iter()
-            .position(|id| id == sink)
-            .ok_or_else(|| BuildError::InternalError("sink node missing from order".to_string()))?;
-        Ok((order, audio_out_index))
-    }
-
-    /// Phase 4: Assign stable cable buffer pool indices.
-    ///
-    /// Reuses any `(NodeId, port_idx)` key already present in `prev_alloc`.
-    /// New keys are filled from the freelist (LIFO) or the high-water mark.
-    /// Old keys absent from the new graph are returned to the freelist and marked
-    /// for zeroing on plan adoption.
-    fn allocate_buffers(
-        &self,
-        index: &GraphIndex<'_>,
-        order: &[NodeId],
-        prev_alloc: &BufferAllocState,
-    ) -> Result<BufferAllocation, BuildError> {
-        let mut freelist = prev_alloc.freelist.clone();
-        let mut next_hwm = prev_alloc.next_hwm;
-        let mut to_zero = Vec::new();
-        let mut output_buf: HashMap<(NodeId, usize), usize> = HashMap::new();
-
-        for id in order {
-            let desc = &index
-                .get_node(id)
-                .ok_or_else(|| BuildError::InternalError(format!("node {id:?} missing from graph")))?
-                .module_descriptor;
-
-            for (port_idx, _) in desc.outputs.iter().enumerate() {
-                let key = (id.clone(), port_idx);
-                if let Some(&existing) = prev_alloc.output_buf.get(&key) {
-                    output_buf.insert(key, existing);
-                } else {
-                    let idx = freelist.pop().unwrap_or_else(|| {
-                        let i = next_hwm;
-                        next_hwm += 1;
-                        i
-                    });
-                    if idx >= self.pool_capacity {
-                        return Err(BuildError::PoolExhausted);
-                    }
-                    to_zero.push(idx);
-                    output_buf.insert(key, idx);
-                }
-            }
-        }
-
-        // Deallocate ports present in the old alloc that are not in the new graph.
-        for (key, &buf_idx) in &prev_alloc.output_buf {
-            if !output_buf.contains_key(key) {
-                to_zero.push(buf_idx);
-                freelist.push(buf_idx);
-            }
-        }
-
-        Ok(BufferAllocation { output_buf, to_zero, freelist, next_hwm })
     }
 
 }
@@ -1367,256 +1167,4 @@ mod tests {
         assert_eq!(scaled, vec![(1, 4, 0.25), (3, 8, -1.0)]);
     }
 
-    // ---- classify_nodes tests (T-0099) ----
-
-    fn shape_zero() -> ModuleShape {
-        ModuleShape { channels: 0, length: 0 }
-    }
-
-    /// Build a PlannerState with a single NodeState for `node_id`.
-    fn prev_with_node(
-        node_id: &NodeId,
-        module_name: &'static str,
-        shape: ModuleShape,
-        params: ParameterMap,
-        connectivity: PortConnectivity,
-    ) -> PlannerState {
-        let instance_id = InstanceId::next();
-        let mut state = PlannerState::empty();
-        state.nodes.insert(
-            node_id.clone(),
-            NodeState {
-                module_name,
-                instance_id,
-                parameter_map: params,
-                shape,
-                connectivity,
-            },
-        );
-        state
-    }
-
-    #[test]
-    fn classify_new_node_is_install() {
-        let mut graph = ModuleGraph::new();
-        let desc = Oscillator::describe(&shape_zero());
-        let mut params = ParameterMap::new();
-        params.insert("frequency".to_string(), ParameterValue::Float(440.0));
-        graph.add_module("osc", desc, &params).unwrap();
-
-        let order = vec![NodeId::from("osc")];
-        let index = GraphIndex::build(&graph);
-        let decisions = classify_nodes(&index, &order, &PlannerState::empty()).unwrap();
-
-        assert_eq!(decisions.len(), 1);
-        match &decisions[0].1 {
-            NodeDecision::Install { module_name, .. } => {
-                assert_eq!(*module_name, "Oscillator");
-            }
-            NodeDecision::Update { .. } => panic!("expected Install"),
-        }
-    }
-
-    #[test]
-    fn classify_type_changed_node_is_install() {
-        let mut graph = ModuleGraph::new();
-        let out_desc = AudioOut::describe(&shape_zero());
-        graph.add_module("x", out_desc, &ParameterMap::new()).unwrap();
-
-        let osc_desc = Oscillator::describe(&shape_zero());
-        let prev = prev_with_node(
-            &NodeId::from("x"),
-            osc_desc.module_name,
-            shape_zero(),
-            ParameterMap::new(),
-            PortConnectivity::new(osc_desc.inputs.len(), osc_desc.outputs.len()),
-        );
-
-        let order = vec![NodeId::from("x")];
-        let index = GraphIndex::build(&graph);
-        let decisions = classify_nodes(&index, &order, &prev).unwrap();
-        assert!(matches!(decisions[0].1, NodeDecision::Install { .. }));
-    }
-
-    #[test]
-    fn classify_shape_changed_node_is_install() {
-        let new_shape = ModuleShape { channels: 2, length: 0 };
-        let mut graph = ModuleGraph::new();
-        let desc = Sum::describe(&new_shape);
-        graph.add_module("s", desc.clone(), &ParameterMap::new()).unwrap();
-
-        let old_shape = ModuleShape { channels: 1, length: 0 };
-        let prev = prev_with_node(
-            &NodeId::from("s"),
-            desc.module_name,
-            old_shape,
-            ParameterMap::new(),
-            PortConnectivity::new(desc.inputs.len(), desc.outputs.len()),
-        );
-
-        let order = vec![NodeId::from("s")];
-        let index = GraphIndex::build(&graph);
-        let decisions = classify_nodes(&index, &order, &prev).unwrap();
-        assert!(matches!(decisions[0].1, NodeDecision::Install { .. }));
-    }
-
-    #[test]
-    fn classify_surviving_no_changes_is_update_with_empty_diff() {
-        let mut graph = ModuleGraph::new();
-        let desc = AudioOut::describe(&shape_zero());
-        graph.add_module("out", desc.clone(), &ParameterMap::new()).unwrap();
-
-        let prev = prev_with_node(
-            &NodeId::from("out"),
-            desc.module_name,
-            shape_zero(),
-            ParameterMap::new(),
-            PortConnectivity::new(desc.inputs.len(), desc.outputs.len()),
-        );
-
-        let order = vec![NodeId::from("out")];
-        let index = GraphIndex::build(&graph);
-        let decisions = classify_nodes(&index, &order, &prev).unwrap();
-
-        match &decisions[0].1 {
-            NodeDecision::Update { param_diff, connectivity_changed, .. } => {
-                assert!(param_diff.is_empty());
-                assert!(!connectivity_changed);
-            }
-            NodeDecision::Install { .. } => panic!("expected Update"),
-        }
-    }
-
-    #[test]
-    fn classify_surviving_param_changed_produces_diff() {
-        let desc = Oscillator::describe(&shape_zero());
-        let mut old_params = ParameterMap::new();
-        old_params.insert("frequency".to_string(), ParameterValue::Float(440.0));
-        let mut new_params = ParameterMap::new();
-        new_params.insert("frequency".to_string(), ParameterValue::Float(880.0));
-
-        let mut graph = ModuleGraph::new();
-        graph.add_module("osc", desc.clone(), &new_params).unwrap();
-
-        let prev = prev_with_node(
-            &NodeId::from("osc"),
-            desc.module_name,
-            shape_zero(),
-            old_params,
-            PortConnectivity::new(desc.inputs.len(), desc.outputs.len()),
-        );
-
-        let order = vec![NodeId::from("osc")];
-        let index = GraphIndex::build(&graph);
-        let decisions = classify_nodes(&index, &order, &prev).unwrap();
-
-        match &decisions[0].1 {
-            NodeDecision::Update { param_diff, .. } => {
-                assert!(!param_diff.is_empty());
-                assert_eq!(param_diff.get("frequency"), Some(&ParameterValue::Float(880.0)));
-            }
-            _ => panic!("expected Update"),
-        }
-    }
-
-    #[test]
-    fn classify_surviving_edge_added_connectivity_changed() {
-        let osc_desc = Oscillator::describe(&shape_zero());
-        let out_desc = AudioOut::describe(&shape_zero());
-
-        let mut graph = ModuleGraph::new();
-        let mut params = ParameterMap::new();
-        params.insert("frequency".to_string(), ParameterValue::Float(440.0));
-        graph.add_module("osc", osc_desc.clone(), &params).unwrap();
-        graph.add_module("out", out_desc.clone(), &ParameterMap::new()).unwrap();
-        graph.connect(&NodeId::from("osc"), p("sine"), &NodeId::from("out"), p("left"), 1.0).unwrap();
-
-        // prev: osc had no connected outputs
-        let prev = prev_with_node(
-            &NodeId::from("osc"),
-            osc_desc.module_name,
-            shape_zero(),
-            params,
-            PortConnectivity::new(osc_desc.inputs.len(), osc_desc.outputs.len()),
-        );
-
-        let order = vec![NodeId::from("osc"), NodeId::from("out")];
-        let index = GraphIndex::build(&graph);
-        let decisions = classify_nodes(&index, &order, &prev).unwrap();
-
-        let osc = decisions.iter().find(|(id, _)| id == &NodeId::from("osc")).unwrap();
-        match &osc.1 {
-            NodeDecision::Update { connectivity_changed, .. } => {
-                assert!(*connectivity_changed, "osc output newly connected");
-            }
-            _ => panic!("expected Update"),
-        }
-    }
-
-    #[test]
-    fn classify_surviving_edge_removed_connectivity_changed() {
-        let osc_desc = Oscillator::describe(&shape_zero());
-        let out_desc = AudioOut::describe(&shape_zero());
-
-        // New graph has no connection
-        let mut graph = ModuleGraph::new();
-        let mut params = ParameterMap::new();
-        params.insert("frequency".to_string(), ParameterValue::Float(440.0));
-        graph.add_module("osc", osc_desc.clone(), &params).unwrap();
-        graph.add_module("out", out_desc.clone(), &ParameterMap::new()).unwrap();
-
-        // prev: osc output[0] was connected
-        let mut prev_conn = PortConnectivity::new(osc_desc.inputs.len(), osc_desc.outputs.len());
-        prev_conn.outputs[0] = true;
-        let prev = prev_with_node(
-            &NodeId::from("osc"),
-            osc_desc.module_name,
-            shape_zero(),
-            params,
-            prev_conn,
-        );
-
-        let order = vec![NodeId::from("osc"), NodeId::from("out")];
-        let index = GraphIndex::build(&graph);
-        let decisions = classify_nodes(&index, &order, &prev).unwrap();
-
-        let osc = decisions.iter().find(|(id, _)| id == &NodeId::from("osc")).unwrap();
-        match &osc.1 {
-            NodeDecision::Update { connectivity_changed, .. } => {
-                assert!(*connectivity_changed, "osc output no longer connected");
-            }
-            _ => panic!("expected Update"),
-        }
-    }
-
-    #[test]
-    fn classify_multiple_nodes_each_classified_independently() {
-        let osc_desc = Oscillator::describe(&shape_zero());
-        let out_desc = AudioOut::describe(&shape_zero());
-
-        let mut graph = ModuleGraph::new();
-        let mut params = ParameterMap::new();
-        params.insert("frequency".to_string(), ParameterValue::Float(440.0));
-        graph.add_module("osc", osc_desc.clone(), &params).unwrap();
-        graph.add_module("out", out_desc.clone(), &ParameterMap::new()).unwrap();
-
-        // prev_state: osc is surviving; "out" is new
-        let prev = prev_with_node(
-            &NodeId::from("osc"),
-            osc_desc.module_name,
-            shape_zero(),
-            params,
-            PortConnectivity::new(osc_desc.inputs.len(), osc_desc.outputs.len()),
-        );
-
-        let order = vec![NodeId::from("osc"), NodeId::from("out")];
-        let index = GraphIndex::build(&graph);
-        let decisions = classify_nodes(&index, &order, &prev).unwrap();
-
-        assert_eq!(decisions.len(), 2);
-        let osc = decisions.iter().find(|(id, _)| id == &NodeId::from("osc")).unwrap();
-        let out = decisions.iter().find(|(id, _)| id == &NodeId::from("out")).unwrap();
-        assert!(matches!(osc.1, NodeDecision::Update { .. }), "osc should survive");
-        assert!(matches!(out.1, NodeDecision::Install { .. }), "out is new");
-    }
 }

@@ -19,6 +19,7 @@ pub use modules::InstanceId;
 pub use registries::ModuleBuilder;
 pub use registries::Registry;
 pub use graphs::planner::{
-    BufferAllocState, GraphIndex, ModuleAllocState, NodeState, PlanError,
-    PlannerState, ResolvedGraph,
+    allocate_buffers, classify_nodes, make_decisions,
+    BufferAllocState, BufferAllocation, GraphIndex, ModuleAllocState, NodeDecision, NodeState,
+    PlanDecisions, PlanError, PlannerState, ResolvedGraph,
 };

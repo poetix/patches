@@ -1,8 +1,8 @@
 use crate::audio_environment::AudioEnvironment;
 use crate::build_error::BuildError;
-use crate::instance_id::InstanceId;
-use crate::module_descriptor::{ModuleDescriptor, ModuleShape, ParameterKind};
-use crate::parameter_map::{ParameterMap, ParameterValue};
+use super::instance_id::InstanceId;
+use super::module_descriptor::{ModuleDescriptor, ModuleShape, ParameterKind};
+use super::parameter_map::{ParameterMap, ParameterValue};
 
 /// A non-audio-rate control signal delivered to a module via [`Module::receive_signal`].
 ///
@@ -283,8 +283,7 @@ pub trait Sink: Module {
 mod tests {
     use super::*;
     use crate::build_error::BuildError;
-    use crate::module_descriptor::{ModuleDescriptor, ModuleShape, ParameterDescriptor, ParameterKind};
-    use crate::parameter_map::{ParameterMap, ParameterValue};
+    use crate::modules::{ModuleDescriptor, ModuleShape, ParameterDescriptor, ParameterKind, ParameterMap, ParameterValue};
 
     fn array_descriptor() -> ModuleDescriptor {
         ModuleDescriptor {

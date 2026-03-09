@@ -376,7 +376,7 @@ mod tests {
     use crate::{
         AudioEnvironment, InstanceId, ModuleDescriptor, ParameterDescriptor, PortDescriptor,
     };
-    use crate::module::Module;
+    use crate::modules::Module;
 
     // --- minimal test modules ------------------------------------------------
 

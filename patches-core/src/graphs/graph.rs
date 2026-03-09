@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::{ModuleDescriptor, PortRef};
-use crate::parameter_map::ParameterMap;
+use crate::modules::{ModuleDescriptor, ParameterMap, PortRef};
 
 /// Stable identifier for a module node in the graph.
 ///
@@ -300,9 +299,7 @@ impl Default for ModuleGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{ModuleDescriptor, PortDescriptor, PortRef};
-    use crate::module_descriptor::ModuleShape;
-    use crate::parameter_map::ParameterMap;
+    use crate::modules::{ModuleDescriptor, ModuleShape, ParameterMap, PortDescriptor, PortRef};
 
     fn stub_desc(inputs: &[&'static str], outputs: &[&'static str]) -> ModuleDescriptor {
         ModuleDescriptor {

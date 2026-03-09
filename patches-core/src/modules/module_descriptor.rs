@@ -21,7 +21,7 @@ pub struct PortRef {
     pub index: u32,
 }
 
-use crate::parameter_map::ParameterValue;
+use super::parameter_map::ParameterValue;
 
 #[derive(Debug, Clone)]
 pub enum ParameterKind {

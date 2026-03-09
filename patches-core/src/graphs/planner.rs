@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-use crate::{InstanceId, ModuleDescriptor, ModuleGraph, ModuleShape, Node, NodeId, PortConnectivity};
-use crate::parameter_map::ParameterMap;
+use crate::modules::{InstanceId, ModuleDescriptor, ModuleShape, ParameterMap, PortConnectivity};
+use super::graph::{ModuleGraph, Node, NodeId};
 
 // ── PlanError ─────────────────────────────────────────────────────────────────
 
@@ -381,7 +381,7 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
-    use crate::InstanceId;
+    use crate::modules::InstanceId;
 
     // ── helpers ───────────────────────────────────────────────────────────────
 
@@ -593,7 +593,8 @@ mod tests {
 
     // ── GraphIndex / ResolvedGraph tests (moved from patches-engine T-0103) ───
 
-    use crate::{ModuleDescriptor, ModuleGraph, ModuleShape, PortDescriptor};
+    use crate::modules::{ModuleDescriptor, ModuleShape, PortDescriptor};
+    use crate::ModuleGraph;
 
     fn two_node_graph() -> (ModuleGraph, NodeId, NodeId) {
         use crate::parameter_map::ParameterMap;

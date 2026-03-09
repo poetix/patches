@@ -1,48 +1,62 @@
+use std::collections::HashMap;
 use std::marker::PhantomData;
 use crate::audio_environment::AudioEnvironment;
 use crate::build_error::BuildError;
-use crate::instance_id::InstanceId;
-use crate::module::Module;
-use crate::module_descriptor::{ModuleDescriptor, ModuleShape};
-use crate::parameter_map::ParameterMap;
+use crate::modules::{InstanceId, Module, ModuleDescriptor, ModuleShape, ParameterMap};
+use super::module_builder::{Builder, ModuleBuilder};
 
-pub trait ModuleBuilder: Send + Sync {
-    fn describe(&self, shape: &ModuleShape) -> ModuleDescriptor;
-
-    fn build(
-        &self,
-        audio_environment: &AudioEnvironment,
-        shape: &ModuleShape,
-        params: &ParameterMap,
-        instance_id: InstanceId,
-    ) -> Result<Box<dyn Module>, BuildError>;
+pub struct Registry {
+    builders: HashMap<String, Box<dyn ModuleBuilder>>,
 }
 
-pub struct Builder<T>(pub PhantomData<fn() -> T>);
+impl Default for Registry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
-impl<T> ModuleBuilder for Builder<T>
-where
-    T: Module + 'static,
-{
-    fn describe(&self, shape: &ModuleShape) -> ModuleDescriptor {
-        T::describe(shape)
+impl Registry {
+    pub fn new() -> Self {
+        Self { builders: HashMap::new() }
     }
 
-    fn build(
+    pub fn register<T>(&mut self)
+    where
+        T: Module + 'static,
+    {
+        let name = T::describe(&ModuleShape { channels: 0, length: 0 }).module_name;
+        self.builders
+            .insert(name.to_string(), Box::new(Builder::<T>(PhantomData)));
+    }
+
+    pub fn describe(&self, name: &str, shape: &ModuleShape) -> Result<ModuleDescriptor, BuildError> {
+        self.builders
+            .get(name)
+            .map(|builder| builder.describe(shape))
+            .ok_or_else(|| BuildError::UnknownModule { name: name.to_string() })
+    }
+
+    pub fn create(
         &self,
+        name: &str,
         audio_environment: &AudioEnvironment,
         shape: &ModuleShape,
         params: &ParameterMap,
         instance_id: InstanceId,
     ) -> Result<Box<dyn Module>, BuildError> {
-        Ok(Box::new(T::build(audio_environment, shape, params, instance_id)?))
+        let builder = self
+            .builders
+            .get(name)
+            .ok_or_else(|| BuildError::UnknownModule { name: name.to_string() })?;
+
+        builder.build(audio_environment, shape, params, instance_id)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::InstanceId;
+    use crate::modules::{InstanceId, ModuleDescriptor};
 
     struct TestModule {
         instance_id: InstanceId,
@@ -92,11 +106,13 @@ mod tests {
 
     #[test]
     fn build_a_module() {
-        let audio_environment = AudioEnvironment { sample_rate: 44100.0 };
+        let mut registry = Registry::new();
+        registry.register::<TestModule>();
+
         let shape = ModuleShape { channels: 2, length: 0 };
         let params = ParameterMap::new();
-        let builder = Builder::<TestModule>(PhantomData);
-        let module = builder.build(&audio_environment, &shape, &params, InstanceId::next()).unwrap();
+        let audio_environment = AudioEnvironment { sample_rate: 44100.0 };
+        let module = registry.create("TestModule", &audio_environment, &shape, &params, InstanceId::next()).unwrap();
 
         assert_eq!(module.descriptor().module_name, "TestModule");
         assert_eq!(module.descriptor().shape.channels, 2);

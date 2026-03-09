@@ -132,6 +132,11 @@ fn probe_with_input_graph() -> ModuleGraph {
     graph
 }
 
+fn pool_index_for(state: &PlannerState, node_id: &NodeId) -> usize {
+    let ns = &state.nodes[node_id];
+    state.module_alloc.pool_map[&ns.instance_id]
+}
+
 // ── tests ─────────────────────────────────────────────────────────────────────
 
 /// On the initial plan, the builder calls `set_connectivity` on each fresh module.
@@ -146,7 +151,7 @@ fn initial_connectivity_set_on_fresh_module() {
         build_patch(&graph, &registry, &env(), &PlannerState::empty(), POOL_CAP, MODULE_CAP)
             .unwrap();
 
-    let probe_slot = state.nodes[&NodeId::from("probe")].pool_index;
+    let probe_slot = pool_index_for(&state, &NodeId::from("probe"));
     let probe = plan
         .new_modules
         .iter()
@@ -175,7 +180,7 @@ fn added_cable_produces_connectivity_update() {
     let (_, state_a) =
         build_patch(&graph_a, &registry, &env(), &PlannerState::empty(), POOL_CAP, MODULE_CAP)
             .unwrap();
-    let probe_slot = state_a.nodes[&NodeId::from("probe")].pool_index;
+    let probe_slot = pool_index_for(&state_a, &NodeId::from("probe"));
 
     // plan_b: osc → probe.in added; probe survives with changed connectivity.
     let graph_b = probe_with_input_graph();
@@ -206,7 +211,7 @@ fn removed_cable_produces_connectivity_update() {
     let (_, state_a) =
         build_patch(&graph_a, &registry, &env(), &PlannerState::empty(), POOL_CAP, MODULE_CAP)
             .unwrap();
-    let probe_slot = state_a.nodes[&NodeId::from("probe")].pool_index;
+    let probe_slot = pool_index_for(&state_a, &NodeId::from("probe"));
 
     // plan_b: osc removed; probe.in is now disconnected.
     let graph_b = probe_to_out_graph();
@@ -236,7 +241,7 @@ fn no_spurious_update_when_topology_unchanged() {
     let (_, state_a) =
         build_patch(&graph, &registry, &env(), &PlannerState::empty(), POOL_CAP, MODULE_CAP)
             .unwrap();
-    let probe_slot = state_a.nodes[&NodeId::from("probe")].pool_index;
+    let probe_slot = pool_index_for(&state_a, &NodeId::from("probe"));
 
     let (plan_b, _) =
         build_patch(&graph, &registry, &env(), &state_a, POOL_CAP, MODULE_CAP).unwrap();

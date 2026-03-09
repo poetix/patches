@@ -5,6 +5,7 @@ pub mod build_error;
 pub mod module_descriptor;
 pub mod module_builder;
 pub mod parameter_map;
+pub mod planner;
 pub mod registry;
 pub mod audio_environment;
 pub mod instance_id;
@@ -17,3 +18,7 @@ pub use registry::Registry;
 pub use parameter_map::{ParameterValue,ParameterMap};
 pub use audio_environment::AudioEnvironment;
 pub use instance_id::InstanceId;
+pub use planner::{
+    BufferAllocState, GraphIndex, ModuleAllocDiff, ModuleAllocState, NodeState, PlanError,
+    PlannerState, ResolvedGraph,
+};

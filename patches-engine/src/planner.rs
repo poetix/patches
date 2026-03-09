@@ -1,6 +1,8 @@
 use patches_core::{AudioEnvironment, ControlSignal, InstanceId, ModuleGraph, NodeId, Registry};
 
-use crate::builder::{BuildError, ExecutionPlan, PatchBuilder, PlannerState};
+use patches_core::PlannerState;
+
+use crate::builder::{BuildError, ExecutionPlan, PatchBuilder};
 use crate::engine::{EngineError, SoundEngine, DEFAULT_MODULE_POOL_CAPACITY};
 
 /// Default cable buffer pool capacity.

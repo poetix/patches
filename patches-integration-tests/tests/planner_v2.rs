@@ -79,6 +79,12 @@ fn make_buffer_pool() -> Vec<[f64; 2]> {
     vec![[0.0; 2]; POOL_CAP]
 }
 
+/// Resolve pool index from planner state: `module_alloc.pool_map[instance_id]`.
+fn pool_index_for(state: &PlannerState, node_id: &NodeId) -> usize {
+    let ns = &state.nodes[node_id];
+    state.module_alloc.pool_map[&ns.instance_id]
+}
+
 // ── tests ──────────────────────────────────────────────────────────────────────
 
 /// Rebuilding an identical graph produces no new modules and preserves InstanceIds.
@@ -110,7 +116,7 @@ fn surviving_modules_are_not_re_instantiated() {
         );
         // The state's InstanceId must match the module that was installed.
         assert_eq!(
-            ids_a[&ns_a.pool_index], ns_a.instance_id,
+            ids_a[&pool_index_for(&state_a, node_id)], ns_a.instance_id,
             "state InstanceId must equal the installed module's instance_id()"
         );
     }
@@ -136,15 +142,17 @@ fn new_node_triggers_instantiation() {
     assert_eq!(new_module_slots.len(), 2, "exactly two new modules (osc_b and mix)");
 
     // The new pool slots must match the state assignments for "osc_b" and "mix".
-    let osc_b_slot = state_b.nodes.get(&NodeId::from("osc_b")).expect("osc_b in state_b").pool_index;
-    let mix_slot = state_b.nodes.get(&NodeId::from("mix")).expect("mix in state_b").pool_index;
+    let osc_b_slot = pool_index_for(&state_b, &NodeId::from("osc_b"));
+    let mix_slot = pool_index_for(&state_b, &NodeId::from("mix"));
 
     assert!(new_module_slots.contains(&osc_b_slot), "osc_b pool slot must be in new_modules");
     assert!(new_module_slots.contains(&mix_slot), "mix pool slot must be in new_modules");
 
     // Verify the state InstanceIds match the modules in new_modules (builder fix check).
     for (idx, m) in &plan_b.new_modules {
-        let node_state = state_b.nodes.values().find(|ns| ns.pool_index == *idx).unwrap();
+        let node_state = state_b.nodes.values()
+            .find(|ns| state_b.module_alloc.pool_map[&ns.instance_id] == *idx)
+            .unwrap();
         assert_eq!(
             m.instance_id(), node_state.instance_id,
             "module InstanceId at slot {idx} must equal state InstanceId"
@@ -153,11 +161,11 @@ fn new_node_triggers_instantiation() {
 
     // "osc_a" and "out" must NOT appear in new_modules (they survive).
     assert!(
-        !new_module_slots.contains(&state_a.nodes[&NodeId::from("osc_a")].pool_index),
+        !new_module_slots.contains(&pool_index_for(&state_a, &NodeId::from("osc_a"))),
         "osc_a must not be in new_modules"
     );
     assert!(
-        !new_module_slots.contains(&state_a.nodes[&NodeId::from("out")].pool_index),
+        !new_module_slots.contains(&pool_index_for(&state_a, &NodeId::from("out"))),
         "out must not be in new_modules"
     );
 }
@@ -171,8 +179,8 @@ fn removed_node_triggers_tombstone() {
     let (_plan_a, state_a) =
         build_patch(&graph_a, &registry, &env(), &PlannerState::empty(), POOL_CAP, MODULE_CAP).unwrap();
 
-    let osc_b_slot = state_a.nodes[&NodeId::from("osc_b")].pool_index;
-    let mix_slot = state_a.nodes[&NodeId::from("mix")].pool_index;
+    let osc_b_slot = pool_index_for(&state_a, &NodeId::from("osc_b"));
+    let mix_slot = pool_index_for(&state_a, &NodeId::from("mix"));
 
     // graph_b removes "osc_b" and "mix" (back to single-osc layout).
     let graph_b = sine_out_graph("osc_a", 440.0);
@@ -202,7 +210,7 @@ fn type_change_triggers_tombstone_and_new_module() {
     let (_plan_a, state_a) =
         build_patch(&graph_a, &registry, &env(), &PlannerState::empty(), POOL_CAP, MODULE_CAP).unwrap();
 
-    let old_osc_slot = state_a.nodes[&NodeId::from("osc")].pool_index;
+    let old_osc_slot = pool_index_for(&state_a, &NodeId::from("osc"));
 
     // graph_b: same NodeId "osc" but Sum instead of Oscillator (type changed).
     let graph_b = sum_out_graph();
@@ -214,7 +222,7 @@ fn type_change_triggers_tombstone_and_new_module() {
         "old Oscillator slot must be tombstoned on type change"
     );
 
-    let new_osc_slot = state_b.nodes[&NodeId::from("osc")].pool_index;
+    let new_osc_slot = pool_index_for(&state_b, &NodeId::from("osc"));
     let new_module_slots: Vec<usize> = plan_b.new_modules.iter().map(|(idx, _)| *idx).collect();
     assert!(
         new_module_slots.contains(&new_osc_slot),
@@ -241,7 +249,7 @@ fn parameter_only_change_produces_diffs_without_reinstantiation() {
     let (_plan_a, state_a) =
         build_patch(&graph_a, &registry, &env(), &PlannerState::empty(), POOL_CAP, MODULE_CAP).unwrap();
 
-    let osc_slot = state_a.nodes[&NodeId::from("osc")].pool_index;
+    let osc_slot = pool_index_for(&state_a, &NodeId::from("osc"));
 
     // Same structure, different frequency.
     let graph_b = sine_out_graph("osc", 880.0);

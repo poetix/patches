@@ -2,8 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use patches_core::{
-    AudioEnvironment, ControlSignal, InstanceId, Module, ModuleGraph, ModuleShape, NodeId,
-    PortConnectivity, Registry,
+    AudioEnvironment, BufferAllocState, ControlSignal, GraphIndex, InstanceId, Module,
+    ModuleAllocState, ModuleGraph, ModuleShape, NodeId, NodeState, PlanError, PlannerState,
+    PortConnectivity, Registry, ResolvedGraph,
 };
 use patches_core::parameter_map::ParameterMap;
 
@@ -43,168 +44,11 @@ impl fmt::Display for BuildError {
 
 impl std::error::Error for BuildError {}
 
-/// Stable buffer index allocation state threaded across successive [`PatchBuilder::build_patch`] calls.
-///
-/// `BufferAllocState` allows cables that share a `(NodeId, output_port_index)` key
-/// across re-plans to reuse the same pool slot, so the audio thread reads/writes the
-/// same memory before and after a plan swap.
-///
-/// The `Default` implementation starts the high-water mark at `1`, reserving slot `0`
-/// as the permanent-zero slot.
-pub struct BufferAllocState {
-    /// Maps `(NodeId, output_port_index)` to a stable buffer pool index.
-    pub output_buf: HashMap<(NodeId, usize), usize>,
-    /// Recycled buffer indices available for reuse (LIFO via [`Vec::pop`]).
-    pub freelist: Vec<usize>,
-    /// High-water mark: the next index to allocate when the freelist is empty.
-    /// Starts at `1` so that index `0` remains the permanent-zero slot.
-    pub next_hwm: usize,
-}
-
-impl Default for BufferAllocState {
-    fn default() -> Self {
-        Self {
-            output_buf: HashMap::new(),
-            freelist: Vec::new(),
-            next_hwm: 1,
-        }
-    }
-}
-
-/// Stable module slot allocation state threaded across successive [`PatchBuilder::build_patch`] calls.
-///
-/// `ModuleAllocState` is the control-thread mirror of the audio thread's module pool,
-/// analogous to [`BufferAllocState`] for the buffer pool. It tracks which pool slot each
-/// [`InstanceId`] occupies so that surviving modules reuse their slots across re-plans.
-///
-/// The `Default` implementation starts the high-water mark at `0` (no permanent-zero slot
-/// is needed for modules).
-#[derive(Default)]
-pub struct ModuleAllocState {
-    /// Maps [`InstanceId`] to the pool slot index currently holding that module.
-    pub pool_map: HashMap<InstanceId, usize>,
-    /// Recycled slot indices available for reuse (LIFO via [`Vec::pop`]).
-    pub freelist: Vec<usize>,
-    /// High-water mark: the next index to allocate when the freelist is empty.
-    /// Starts at `0`.
-    pub next_hwm: usize,
-}
-
-/// Result of [`ModuleAllocState::diff`]: the new pool map and freelist after applying
-/// the module set for the next graph.
-#[derive(Debug)]
-pub struct ModuleAllocDiff {
-    /// Slot index for each [`InstanceId`] in the new graph (surviving + newly allocated).
-    pub slot_map: HashMap<InstanceId, usize>,
-    /// Updated freelist (surviving freelisted indices + newly tombstoned slots).
-    pub freelist: Vec<usize>,
-    /// New high-water mark.
-    pub next_hwm: usize,
-    /// Slot indices that were tombstoned (freed) by this diff.
-    pub tombstoned: Vec<usize>,
-}
-
-impl ModuleAllocState {
-    /// Compute allocation changes given the set of [`InstanceId`]s for the incoming graph.
-    ///
-    /// - **Surviving** entries: already in `pool_map` → reuse their existing slot index.
-    /// - **New** entries: not in `pool_map` → acquired from `freelist` (LIFO) or `next_hwm`.
-    ///   Returns [`BuildError::ModulePoolExhausted`] if the index would reach `capacity`.
-    /// - **Tombstoned** entries: in `pool_map` but not in `new_ids` → slot returned to freelist.
-    pub fn diff(
-        &self,
-        new_ids: &HashSet<InstanceId>,
-        capacity: usize,
-    ) -> Result<ModuleAllocDiff, BuildError> {
-        let mut slot_map: HashMap<InstanceId, usize> = HashMap::new();
-        let mut freelist: Vec<usize> = self.freelist.clone();
-        let mut next_hwm: usize = self.next_hwm;
-        let mut tombstoned: Vec<usize> = Vec::new();
-
-        // Tombstone: entries in the old pool_map that are not in the new set.
-        for (&id, &slot) in &self.pool_map {
-            if !new_ids.contains(&id) {
-                freelist.push(slot);
-                tombstoned.push(slot);
-            }
-        }
-
-        // Allocate: surviving entries reuse their slot; new entries get a fresh one.
-        for &id in new_ids {
-            if let Some(&existing) = self.pool_map.get(&id) {
-                slot_map.insert(id, existing);
-            } else {
-                let idx = if let Some(recycled) = freelist.pop() {
-                    recycled
-                } else {
-                    let idx = next_hwm;
-                    next_hwm += 1;
-                    idx
-                };
-                if idx >= capacity {
-                    return Err(BuildError::ModulePoolExhausted);
-                }
-                slot_map.insert(id, idx);
-            }
-        }
-
-        Ok(ModuleAllocDiff {
-            slot_map,
-            freelist,
-            next_hwm,
-            tombstoned,
-        })
-    }
-}
-
-/// Per-node identity and parameter state carried across successive builds.
-pub struct NodeState {
-    /// The module type name (from `ModuleDescriptor::module_name`).
-    pub module_name: &'static str,
-    /// Stable identity assigned by the planner when this node first appeared.
-    pub instance_id: InstanceId,
-    /// The module pool slot assigned to this node.
-    pub pool_index: usize,
-    /// The parameter map applied to this node during the last build.
-    pub parameter_map: ParameterMap,
-    /// The shape used when this module instance was created.
-    ///
-    /// If the shape changes on the next build (same `NodeId`, same module type),
-    /// the old instance is tombstoned and a fresh one is created with the new shape.
-    pub shape: ModuleShape,
-    /// The port connectivity computed during the last build.
-    ///
-    /// Stored so that T-0080 can diff against it to emit connectivity updates only
-    /// when the wiring actually changes.
-    pub connectivity: PortConnectivity,
-}
-
-/// Planning state threaded across successive [`PatchBuilder::build_patch`] calls.
-///
-/// `PlannerState` records node identity, buffer allocation, and module slot
-/// allocation. Passing the previous build's state into the next call enables
-/// graph diffing: surviving nodes reuse their `InstanceId` and pool slot;
-/// only added and type-changed nodes trigger module instantiation.
-pub struct PlannerState {
-    /// Maps each [`NodeId`] to its last-known identity and parameters.
-    pub nodes: HashMap<NodeId, NodeState>,
-    /// Stable buffer index allocation carried across builds.
-    pub buffer_alloc: BufferAllocState,
-    /// Stable module slot allocation carried across builds.
-    pub module_alloc: ModuleAllocState,
-}
-
-impl PlannerState {
-    /// Return an empty state for the first build.
-    ///
-    /// Using an empty state causes every node in the graph to be treated as
-    /// new: each receives a fresh [`InstanceId`] and a new module is
-    /// instantiated via the registry.
-    pub fn empty() -> Self {
-        Self {
-            nodes: HashMap::new(),
-            buffer_alloc: BufferAllocState::default(),
-            module_alloc: ModuleAllocState::default(),
+impl From<PlanError> for BuildError {
+    fn from(e: PlanError) -> Self {
+        match e {
+            PlanError::ModulePoolExhausted => BuildError::ModulePoolExhausted,
+            PlanError::InternalError(msg) => BuildError::InternalError(msg),
         }
     }
 }
@@ -340,6 +184,16 @@ struct BufferAllocation {
     next_hwm: usize,
 }
 
+/// Everything produced by [`PatchBuilder::make_decisions`] and consumed by
+/// the action phase of [`PatchBuilder::build_patch`].
+struct PlanDecisions<'a> {
+    index: GraphIndex<'a>,
+    order: Vec<NodeId>,
+    audio_out_index: usize,
+    buf_alloc: BufferAllocation,
+    decisions: Vec<(NodeId, NodeDecision<'a>)>,
+}
+
 /// Per-node decision produced by [`classify_nodes`].
 ///
 /// The decision phase is pure: it reads the graph and previous state but does
@@ -365,86 +219,7 @@ pub(crate) enum NodeDecision<'a> {
 
 // ── Decision-phase helpers ────────────────────────────────────────────────────
 
-type EdgeList = Vec<(NodeId, String, u32, NodeId, String, u32, f64)>;
 type PartitionedInputs = (Vec<(usize, usize)>, Vec<(usize, usize, f64)>);
-
-/// Resolve each input port of `desc` on `node_id` to a `(buffer_index, scale)` pair.
-///
-/// Scans `edges` for edges targeting `node_id`, matches them to input ports by name and
-/// index, and looks up the source's buffer in `output_buf`. Unconnected ports default to
-/// `(0, 1.0)` — the permanent-zero slot with implicit scale 1.0.
-///
-/// Returns [`BuildError::InternalError`] if a referenced source node, output port, or
-/// buffer allocation is missing.
-/// Look up the buffer index for a single edge's source port, returning `(buffer_index, scale)`.
-///
-/// Performs three fallible lookups in sequence:
-/// 1. Source node in `graph`.
-/// 2. Output port by name and index within that node's descriptor.
-/// 3. Pre-allocated buffer slot in `output_buf`.
-fn resolve_edge_to_buffer(
-    from: &NodeId,
-    out_name: &str,
-    out_idx: u32,
-    scale: f64,
-    output_buf: &HashMap<(NodeId, usize), usize>,
-    graph: &ModuleGraph,
-) -> Result<(usize, f64), BuildError> {
-    let from_node = graph
-        .get_node(from)
-        .ok_or_else(|| BuildError::InternalError(format!("node {from:?} missing from graph")))?;
-    let out_port_idx = from_node
-        .module_descriptor
-        .outputs
-        .iter()
-        .position(|p| p.name == out_name && p.index == out_idx)
-        .ok_or_else(|| {
-            BuildError::InternalError(format!(
-                "output port {out_name:?}/{out_idx} not found on node {from:?}"
-            ))
-        })?;
-    let buf = output_buf
-        .get(&(from.clone(), out_port_idx))
-        .copied()
-        .ok_or_else(|| {
-            BuildError::InternalError(format!(
-                "buffer for ({from:?}, {out_port_idx}) not found"
-            ))
-        })?;
-    Ok((buf, scale))
-}
-
-/// Resolve each input port of `desc` on `node_id` to a `(buffer_index, scale)` pair.
-///
-/// Scans `edges` for edges targeting `node_id`, matches them to input ports by name and
-/// index, and looks up the source's buffer in `output_buf`. Unconnected ports default to
-/// `(0, 1.0)` — the permanent-zero slot with implicit scale 1.0.
-///
-/// Returns [`BuildError::InternalError`] if a referenced source node, output port, or
-/// buffer allocation is missing.
-fn resolve_input_buffers(
-    desc: &patches_core::ModuleDescriptor,
-    node_id: &NodeId,
-    edges: &EdgeList,
-    output_buf: &HashMap<(NodeId, usize), usize>,
-    graph: &ModuleGraph,
-) -> Result<Vec<(usize, f64)>, BuildError> {
-    desc.inputs
-        .iter()
-        .map(|port| {
-            edges
-                .iter()
-                .find(|(_, _, _, to, in_name, in_idx, _)| {
-                    *to == *node_id && in_name == port.name && *in_idx == port.index
-                })
-                .map(|(from, out_name, out_idx, _, _, _, scale)| {
-                    resolve_edge_to_buffer(from, out_name, *out_idx, *scale, output_buf, graph)
-                })
-                .transpose()
-                .map(|opt| opt.unwrap_or((0, 1.0)))
-        })
-        .collect()
-}
 
 /// Partition resolved `(buffer_index, scale)` pairs into unscaled and scaled lists.
 ///
@@ -474,15 +249,14 @@ fn partition_inputs(resolved: Vec<(usize, f64)>) -> PartitionedInputs {
 ///
 /// Pure: no [`InstanceId`]s are minted, no modules are instantiated.
 fn classify_nodes<'a>(
-    graph: &'a ModuleGraph,
+    index: &GraphIndex<'a>,
     order: &[NodeId],
-    edges: &[(NodeId, String, u32, NodeId, String, u32, f64)],
     prev_state: &PlannerState,
 ) -> Result<Vec<(NodeId, NodeDecision<'a>)>, BuildError> {
     let mut decisions = Vec::with_capacity(order.len());
 
     for id in order {
-        let node = graph.get_node(id).ok_or_else(|| {
+        let node = index.get_node(id).ok_or_else(|| {
             BuildError::InternalError(format!("node {id:?} missing from graph"))
         })?;
         let desc = &node.module_descriptor;
@@ -498,7 +272,7 @@ fn classify_nodes<'a>(
                     .filter(|(k, v)| prev_ns.parameter_map.get(*k) != Some(v))
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect();
-                let new_connectivity = compute_connectivity(desc, id, edges);
+                let new_connectivity = index.compute_connectivity(desc, id);
                 let connectivity_changed = new_connectivity != prev_ns.connectivity;
                 NodeDecision::Update { instance_id: prev_ns.instance_id, param_diff, connectivity_changed }
             }
@@ -552,22 +326,9 @@ impl PatchBuilder {
         env: &AudioEnvironment,
         prev_state: &PlannerState,
     ) -> Result<(ExecutionPlan, PlannerState), BuildError> {
-        let node_ids = graph.node_ids();
-
-        // Phase 1 – locate the single sink node.
-        let sink = Self::find_sink(graph, &node_ids)?;
-
-        // Phase 2 – sort into execution order and record the sink's position.
-        let (order, audio_out_index) = Self::compute_order(&node_ids, &sink)?;
-
-        // Phase 3 – assign stable cable buffer indices.
-        let buf_alloc = self.allocate_buffers(graph, &order, &prev_state.buffer_alloc)?;
-
         // ── Decision phase ───────────────────────────────────────────────────
-        // Classify each node as Install or Update; compute param/connectivity
-        // diffs for survivors. Pure: no InstanceIds minted, no modules created.
-        let edges = graph.edge_list();
-        let decisions = classify_nodes(graph, &order, &edges, prev_state)?;
+        let PlanDecisions { index, order, audio_out_index, buf_alloc, decisions } =
+            self.make_decisions(graph, prev_state)?;
 
         // ── Action phase ─────────────────────────────────────────────────────
 
@@ -595,7 +356,13 @@ impl PatchBuilder {
 
         // Step B – assign stable module pool slots.
         let new_ids: HashSet<InstanceId> = instance_ids.values().copied().collect();
-        let module_diff = prev_state.module_alloc.diff(&new_ids, self.module_pool_capacity)?;
+        let module_diff = prev_state
+            .module_alloc
+            .diff(&new_ids, self.module_pool_capacity)
+            .map_err(BuildError::from)?;
+
+        // Build resolved graph: extend index with input-buffer map.
+        let resolved = ResolvedGraph::build(&index, &buf_alloc.output_buf)?;
 
         // Step C – assemble ModuleSlots, NodeStates, and collect diff vectors.
         let mut slots: Vec<ModuleSlot> = Vec::with_capacity(order.len());
@@ -605,7 +372,7 @@ impl PatchBuilder {
         let mut node_states: HashMap<NodeId, NodeState> = HashMap::with_capacity(order.len());
 
         for (id, decision) in decisions {
-            let node = graph.get_node(&id).ok_or_else(|| {
+            let node = index.get_node(&id).ok_or_else(|| {
                 BuildError::InternalError(format!("node {id:?} missing from graph"))
             })?;
             let desc = &node.module_descriptor;
@@ -616,8 +383,7 @@ impl PatchBuilder {
                 ))
             })?;
 
-            let resolved_inputs =
-                resolve_input_buffers(desc, &id, &edges, &buf_alloc.output_buf, graph)?;
+            let resolved_inputs = resolved.resolve_input_buffers(desc, &id);
             let (unscaled_inputs, scaled_inputs) = partition_inputs(resolved_inputs);
 
             let output_buffers: Vec<usize> = desc
@@ -642,7 +408,7 @@ impl PatchBuilder {
 
             let connectivity = match &decision {
                 NodeDecision::Install { .. } => {
-                    let c = compute_connectivity(desc, &id, &edges);
+                    let c = index.compute_connectivity(desc, &id);
                     let mut fresh = fresh_modules.remove(&id).ok_or_else(|| {
                         BuildError::InternalError(format!(
                             "fresh module for install node {id:?} is missing"
@@ -657,7 +423,7 @@ impl PatchBuilder {
                         parameter_updates.push((pool_index, param_diff.clone()));
                     }
                     if *connectivity_changed {
-                        let c = compute_connectivity(desc, &id, &edges);
+                        let c = index.compute_connectivity(desc, &id);
                         connectivity_updates.push((pool_index, c.clone()));
                         c
                     } else {
@@ -671,7 +437,6 @@ impl PatchBuilder {
                 NodeState {
                     module_name: desc.module_name,
                     instance_id,
-                    pool_index,
                     parameter_map: node.parameter_map.clone(),
                     shape: desc.shape.clone(),
                     connectivity,
@@ -727,6 +492,25 @@ impl PatchBuilder {
         ))
     }
 
+    /// Index the graph, sort nodes into execution order, allocate cable buffers,
+    /// and classify every node as [`NodeDecision::Install`] or [`NodeDecision::Update`].
+    ///
+    /// Groups the pure, allocation-free preparation work so that [`build_patch`](Self::build_patch)
+    /// can be read as two clearly separated phases: decision and action.
+    fn make_decisions<'a>(
+        &self,
+        graph: &'a ModuleGraph,
+        prev_state: &PlannerState,
+    ) -> Result<PlanDecisions<'a>, BuildError> {
+        let index = GraphIndex::build(graph);
+        let node_ids = graph.node_ids();
+        let sink = Self::find_sink(graph, &node_ids)?;
+        let (order, audio_out_index) = Self::compute_order(&node_ids, &sink)?;
+        let buf_alloc = self.allocate_buffers(&index, &order, &prev_state.buffer_alloc)?;
+        let decisions = classify_nodes(&index, &order, prev_state)?;
+        Ok(PlanDecisions { index, order, audio_out_index, buf_alloc, decisions })
+    }
+
     /// Phase 1: Find exactly one sink node (`is_sink == true`) in the graph.
     ///
     /// Returns [`BuildError::NoAudioOut`] or [`BuildError::MultipleAudioOut`] if
@@ -770,7 +554,7 @@ impl PatchBuilder {
     /// for zeroing on plan adoption.
     fn allocate_buffers(
         &self,
-        graph: &ModuleGraph,
+        index: &GraphIndex<'_>,
         order: &[NodeId],
         prev_alloc: &BufferAllocState,
     ) -> Result<BufferAllocation, BuildError> {
@@ -780,7 +564,7 @@ impl PatchBuilder {
         let mut output_buf: HashMap<(NodeId, usize), usize> = HashMap::new();
 
         for id in order {
-            let desc = &graph
+            let desc = &index
                 .get_node(id)
                 .ok_or_else(|| BuildError::InternalError(format!("node {id:?} missing from graph")))?
                 .module_descriptor;
@@ -817,40 +601,6 @@ impl PatchBuilder {
 
 }
 
-/// Compute [`PortConnectivity`] for a single node by scanning the edge list.
-///
-/// An input port is marked connected if at least one edge in `edges` targets
-/// this node at that port (matched by name **and** index). An output port is
-/// marked connected if at least one edge originates from this node at that port.
-fn compute_connectivity(
-    desc: &patches_core::ModuleDescriptor,
-    node_id: &NodeId,
-    edges: &[(NodeId, String, u32, NodeId, String, u32, f64)],
-) -> PortConnectivity {
-    let mut connectivity = PortConnectivity::new(desc.inputs.len(), desc.outputs.len());
-    for (from, out_name, out_idx, to, in_name, in_idx, _) in edges {
-        if to == node_id {
-            if let Some(i) = desc
-                .inputs
-                .iter()
-                .position(|p| p.name == in_name.as_str() && p.index == *in_idx)
-            {
-                connectivity.inputs[i] = true;
-            }
-        }
-        if from == node_id {
-            if let Some(j) = desc
-                .outputs
-                .iter()
-                .position(|p| p.name == out_name.as_str() && p.index == *out_idx)
-            {
-                connectivity.outputs[j] = true;
-            }
-        }
-    }
-    connectivity
-}
-
 /// Convenience wrapper around [`PatchBuilder::build_patch`].
 ///
 /// Constructs a temporary [`PatchBuilder`] with the given capacities and
@@ -868,16 +618,20 @@ pub fn build_patch(
         .build_patch(graph, registry, env, prev_state)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use patches_core::{AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleShape, NodeId, PortDescriptor, PortRef};
+    use patches_core::{AudioEnvironment, InstanceId, Module, ModuleShape, NodeId, PortRef};
     use patches_core::parameter_map::{ParameterMap, ParameterValue};
     use patches_modules::{AudioOut, Oscillator, Sum};
 
     fn p(name: &'static str) -> PortRef {
         PortRef { name, index: 0 }
+    }
+
+    fn pool_index_for(state: &PlannerState, node_id: &NodeId) -> usize {
+        let ns = &state.nodes[node_id];
+        state.module_alloc.pool_map[&ns.instance_id]
     }
 
     fn sine_to_audio_out_graph() -> ModuleGraph {
@@ -1252,7 +1006,7 @@ mod tests {
         }
         let (_plan_a, state_a) =
             builder.build_patch(&graph_a, &registry, &env, &PlannerState::empty()).unwrap();
-        let s2_slot = state_a.nodes[&NodeId::from("s2")].pool_index;
+        let s2_slot = pool_index_for(&state_a, &NodeId::from("s2"));
 
         // Graph with only s1.
         let mut graph_b = ModuleGraph::new();
@@ -1297,7 +1051,7 @@ mod tests {
         let (_plan_a, state_a) =
             builder.build_patch(&graph_a, &registry, &env, &PlannerState::empty()).unwrap();
         let old_osc_id = state_a.nodes[&NodeId::from("osc")].instance_id;
-        let old_osc_slot = state_a.nodes[&NodeId::from("osc")].pool_index;
+        let old_osc_slot = pool_index_for(&state_a, &NodeId::from("osc"));
 
         // Graph B: Sum (1-channel) at "osc" (type changed from Oscillator).
         let mut graph_b = ModuleGraph::new();
@@ -1418,7 +1172,7 @@ mod tests {
         let ids = make_ids(3);
         let result = state.diff(&ids_set(&ids), 2);
         assert!(
-            matches!(result, Err(BuildError::ModulePoolExhausted)),
+            matches!(result, Err(PlanError::ModulePoolExhausted)),
             "expected ModulePoolExhausted, got {result:?}"
         );
     }
@@ -1471,7 +1225,7 @@ mod tests {
         );
 
         // The diff should contain exactly the changed key.
-        let sine_slot = state_a.nodes[&NodeId::from("a_sine")].pool_index;
+        let sine_slot = pool_index_for(&state_a, &NodeId::from("a_sine"));
         let update = plan_b
             .parameter_updates
             .iter()
@@ -1534,7 +1288,7 @@ mod tests {
         }
         let (_plan_a, state_a) =
             builder.build_patch(&graph_a, &registry, &env, &PlannerState::empty()).unwrap();
-        let s_b_slot = state_a.nodes[&NodeId::from("s_b")].pool_index;
+        let s_b_slot = pool_index_for(&state_a, &NodeId::from("s_b"));
 
         // Graph B: sine_a (changed to 660 Hz) + new sine_c (1000 Hz), sine_b removed.
         let mut graph_b = ModuleGraph::new();
@@ -1563,7 +1317,7 @@ mod tests {
         assert!(plan_b.tombstones.contains(&s_b_slot), "s_b must be tombstoned");
         // s_c is new → appears in new_modules (pool_index may vary; just check count).
         // s_a is surviving with changed param → appears in parameter_updates.
-        let s_a_slot = state_a.nodes[&NodeId::from("s_a")].pool_index;
+        let s_a_slot = pool_index_for(&state_a, &NodeId::from("s_a"));
         let has_s_a_update = plan_b
             .parameter_updates
             .iter()
@@ -1580,152 +1334,8 @@ mod tests {
         );
     }
 
-    // ── resolve_input_buffers unit tests (T-0097) ─────────────────────────────
-
-    /// Build a minimal two-node graph: one source with one output, one sink with one input.
-    fn two_node_graph() -> (ModuleGraph, NodeId, NodeId) {
-        let src_desc = ModuleDescriptor {
-            module_name: "Src",
-            shape: ModuleShape { channels: 0, length: 0 },
-            inputs: vec![],
-            outputs: vec![PortDescriptor { name: "out", index: 0 }],
-            parameters: vec![],
-            is_sink: false,
-        };
-        let dst_desc = ModuleDescriptor {
-            module_name: "Dst",
-            shape: ModuleShape { channels: 0, length: 0 },
-            inputs: vec![PortDescriptor { name: "in", index: 0 }],
-            outputs: vec![],
-            parameters: vec![],
-            is_sink: true,
-        };
-        let mut graph = ModuleGraph::new();
-        graph.add_module("src", src_desc, &ParameterMap::new()).unwrap();
-        graph.add_module("dst", dst_desc, &ParameterMap::new()).unwrap();
-        let src_id = NodeId::from("src");
-        let dst_id = NodeId::from("dst");
-        (graph, src_id, dst_id)
-    }
-
-    #[test]
-    fn resolve_unconnected_port_returns_zero_buffer_scale_one() {
-        let (graph, _, dst_id) = two_node_graph();
-        let dst_desc = graph.get_node(&dst_id).unwrap().module_descriptor.clone();
-        let edges = vec![];
-        let output_buf = HashMap::new();
-
-        let result = resolve_input_buffers(&dst_desc, &dst_id, &edges, &output_buf, &graph)
-            .expect("resolve should succeed");
-
-        assert_eq!(result, vec![(0, 1.0)], "unconnected port must map to (0, 1.0)");
-    }
-
-    #[test]
-    fn resolve_connected_port_returns_correct_buffer_and_scale() {
-        let (graph, src_id, dst_id) = two_node_graph();
-        let dst_desc = graph.get_node(&dst_id).unwrap().module_descriptor.clone();
-
-        let edges = vec![(
-            src_id.clone(), "out".to_string(), 0u32,
-            dst_id.clone(), "in".to_string(), 0u32,
-            0.5f64,
-        )];
-        let mut output_buf = HashMap::new();
-        output_buf.insert((src_id.clone(), 0), 7usize);
-
-        let result = resolve_input_buffers(&dst_desc, &dst_id, &edges, &output_buf, &graph)
-            .expect("resolve should succeed");
-
-        assert_eq!(result, vec![(7, 0.5)], "connected port must resolve to buffer 7 scale 0.5");
-    }
-
-    #[test]
-    fn resolve_multiple_ports_independently() {
-        let src_desc = ModuleDescriptor {
-            module_name: "Src2",
-            shape: ModuleShape { channels: 0, length: 0 },
-            inputs: vec![],
-            outputs: vec![
-                PortDescriptor { name: "a", index: 0 },
-                PortDescriptor { name: "b", index: 0 },
-            ],
-            parameters: vec![],
-            is_sink: false,
-        };
-        let dst_desc_data = ModuleDescriptor {
-            module_name: "Dst2",
-            shape: ModuleShape { channels: 0, length: 0 },
-            inputs: vec![
-                PortDescriptor { name: "x", index: 0 },
-                PortDescriptor { name: "y", index: 0 },
-            ],
-            outputs: vec![],
-            parameters: vec![],
-            is_sink: true,
-        };
-        let mut graph = ModuleGraph::new();
-        graph.add_module("src2", src_desc, &ParameterMap::new()).unwrap();
-        graph.add_module("dst2", dst_desc_data, &ParameterMap::new()).unwrap();
-        let src_id = NodeId::from("src2");
-        let dst_id = NodeId::from("dst2");
-        let dst_desc = graph.get_node(&dst_id).unwrap().module_descriptor.clone();
-
-        // Wire src.a → dst.x (buf 3, scale 1.0) and src.b → dst.y (buf 4, scale 2.0).
-        let edges = vec![
-            (src_id.clone(), "a".to_string(), 0u32, dst_id.clone(), "x".to_string(), 0u32, 1.0f64),
-            (src_id.clone(), "b".to_string(), 0u32, dst_id.clone(), "y".to_string(), 0u32, 2.0f64),
-        ];
-        let mut output_buf = HashMap::new();
-        output_buf.insert((src_id.clone(), 0), 3usize);
-        output_buf.insert((src_id.clone(), 1), 4usize);
-
-        let result = resolve_input_buffers(&dst_desc, &dst_id, &edges, &output_buf, &graph)
-            .expect("resolve should succeed");
-
-        assert_eq!(result, vec![(3, 1.0), (4, 2.0)]);
-    }
-
-    #[test]
-    fn resolve_missing_source_node_returns_internal_error() {
-        let (graph, src_id, dst_id) = two_node_graph();
-        let dst_desc = graph.get_node(&dst_id).unwrap().module_descriptor.clone();
-
-        // Edge references a "ghost" node not in the graph.
-        let ghost_id = NodeId::from("ghost");
-        let edges = vec![(
-            ghost_id.clone(), "out".to_string(), 0u32,
-            dst_id.clone(), "in".to_string(), 0u32,
-            1.0f64,
-        )];
-        let output_buf = HashMap::new();
-
-        let result = resolve_input_buffers(&dst_desc, &dst_id, &edges, &output_buf, &graph);
-        assert!(
-            matches!(result, Err(BuildError::InternalError(_))),
-            "missing source node must return InternalError"
-        );
-    }
-
-    #[test]
-    fn resolve_missing_buffer_returns_internal_error() {
-        let (graph, src_id, dst_id) = two_node_graph();
-        let dst_desc = graph.get_node(&dst_id).unwrap().module_descriptor.clone();
-
-        let edges = vec![(
-            src_id.clone(), "out".to_string(), 0u32,
-            dst_id.clone(), "in".to_string(), 0u32,
-            1.0f64,
-        )];
-        // output_buf is empty — buffer for src port 0 is missing.
-        let output_buf = HashMap::new();
-
-        let result = resolve_input_buffers(&dst_desc, &dst_id, &edges, &output_buf, &graph);
-        assert!(
-            matches!(result, Err(BuildError::InternalError(_))),
-            "missing buffer allocation must return InternalError"
-        );
-    }
+    // ── resolve_input_buffers, build_input_buffer_map, and compute_connectivity
+    // tests moved to patches-core (T-0103).
 
     // ── partition_inputs unit tests (T-0097) ──────────────────────────────────
 
@@ -1757,95 +1367,6 @@ mod tests {
         assert_eq!(scaled, vec![(1, 4, 0.25), (3, 8, -1.0)]);
     }
 
-    // ---- compute_connectivity tests ----
-
-    fn two_port_desc() -> ModuleDescriptor {
-        ModuleDescriptor {
-            module_name: "Test",
-            shape: ModuleShape { channels: 0, length: 0 },
-            inputs: vec![
-                PortDescriptor { name: "in", index: 0 },
-                PortDescriptor { name: "in", index: 1 },
-            ],
-            outputs: vec![
-                PortDescriptor { name: "out", index: 0 },
-                PortDescriptor { name: "out", index: 1 },
-            ],
-            parameters: vec![],
-            is_sink: false,
-        }
-    }
-
-    #[test]
-    fn connectivity_no_edges_all_false() {
-        let desc = two_port_desc();
-        let node = NodeId::from("n");
-        let c = compute_connectivity(&desc, &node, &[]);
-        assert!(!c.inputs[0] && !c.inputs[1] && !c.outputs[0] && !c.outputs[1]);
-    }
-
-    #[test]
-    fn connectivity_single_input_connected() {
-        let desc = two_port_desc();
-        let node = NodeId::from("n");
-        let other = NodeId::from("src");
-        let edges = vec![(other, "out".to_string(), 0, node.clone(), "in".to_string(), 0, 1.0)];
-        let c = compute_connectivity(&desc, &node, &edges);
-        assert!(c.inputs[0]);
-        assert!(!c.inputs[1] && !c.outputs[0] && !c.outputs[1]);
-    }
-
-    #[test]
-    fn connectivity_single_output_connected() {
-        let desc = two_port_desc();
-        let node = NodeId::from("n");
-        let other = NodeId::from("dst");
-        let edges = vec![(node.clone(), "out".to_string(), 1, other, "in".to_string(), 0, 1.0)];
-        let c = compute_connectivity(&desc, &node, &edges);
-        assert!(c.outputs[1]);
-        assert!(!c.inputs[0] && !c.inputs[1] && !c.outputs[0]);
-    }
-
-    #[test]
-    fn connectivity_multiple_ports_correct_subset() {
-        let desc = two_port_desc();
-        let node = NodeId::from("n");
-        let src = NodeId::from("src");
-        let dst = NodeId::from("dst");
-        let edges = vec![
-            (src.clone(), "out".to_string(), 0, node.clone(), "in".to_string(), 1, 1.0),
-            (node.clone(), "out".to_string(), 0, dst.clone(), "in".to_string(), 0, 1.0),
-        ];
-        let c = compute_connectivity(&desc, &node, &edges);
-        assert!(!c.inputs[0] && c.inputs[1]);
-        assert!(c.outputs[0] && !c.outputs[1]);
-    }
-
-    #[test]
-    fn connectivity_edges_for_other_nodes_ignored() {
-        let desc = two_port_desc();
-        let node = NodeId::from("n");
-        let a = NodeId::from("a");
-        let b = NodeId::from("b");
-        // Edge entirely between other nodes — should not affect `node`.
-        let edges = vec![(a.clone(), "out".to_string(), 0, b.clone(), "in".to_string(), 0, 1.0)];
-        let c = compute_connectivity(&desc, &node, &edges);
-        assert!(!c.inputs[0] && !c.inputs[1] && !c.outputs[0] && !c.outputs[1]);
-    }
-
-    #[test]
-    fn connectivity_no_false_positive_same_name_different_index() {
-        let desc = two_port_desc();
-        let node = NodeId::from("n");
-        let src = NodeId::from("src");
-        // Edge connects to "in" index 1, but desc has "in" at index 0 and index 1.
-        // Only index 1 should be marked.
-        let edges = vec![(src, "out".to_string(), 0, node.clone(), "in".to_string(), 1, 1.0)];
-        let c = compute_connectivity(&desc, &node, &edges);
-        assert!(!c.inputs[0], "in/0 must not be marked");
-        assert!(c.inputs[1], "in/1 must be marked");
-    }
-
     // ---- classify_nodes tests (T-0099) ----
 
     fn shape_zero() -> ModuleShape {
@@ -1867,7 +1388,6 @@ mod tests {
             NodeState {
                 module_name,
                 instance_id,
-                pool_index: 0,
                 parameter_map: params,
                 shape,
                 connectivity,
@@ -1885,9 +1405,8 @@ mod tests {
         graph.add_module("osc", desc, &params).unwrap();
 
         let order = vec![NodeId::from("osc")];
-        let edges = graph.edge_list();
-        let decisions =
-            classify_nodes(&graph, &order, &edges, &PlannerState::empty()).unwrap();
+        let index = GraphIndex::build(&graph);
+        let decisions = classify_nodes(&index, &order, &PlannerState::empty()).unwrap();
 
         assert_eq!(decisions.len(), 1);
         match &decisions[0].1 {
@@ -1914,8 +1433,8 @@ mod tests {
         );
 
         let order = vec![NodeId::from("x")];
-        let edges = graph.edge_list();
-        let decisions = classify_nodes(&graph, &order, &edges, &prev).unwrap();
+        let index = GraphIndex::build(&graph);
+        let decisions = classify_nodes(&index, &order, &prev).unwrap();
         assert!(matches!(decisions[0].1, NodeDecision::Install { .. }));
     }
 
@@ -1936,8 +1455,8 @@ mod tests {
         );
 
         let order = vec![NodeId::from("s")];
-        let edges = graph.edge_list();
-        let decisions = classify_nodes(&graph, &order, &edges, &prev).unwrap();
+        let index = GraphIndex::build(&graph);
+        let decisions = classify_nodes(&index, &order, &prev).unwrap();
         assert!(matches!(decisions[0].1, NodeDecision::Install { .. }));
     }
 
@@ -1956,8 +1475,8 @@ mod tests {
         );
 
         let order = vec![NodeId::from("out")];
-        let edges = graph.edge_list();
-        let decisions = classify_nodes(&graph, &order, &edges, &prev).unwrap();
+        let index = GraphIndex::build(&graph);
+        let decisions = classify_nodes(&index, &order, &prev).unwrap();
 
         match &decisions[0].1 {
             NodeDecision::Update { param_diff, connectivity_changed, .. } => {
@@ -1988,8 +1507,8 @@ mod tests {
         );
 
         let order = vec![NodeId::from("osc")];
-        let edges = graph.edge_list();
-        let decisions = classify_nodes(&graph, &order, &edges, &prev).unwrap();
+        let index = GraphIndex::build(&graph);
+        let decisions = classify_nodes(&index, &order, &prev).unwrap();
 
         match &decisions[0].1 {
             NodeDecision::Update { param_diff, .. } => {
@@ -2022,8 +1541,8 @@ mod tests {
         );
 
         let order = vec![NodeId::from("osc"), NodeId::from("out")];
-        let edges = graph.edge_list();
-        let decisions = classify_nodes(&graph, &order, &edges, &prev).unwrap();
+        let index = GraphIndex::build(&graph);
+        let decisions = classify_nodes(&index, &order, &prev).unwrap();
 
         let osc = decisions.iter().find(|(id, _)| id == &NodeId::from("osc")).unwrap();
         match &osc.1 {
@@ -2058,8 +1577,8 @@ mod tests {
         );
 
         let order = vec![NodeId::from("osc"), NodeId::from("out")];
-        let edges = graph.edge_list();
-        let decisions = classify_nodes(&graph, &order, &edges, &prev).unwrap();
+        let index = GraphIndex::build(&graph);
+        let decisions = classify_nodes(&index, &order, &prev).unwrap();
 
         let osc = decisions.iter().find(|(id, _)| id == &NodeId::from("osc")).unwrap();
         match &osc.1 {
@@ -2091,8 +1610,8 @@ mod tests {
         );
 
         let order = vec![NodeId::from("osc"), NodeId::from("out")];
-        let edges = graph.edge_list();
-        let decisions = classify_nodes(&graph, &order, &edges, &prev).unwrap();
+        let index = GraphIndex::build(&graph);
+        let decisions = classify_nodes(&index, &order, &prev).unwrap();
 
         assert_eq!(decisions.len(), 2);
         let osc = decisions.iter().find(|(id, _)| id == &NodeId::from("osc")).unwrap();

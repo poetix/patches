@@ -1,6 +1,6 @@
 ---
 id: "0095"
-title: "Replace naive `Decimator` with polyphase IIR half-band filter"
+title: "Polyphase IIR half-band `Decimator`"
 priority: high
 created: 2026-03-08
 epic: "E018"
@@ -9,11 +9,10 @@ depends_on: ["0094"]
 
 ## Summary
 
-Replace the naive every-Nth-sample `Decimator` from T-0093 with a proper
-polyphase IIR half-band filter, providing >60 dB stopband attenuation. The
-public API (`Decimator::new`, `Decimator::push`) is unchanged; only the
-internals of `decimator.rs` change. The processing flow established in T-0094
-requires no modification.
+Implement the `Decimator` type in `patches-engine/src/decimator.rs` as a
+polyphase IIR half-band filter, providing >60 dB stopband attenuation.
+Public API: `Decimator::new(factor: OversamplingFactor)` and `Decimator::push`.
+The processing flow established in T-0094 requires no modification.
 
 ## Acceptance criteria
 
@@ -50,7 +49,7 @@ requires no modification.
 - [ ] All filter state lives in fixed-size arrays; no `Vec`, `Box`, or heap
   allocation after construction. Verify by inspection.
 
-- [ ] Unit tests (replacing the naive-decimator tests from T-0093):
+- [ ] Unit tests:
   - Feed a 1 kHz sine at 96 kHz (simulating 2× oversampling of 48 kHz
     hardware) through `Decimator::new(X2)`. Output amplitude within 0.01 dB of
     input amplitude.

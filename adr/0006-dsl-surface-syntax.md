@@ -17,8 +17,8 @@ Requirements the syntax must satisfy:
 - Patch cable connections with optional scale factor
 - Template definitions: named sub-patches with declared signal ports,
   instantiable as if they were primitive module types
-- Polyphony: N-voice fan-out from a single source and explicit mixing for
-  fan-in
+- Polyphony: poly cables carrying N channels simultaneously, declared at
+  connection time (see ADR 0015); no module duplication syntax
 - Port indexing for factory-configured multi-port modules (see ADR 0005)
 
 ## Decision
@@ -63,12 +63,12 @@ The `{ ... }` block is optional; omitting it is equivalent to an empty map.
 ```
 module <name> : <TypeName> { <params> }
 module <name> : <TypeName>              # params omitted — empty map
-module <name>[N] : <TypeName> { ... }  # poly: N identical instances
 ```
 
 `<TypeName>` is resolved by `patches-interpreter` against the module factory
-registry. `<name>` becomes the `NodeId` (or the namespace prefix for poly and
-template instances — see below).
+registry. `<name>` becomes the `NodeId` (or the namespace prefix for template
+instances — see below). There is no `[N]` poly-duplication syntax; polyphony
+is expressed as a property of connections, not module declarations.
 
 ### Port references
 
@@ -77,43 +77,31 @@ A port is addressed by its module name, port label, and optional index:
 ```
 <name>.<label>        # index 0 implied
 <name>.<label>[k]     # explicit index k
-<name>.<label>[*]     # all ports with this label (poly contexts only)
 ```
 
 For modules with a single port per label (the common case), the `[k]` suffix is
 omitted. For factory-configured multi-port modules (e.g. `Mixer { channels: 4 }`)
-the index selects among the factory-produced ports.
+the index selects among the factory-produced ports. There is no `[*]` wildcard;
+that was part of the removed poly-duplication syntax.
 
 ### Connections
 
 ```
-<port-ref> -> <port-ref>            # unit scale
-<port-ref> -> <port-ref> * <number> # explicit scale (any finite f64)
+<port-ref> -> <port-ref>                   # mono, unit scale
+<port-ref> -> <port-ref> * <number>        # mono, explicit scale (any finite f64)
+<port-ref> -> <port-ref> poly <N>          # poly cable, N channels, unit scale
+<port-ref> -> <port-ref> poly <N> * <num>  # poly cable, N channels, scaled
 ```
 
 The `->` arrow is the only connection operator. Scale is a postfix multiplier on
 the destination side; it corresponds to the `scale` field on a graph edge. The
 scale may be negative (phase inversion).
 
-### Poly connections
-
-When `[*]` appears on either side of a connection, the expander resolves it
-using the known voice count:
-
-```
-src[*] -> dst[*]     # zip: connects index 0→0, 1→1, … (counts must match)
-src    -> dst[*]     # broadcast: one source to each indexed port on dst
-```
-
-Fan-in from poly to a single module requires an explicit mixer:
-
-```
-module mix : Mixer { channels: 4 }
-
-voices[*].out -> mix.in[*]   # zip: voice 0 → mix.in[0], etc.
-mix.out_l -> out.left
-mix.out_r -> out.right
-```
+A `poly N` annotation creates a `CableValue::Poly` buffer slot carrying up to N
+channels (N ≤ 16). The graph validator (ADR 0015) rejects a poly connection if
+either port's `PortDescriptor` declares `CableKind::Mono`. Omitting `poly` creates
+a `CableValue::Mono` connection; the validator rejects it if either port declares
+`CableKind::Poly`.
 
 ### Template definitions
 
@@ -162,7 +150,6 @@ A template is instantiated like a primitive module type:
 
 ```
 module v1 : voice { ... }    # init params forwarded to internal modules (TBD)
-module voices[4] : voice
 ```
 
 During expansion (Stage 2 of the pipeline), internal `NodeId`s are namespaced:
@@ -175,33 +162,43 @@ All module declarations and connections at the root of the file must appear
 inside a `patch { ... }` block. Template definitions appear outside it.
 
 ```
-template voice { ... }
-
 patch {
-    module clock : Clock  { bpm: 120.0 }
-    module seq   : StepSequencer {
+    module clock  : Clock  { bpm: 120.0 }
+    module seq    : StepSequencer {
         steps:  [60, 62, 64, 65, 67, 69, 71, 72]
         length: 8
     }
-    module alloc        : VoiceAllocator { voices: 4 }
-    module voices[4]    : voice
-    module mix          : Mixer { channels: 4 }
-    module out          : AudioOut
+    module alloc  : VoiceAllocator { voices: 16 }
+    module osc    : PolyOsc
+    module env    : PolyADSR  { attack: 0.01, decay: 0.1, sustain: 0.7, release: 0.3 }
+    module filt   : PolyLadder { cutoff: 0.5, resonance: 0.2 }
+    module vca    : PolyVca
+    module mix    : PolyMix
+    module out    : AudioOut
 
-    clock.tick  -> seq.clock
-    seq.note    -> alloc.note
-    seq.gate    -> alloc.gate
+    clock.tick    -> seq.clock
+    seq.note      -> alloc.note
+    seq.gate      -> alloc.gate
 
-    alloc.freq[*] -> voices[*].freq
-    alloc.gate[*] -> voices[*].gate
-    alloc.vel[*]  -> voices[*].vel
+    alloc.freq    -> osc.voct   poly 16
+    alloc.gate    -> env.gate   poly 16
+    alloc.vel     -> env.vel    poly 16
+    osc.out       -> filt.in    poly 16
+    env.cv        -> filt.cutoff poly 16 * 0.4
+    filt.out      -> vca.in     poly 16
+    env.cv        -> vca.cv     poly 16
+    vca.out       -> mix.in     poly 16
 
-    voices[*].audio -> mix.in[*]
-
-    mix.out_l -> out.left
-    mix.out_r -> out.right
+    mix.out_l     -> out.left
+    mix.out_r     -> out.right
 }
 ```
+
+Poly-capable modules (`PolyOsc`, `PolyADSR`, etc.) declare `CableKind::Poly`
+on the relevant ports in their `PortDescriptor`. The graph validator confirms
+cable types match port declarations before the plan is activated. Mono signals
+(e.g. `clock.tick -> seq.clock`) remain `CableValue::Mono` and are validated
+against `CableKind::Mono` ports.
 
 ### Grammar sketch (PEG notation)
 
@@ -215,8 +212,7 @@ OutDecl    = "out:" CommaIdents
 CommaIdents = Ident ("," Ident)* ","?
 
 Statement  = ModuleDecl | Connection
-ModuleDecl = "module" Ident PolySpec? ":" Ident InitBlock?
-PolySpec   = "[" Nat "]"
+ModuleDecl = "module" Ident ":" Ident InitBlock?
 InitBlock  = "{" (Ident ":" Value ","?)* "}"
 
 Value      = Table | Array | Scalar
@@ -224,10 +220,11 @@ Array      = "[" (Value ","?)* "]"
 Table      = "{" (Ident ":" Value ","?)* "}"
 Scalar     = Float | Int | Bool | String
 
-Connection = PortRef "->" PortRef Scale?
+Connection = PortRef "->" PortRef PolySpec? Scale?
+PolySpec   = "poly" Nat
 Scale      = "*" Number
 PortRef    = Ident "." Ident Index?
-Index      = "[" (Nat | "*") "]"
+Index      = "[" Nat "]"
 ```
 
 ## Open questions
@@ -263,9 +260,9 @@ under review:
 fan-in, no operator overloading, no conditional logic. These can be added as
 sugar once practical use reveals which shortcuts are genuinely common.
 
-**The `->` operator is uniform.** Mono, poly-zip, poly-broadcast, and scaled
-connections all use the same operator; the `[*]` index and `* scale` modifiers
-distinguish them. This avoids proliferating sigils.
+**The `->` operator is uniform.** Mono, poly, and scaled connections all use
+the same operator; the `poly N` annotation and `* scale` modifier distinguish
+them. This avoids proliferating sigils.
 
 **Templates are a textual abstraction only.** They have no runtime
 representation; the expander inlines them completely. A GUI representation of

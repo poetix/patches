@@ -10,8 +10,8 @@ The system needs a human-writable patch format that supports:
 - Scalar, array, and table initialisation values for modules
 - Template definitions: named sub-patches with explicit signal ports that can
   be instantiated as if they were single modules
-- Polyphony: concise expression of N duplicated mono voices with fan-out/fan-in
-  cable syntax
+- Polyphony: poly cables carrying N channels simultaneously on instruments that
+  support them, declared at connection time (see ADR 0015)
 
 The existing runtime IR is `ModuleGraph`: a flat directed graph of
 `Box<dyn Module>` nodes keyed by string `NodeId`, connected by named-port edges
@@ -30,7 +30,7 @@ The DSL is compiled in three distinct stages:
  AST  (preserves spans for error messages; no semantic analysis yet)
     │
     ▼  Stage 2 — Expander  (patches-dsl)
- Flat AST  (templates inlined, poly voices duplicated; only concrete instances remain)
+ Flat AST  (templates inlined; only concrete instances remain)
     │
     ▼  Stage 3 — Graph builder  (patches-interpreter)
  ModuleGraph  (existing IR, unchanged)
@@ -38,12 +38,12 @@ The DSL is compiled in three distinct stages:
 
 **Stage 1 — PEG parser.**  A grammar defined using the `pest` crate parses
 source text into an AST. The AST faithfully represents the surface syntax,
-including template definitions, poly declarations, and init-param blocks. No
+including template definitions, poly cable annotations, and init-param blocks. No
 semantic validation happens here; the parser only enforces syntactic well-
 formedness.
 
-**Stage 2 — Expander.**  The expander performs two macro-like transformations,
-both of which eliminate high-level constructs before the graph is built:
+**Stage 2 — Expander.**  The expander performs one macro-like transformation
+that eliminates high-level constructs before the graph is built:
 
 - *Template expansion.* Each `module foo : TemplateName { ... }` declaration
   is replaced by the template's body, with all internal `NodeId`s namespaced
@@ -52,18 +52,15 @@ both of which eliminate high-level constructs before the graph is built:
   rewritten to target the appropriate internal node and port. Templates may be
   nested; the expander recurses until only primitive module types remain.
 
-- *Poly expansion.* Each `module voices[N] : T { ... }` declaration is
-  expanded into N declarations: `voices_0 : T`, …, `voices_{N-1} : T`, each
-  fully expanded if `T` is a template. Edges using `[*]` index syntax are
-  expanded: `a[*] -> b[*]` (zip) becomes N individual edges; `mono -> b[*]`
-  (broadcast) becomes N edges from the same source. Fan-in from poly to a
-  single module requires an explicit mix module in the source — no implicit
-  fan-in sugar on first pass.
+Polyphony is not handled by module duplication in the expander. Instead, poly
+cables carry N channels simultaneously on a single connection (see ADR 0015).
+A `poly N` annotation on a connection tells the planner to allocate a
+`CableValue::Poly` buffer slot; no additional graph nodes are introduced.
 
 After Stage 2 the flat AST contains only concrete module declarations (a type
 name, a `NodeId`, and an init-param map) and concrete edge declarations (two
-fully-resolved `(NodeId, port-name, port-index)` triples and an optional scale
-factor). There are no templates or poly indices.
+fully-resolved `(NodeId, port-name, port-index)` triples, an optional scale
+factor, and an optional poly channel count). There are no templates.
 
 **Stage 3 — Graph builder.**  The graph builder iterates the flat AST and
 populates a `ModuleGraph` using a *module factory registry* — a map from type
@@ -128,34 +125,32 @@ Values outside `[-1.0, 1.0]` represent amplification; the caller is
 responsible for ensuring the signal remains in a meaningful range. The
 `ModuleGraph::connect` validation is updated accordingly.
 
-### Factory-configured ports and internal polyphony
+### Factory-configured ports
 
 Because the factory receives init params before returning a module, the
 resulting module's `descriptor()` can reflect those params — both port count
-and port layout. This enables two things:
+and port layout. This enables *modules with variable port counts*, such as
+`Mixer { channels: N }` which exposes `N` input channel groups
+(`("in", 0..N)`, `("pan", 0..N)`, `("level", 0..N)`) and two outputs
+(`("out_l", 0)`, `("out_r", 0)`). The DSL author wires inputs to
+`mix.in[0]`, `mix.in[1]`, etc. The module is a single instance in
+`ModuleGraph`.
 
-1. *Modules with variable port counts*, such as `Mixer { channels: N }` which
-   exposes `N` input channel groups (`("in", 0..N)`, `("pan", 0..N)`,
-   `("level", 0..N)`) and two outputs (`("out_l", 0)`, `("out_r", 0)`). The
-   DSL author wires individual voices to `mix.in[0]`, `mix.in[1]`, etc. The
-   module is a single instance in `ModuleGraph`.
-
-2. *Internally polyphonic modules*, where a single module instance manages N
-   voices in its own `process` implementation. Such a module declares `N`
-   indexed input sets and handles voice allocation internally. This is an
-   alternative to DSL-level poly expansion for modules where the internal
-   structure is tightly coupled (e.g. a reverb with shared diffusion network
-   across voices).
-
-Neither of these requires any change to the audio thread, execution plan, or
-buffer pool: the flat graph still contains a single node with a fixed (though
+This does not require any change to the audio thread, execution plan, or
+buffer pool: the flat graph contains a single node with a fixed (though
 factory-determined) port count, and the `Module` trait is unchanged.
+
+Polyphony — modules that process N simultaneous voice channels — is handled
+via poly cables and poly-typed ports in `PortDescriptor`, not by
+factory-configured indexed port groups. See ADR 0015 for the full design.
 
 ## Consequences
 
 **`ModuleGraph` and the `Module` trait are largely unchanged.** The runtime IR
-has no knowledge of templates or polyphony. `PortDescriptor` gains an `index`
-field and edge records gain a port index; these are contained changes.
+has no knowledge of templates or polyphony as graph-level constructs.
+`PortDescriptor` gains an `index` field and a `kind: CableKind` field (see ADR
+0015); edge records gain a port index and an optional poly channel count. These
+are contained changes.
 
 **Templates are a compile-time construct only.** There is no runtime notion of
 a "template instance". Hot-reload re-runs the full three-stage pipeline.
@@ -163,18 +158,11 @@ Module state is preserved across reloads via the `InstanceId`-based registry
 mechanism (ADR 0003); the `foo/osc` namespacing scheme provides stable
 `NodeId`s as long as the patch source uses stable module names.
 
-**Poly voices expanded by the DSL are independent mono modules.** The audio
-thread, execution plan, and buffer pool have no notion of polyphony. Adding or
-removing voices requires a full re-plan.
-
-**Modules may alternatively implement polyphony internally.** A module with
-factory-configured `N`-indexed input groups is indistinguishable from any other
-module at the graph level. This is appropriate when internal coupling makes
-per-voice cloning inefficient or incorrect.
-
-**Fan-in of poly voices requires an explicit mix module.** There is no implicit
-reduction syntax on first pass. This keeps the language unambiguous; mixing
-semantics (sum, average, max) are explicit.
+**Polyphony is carried by poly cables, not by module duplication.** A
+polyphonic patch uses the same number of module slots as its mono equivalent.
+Voice-level arithmetic is a tight inner loop inside each poly-capable module's
+`process()` call. See ADR 0015 for the full design including `CableKind`,
+`CableValue`, `InputPort`/`OutputPort`, and the `MonoShim` migration path.
 
 **Factory registry is the extension point for new module types.**  Adding a new
 module type requires implementing `Module`, registering a factory closure, and
@@ -197,18 +185,21 @@ complexity in the DSL layer and leaves the runtime IR simple.
 
 **Compile directly to `ModuleGraph` in a single pass.** Eliminating the
 intermediate flat AST would tangle parsing, expansion, and validation, and
-would make poly expansion harder to validate (you need all N instances resolved
-before wiring). Rejected in favour of the three-stage separation, where each
-stage is independently testable.
+would make template expansion harder to validate (all instances must be resolved
+before connections can be rewritten). Rejected in favour of the three-stage
+separation, where each stage is independently testable.
 
-**Implicit fan-in sugar (`a[*] -> b.in` reduces to a mix automatically).**
-Deferred: the mixing semantics (sum vs average vs something else) would need to
-be specified, and the implicit mix node would appear in error messages without
-a user-visible name. An explicit `Mixer` module is unambiguous. Sugar can be
-added once there is practical experience with the verbose form.
+**Poly voices duplicated by the expander (original approach).**  An earlier
+version of this ADR proposed Stage 2 duplicating `module voices[N] : T`
+declarations into N independent mono modules. This approach was superseded by
+ADR 0015 (poly cables): duplicating modules scales tick-loop overhead
+O(modules × voices), whereas poly cables keep it O(modules). Module duplication
+was rejected as the primary polyphony mechanism.
 
 **Represent polyphony only in the execution engine.**  A poly-aware executor
-could run N voices with a single descriptor. Rejected for now: it would require
-significant changes to the `Module` trait, buffer layout, and execution plan.
-The factory-configured port approach achieves the same efficiency for tightly-
-coupled modules without touching the runtime.
+running N voices with a single descriptor was considered but would have required
+significant changes to the `Module` trait, buffer layout, and execution plan
+with no clear entry point. The poly-cables approach (ADR 0015) achieves the
+same result with contained changes: `CableKind`/`CableValue` in the buffer pool
+and `InputPort`/`OutputPort` as module-owned state, with no change to the
+module graph structure or expander.

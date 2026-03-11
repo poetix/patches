@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use patches_core::{AudioEnvironment, InstanceId, ModuleGraph, NodeId, Registry};
 
 use patches_core::PlannerState;
@@ -31,6 +33,11 @@ const DEFAULT_POOL_CAPACITY: usize = 4096;
 pub struct Planner {
     state: PlannerState,
     builder: PatchBuilder,
+    /// Instance IDs of modules that implement [`ReceivesMidi`] in the most
+    /// recently built plan.  Carried forward across rebuilds: surviving
+    /// instances remain in the set; tombstoned instances are dropped naturally
+    /// because they no longer appear in `new_state.module_alloc.pool_map`.
+    midi_receiver_instance_ids: HashSet<InstanceId>,
 }
 
 impl Default for Planner {
@@ -56,6 +63,7 @@ impl Planner {
         Self {
             state: PlannerState::empty(),
             builder: PatchBuilder::new(pool_capacity, DEFAULT_MODULE_POOL_CAPACITY),
+            midi_receiver_instance_ids: HashSet::new(),
         }
     }
 
@@ -72,7 +80,34 @@ impl Planner {
         registry: &Registry,
         env: &AudioEnvironment,
     ) -> Result<ExecutionPlan, BuildError> {
-        let (plan, new_state) = self.builder.build_patch(graph, registry, env, &self.state)?;
+        let (mut plan, new_state) = self.builder.build_patch(graph, registry, env, &self.state)?;
+
+        // ── Populate midi_receiver_indices ────────────────────────────────────
+        // Surviving MIDI receivers: their InstanceId is still present in the
+        // new allocation map (tombstoned ones are absent and drop naturally).
+        let mut new_midi_ids: HashSet<InstanceId> = self
+            .midi_receiver_instance_ids
+            .iter()
+            .filter(|id| new_state.module_alloc.pool_map.contains_key(id))
+            .copied()
+            .collect();
+
+        // Freshly installed modules: check via as_midi_receiver.
+        for (_, m) in plan.new_modules.iter_mut() {
+            if m.as_midi_receiver().is_some() {
+                new_midi_ids.insert(m.instance_id());
+            }
+        }
+
+        // Build the index list from the new InstanceId → pool-slot map.
+        let mut midi_receiver_indices: Vec<usize> = new_midi_ids
+            .iter()
+            .filter_map(|id| new_state.module_alloc.pool_map.get(id).copied())
+            .collect();
+        midi_receiver_indices.sort_unstable();
+        plan.midi_receiver_indices = midi_receiver_indices;
+
+        self.midi_receiver_instance_ids = new_midi_ids;
         self.state = new_state;
         Ok(plan)
     }
@@ -228,8 +263,8 @@ impl PatchEngine {
 #[cfg(test)]
 mod tests {
     use patches_core::{
-        AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleGraph,
-        ModuleShape, NodeId, PortDescriptor, PortRef,
+        AudioEnvironment, InstanceId, MidiEvent, Module, ModuleDescriptor, ModuleGraph,
+        ModuleShape, NodeId, PortDescriptor, PortRef, ReceivesMidi,
     };
     use patches_core::parameter_map::{ParameterMap, ParameterValue};
     use patches_modules::{AudioOut, Oscillator};
@@ -411,6 +446,126 @@ mod tests {
         let env = AudioEnvironment { sample_rate: 44100.0 };
         let mut planner = Planner::new();
         assert!(planner.build(&ModuleGraph::new(), &registry, &env).is_err());
+    }
+
+    // ── MidiReceiver: a stub module that implements ReceivesMidi ─────────────
+
+    struct MidiReceiver {
+        instance_id: InstanceId,
+        descriptor: ModuleDescriptor,
+        pub received: Vec<MidiEvent>,
+    }
+
+    impl Module for MidiReceiver {
+        fn describe(shape: &ModuleShape) -> ModuleDescriptor {
+            ModuleDescriptor {
+                module_name: "MidiReceiver",
+                shape: shape.clone(),
+                inputs: vec![],
+                outputs: vec![PortDescriptor { name: "out", index: 0 }],
+                parameters: vec![],
+                is_sink: false,
+            }
+        }
+
+        fn prepare(_env: &AudioEnvironment, descriptor: ModuleDescriptor, instance_id: InstanceId) -> Self {
+            Self { instance_id, descriptor, received: Vec::new() }
+        }
+
+        fn update_validated_parameters(&mut self, _params: &ParameterMap) {}
+
+        fn descriptor(&self) -> &ModuleDescriptor {
+            &self.descriptor
+        }
+
+        fn instance_id(&self) -> InstanceId {
+            self.instance_id
+        }
+
+        fn process(&mut self, _inputs: &[f64], outputs: &mut [f64]) {
+            outputs[0] = 0.0;
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+
+        fn as_midi_receiver(&mut self) -> Option<&mut dyn ReceivesMidi> {
+            Some(self)
+        }
+    }
+
+    impl ReceivesMidi for MidiReceiver {
+        fn receive_midi(&mut self, event: MidiEvent) {
+            self.received.push(event);
+        }
+    }
+
+    /// Build a graph with one MidiReceiver and one non-MIDI Counter wired to AudioOut.
+    fn mixed_midi_graph() -> ModuleGraph {
+        let recv_desc = MidiReceiver::describe(&ModuleShape { channels: 0, length: 0 });
+        let counter_desc = Counter::describe(&ModuleShape { channels: 0, length: 0 });
+        let out_desc = AudioOut::describe(&ModuleShape { channels: 0, length: 0 });
+        let mut g = ModuleGraph::new();
+        g.add_module("recv", recv_desc, &ParameterMap::new()).unwrap();
+        g.add_module("counter", counter_desc, &ParameterMap::new()).unwrap();
+        g.add_module("out", out_desc, &ParameterMap::new()).unwrap();
+        g.connect(&NodeId::from("recv"), p("out"), &NodeId::from("out"), p("left"), 1.0).unwrap();
+        g.connect(&NodeId::from("counter"), p("out"), &NodeId::from("out"), p("right"), 1.0).unwrap();
+        g
+    }
+
+    #[test]
+    fn planner_midi_receiver_indices_contains_only_midi_capable_modules() {
+        let mut registry = patches_modules::default_registry();
+        registry.register::<MidiReceiver>();
+        registry.register::<Counter>();
+        let env = AudioEnvironment { sample_rate: 44100.0 };
+        let mut planner = Planner::new();
+
+        let graph = mixed_midi_graph();
+        let plan = planner.build(&graph, &registry, &env).unwrap();
+
+        // Exactly one module in this plan is a MIDI receiver.
+        assert_eq!(
+            plan.midi_receiver_indices.len(), 1,
+            "only the MidiReceiver module should be in midi_receiver_indices"
+        );
+
+        // The index in the list must not be the AudioOut slot.
+        let ao_pool = plan.slots[plan.audio_out_index].pool_index;
+        let midi_idx = plan.midi_receiver_indices[0];
+        assert_ne!(midi_idx, ao_pool, "AudioOut must not be a MIDI receiver");
+
+        // The index must correspond to MidiReceiver, not Counter.
+        // Verify by confirming Counter's pool slot is absent.
+        let counter_pool = plan.slots.iter()
+            .find(|s| s.pool_index != ao_pool && s.pool_index != midi_idx)
+            .map(|s| s.pool_index);
+        assert!(
+            counter_pool.is_some(),
+            "Counter must occupy a distinct slot not listed as MIDI receiver"
+        );
+    }
+
+    #[test]
+    fn planner_midi_receiver_indices_survive_rebuild() {
+        let mut registry = patches_modules::default_registry();
+        registry.register::<MidiReceiver>();
+        registry.register::<Counter>();
+        let env = AudioEnvironment { sample_rate: 44100.0 };
+        let mut planner = Planner::new();
+
+        let graph = mixed_midi_graph();
+        let plan_a = planner.build(&graph, &registry, &env).unwrap();
+        assert_eq!(plan_a.midi_receiver_indices.len(), 1, "first build: one MIDI receiver");
+
+        // Rebuild the same graph — MidiReceiver survives as an Update node.
+        let plan_b = planner.build(&graph, &registry, &env).unwrap();
+        assert_eq!(
+            plan_b.midi_receiver_indices, plan_a.midi_receiver_indices,
+            "midi_receiver_indices must be stable across a no-change rebuild"
+        );
     }
 
 }

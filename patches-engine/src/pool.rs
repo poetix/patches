@@ -1,4 +1,4 @@
-use patches_core::{Module, PortConnectivity};
+use patches_core::{MidiEvent, Module, PortConnectivity};
 use patches_core::parameter_map::ParameterMap;
 
 /// Audio-thread-owned pool of module instances.
@@ -106,10 +106,17 @@ impl ModulePool {
 
     /// Deliver a MIDI event to the module at `idx`.
     ///
-    /// `offset` is the sample offset within the current sub-block at which the
-    /// event should take effect. No-op stub until T-0111 introduces the
-    /// `ReceiveMidi` trait. Does nothing if the slot is empty.
-    pub fn receive_midi(&mut self, _idx: usize, _offset: usize, _event: crate::midi::MidiEvent) {}
+    /// Calls [`Module::as_midi_receiver`] on the slot; if it returns `Some`,
+    /// forwards `event` via [`ReceivesMidi::receive_midi`].
+    /// Does nothing if the slot is empty or if the module does not implement
+    /// [`ReceivesMidi`].
+    pub fn receive_midi(&mut self, idx: usize, event: MidiEvent) {
+        if let Some(m) = self.modules[idx].as_mut() {
+            if let Some(recv) = m.as_midi_receiver() {
+                recv.receive_midi(event);
+            }
+        }
+    }
 
     /// Deliver a connectivity update to the module at `idx`.
     ///

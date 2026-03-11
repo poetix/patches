@@ -157,10 +157,10 @@ impl AudioCallback {
             // DrainWindow borrows `eq` (i.e. self.event_queue).
             // self.current_plan and self.module_pool are separate fields —
             // Rust's NLL split-borrow analysis permits accessing them here.
-            for (offset, event) in eq.drain_window(self.sample_counter, SUB_BLOCK_SIZE) {
+            for (_offset, event) in eq.drain_window(self.sample_counter, SUB_BLOCK_SIZE) {
                 for i in 0..self.current_plan.midi_receiver_indices.len() {
                     let idx = self.current_plan.midi_receiver_indices[i];
-                    self.module_pool.receive_midi(idx, offset, event);
+                    self.module_pool.receive_midi(idx, event);
                 }
             }
         }

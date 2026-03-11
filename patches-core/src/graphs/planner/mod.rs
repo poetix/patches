@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::modules::{InstanceId, ModuleDescriptor, ModuleShape, ParameterMap, PortConnectivity};
+use crate::modules::{InstanceId, ModuleShape, ParameterMap, PortConnectivity};
 use super::graph::{ModuleGraph, NodeId};
 
 pub mod alloc;
@@ -243,7 +243,7 @@ fn compute_order(node_ids: &[NodeId], sink: &NodeId) -> Result<(Vec<NodeId>, usi
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::modules::{InstanceId, ParameterValue, PortDescriptor, PortRef};
+    use crate::modules::{InstanceId, ModuleDescriptor, ParameterValue, PortDescriptor, PortRef};
     use crate::ModuleGraph;
 
     fn p(name: &'static str) -> PortRef {

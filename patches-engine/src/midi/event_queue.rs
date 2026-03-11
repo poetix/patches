@@ -1,10 +1,5 @@
+pub use patches_core::MidiEvent;
 use rtrb::{Consumer, Producer, RingBuffer};
-
-/// A placeholder MIDI event type — will be fleshed out in a later ticket.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MidiEvent {
-    pub bytes: [u8; 3],
-}
 
 /// Item stored in the ring buffer: a target sample position paired with the
 /// event to deliver at that position.
@@ -14,6 +9,10 @@ struct TimedEvent {
     event: MidiEvent,
 }
 
+/// Returned by [`EventQueueProducer::push`] when the ring buffer is full.
+#[derive(Debug)]
+pub struct QueueFull;
+
 /// Producer half of the [`EventQueue`].  Lives on the MIDI connector thread.
 pub struct EventQueueProducer {
     inner: Producer<TimedEvent>,
@@ -22,10 +21,9 @@ pub struct EventQueueProducer {
 impl EventQueueProducer {
     /// Push an event without blocking or allocating.
     ///
-    /// Returns `Err(Full)` if the ring buffer has no room.
-    /// Returns `Err(())` if the ring buffer is full.
-    pub fn push(&mut self, target_sample: u64, event: MidiEvent) -> Result<(), ()> {
-        self.inner.push(TimedEvent { target_sample, event }).map_err(|_| ())
+    /// Returns `Err(QueueFull)` if the ring buffer has no room.
+    pub fn push(&mut self, target_sample: u64, event: MidiEvent) -> Result<(), QueueFull> {
+        self.inner.push(TimedEvent { target_sample, event }).map_err(|_| QueueFull)
     }
 }
 

@@ -3,7 +3,7 @@ use std::fmt;
 
 use patches_core::{
     make_decisions, PlanDecisions,
-    AudioEnvironment, BufferAllocState, ControlSignal, InstanceId,
+    AudioEnvironment, BufferAllocState, InstanceId,
     Module, ModuleAllocState, ModuleGraph, NodeDecision, NodeId, NodeState, PlanError,
     PlannerState, PortConnectivity, Registry, ResolvedGraph,
 };
@@ -102,12 +102,6 @@ pub struct ExecutionPlan {
     /// so the audio thread does not disturb their in-flight values.
     pub to_zero: Vec<usize>,
     pub audio_out_index: usize,
-    /// Sorted array mapping `InstanceId` to pool index, used for O(log M)
-    /// signal dispatch at control-rate ticks.
-    ///
-    /// Built at plan construction time (off the audio thread) so that the
-    /// audio callback can binary-search without allocating.
-    signal_dispatch: Box<[(InstanceId, usize)]>,
     /// New modules to install into the audio-thread module pool when this plan
     /// is adopted. Each entry is `(pool_index, Box<dyn Module>)`.
     ///
@@ -136,6 +130,12 @@ pub struct ExecutionPlan {
     /// New modules (in `new_modules`) do not appear here; their connectivity is
     /// set during construction. Empty when wiring is unchanged.
     pub connectivity_updates: Vec<(usize, PortConnectivity)>,
+    /// Pool indices of modules that receive MIDI events in the current plan.
+    ///
+    /// The audio callback delivers MIDI events to each of these slots via
+    /// [`ModulePool::receive_midi`] once per 64-sample sub-block. Empty until
+    /// modules implementing the `ReceiveMidi` trait (T-0111) are added to the graph.
+    pub midi_receiver_indices: Vec<usize>,
 }
 
 impl ExecutionPlan {
@@ -164,17 +164,6 @@ impl ExecutionPlan {
         }
     }
 
-    /// Deliver `signal` to the module identified by `id`, if it is present in this plan.
-    ///
-    /// Performs a binary search on `signal_dispatch` (O(log M)) and calls
-    /// [`ModulePool::receive_signal`] on the resolved pool slot. Does nothing if
-    /// `id` is not in this plan.
-    pub fn dispatch_signal(&self, id: InstanceId, signal: ControlSignal, pool: &mut ModulePool) {
-        if let Ok(idx) = self.signal_dispatch.binary_search_by_key(&id, |(k, _)| *k) {
-            let pool_idx = self.signal_dispatch[idx].1;
-            pool.receive_signal(pool_idx, signal);
-        }
-    }
 }
 
 // ── Decision-phase helpers ────────────────────────────────────────────────────
@@ -362,26 +351,16 @@ impl PatchBuilder {
 
         let tombstones = module_diff.tombstoned;
 
-        // Build the signal_dispatch sorted array: (InstanceId → pool_index).
-        // Sorted by InstanceId so the audio callback can binary-search in O(log M).
-        let mut dispatch: Vec<(InstanceId, usize)> = slots
-            .iter()
-            .zip(order.iter())
-            .map(|(slot, id)| (instance_ids[id], slot.pool_index))
-            .collect();
-        dispatch.sort_unstable_by_key(|(id, _)| *id);
-        let signal_dispatch = dispatch.into_boxed_slice();
-
         Ok((
             ExecutionPlan {
                 slots,
                 to_zero: buf_alloc.to_zero,
                 audio_out_index,
-                signal_dispatch,
                 new_modules,
                 tombstones,
                 parameter_updates,
                 connectivity_updates,
+                midi_receiver_indices: Vec::new(),
             },
             PlannerState {
                 nodes: node_states,

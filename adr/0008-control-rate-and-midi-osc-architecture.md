@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded by [ADR 0016 — MIDI as the sole external control mechanism](0016-midi-only-control-architecture.md)
 
 ## Context
 

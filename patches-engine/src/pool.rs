@@ -1,4 +1,4 @@
-use patches_core::{ControlSignal, Module, PortConnectivity};
+use patches_core::{Module, PortConnectivity};
 use patches_core::parameter_map::ParameterMap;
 
 /// Audio-thread-owned pool of module instances.
@@ -6,8 +6,8 @@ use patches_core::parameter_map::ParameterMap;
 /// Wraps a pre-allocated `Box<[Option<Box<dyn Module>>]>` together with a
 /// cached record of the installed [`Sink`] module. Each operation is named
 /// clearly: [`tombstone`](Self::tombstone), [`install`](Self::install),
-/// [`process`](Self::process), [`receive_signal`](Self::receive_signal),
-/// [`has_sink`](Self::has_sink), [`read_sink_left`](Self::read_sink_left),
+/// [`process`](Self::process), [`has_sink`](Self::has_sink),
+/// [`read_sink_left`](Self::read_sink_left),
 /// and [`read_sink_right`](Self::read_sink_right).
 ///
 /// When a module implementing [`Sink`] is installed, the pool records its
@@ -92,16 +92,6 @@ impl ModulePool {
         }
     }
 
-    /// Deliver a control signal to the module at `idx`.
-    ///
-    /// Does nothing if the slot is empty (the module may have been tombstoned
-    /// between the signal being queued and the control tick firing).
-    pub fn receive_signal(&mut self, idx: usize, signal: ControlSignal) {
-        if let Some(m) = self.modules[idx].as_mut() {
-            m.receive_signal(signal);
-        }
-    }
-
     /// Apply pre-validated parameter updates to the module at `idx`.
     ///
     /// Calls [`Module::update_validated_parameters`] on the module at `idx`.
@@ -113,6 +103,13 @@ impl ModulePool {
             m.update_validated_parameters(params);
         }
     }
+
+    /// Deliver a MIDI event to the module at `idx`.
+    ///
+    /// `offset` is the sample offset within the current sub-block at which the
+    /// event should take effect. No-op stub until T-0111 introduces the
+    /// `ReceiveMidi` trait. Does nothing if the slot is empty.
+    pub fn receive_midi(&mut self, _idx: usize, _offset: usize, _event: crate::midi::MidiEvent) {}
 
     /// Deliver a connectivity update to the module at `idx`.
     ///
@@ -153,7 +150,7 @@ mod tests {
     use std::any::Any;
 
     use patches_core::{
-        AudioEnvironment, ControlSignal, InstanceId, Module, ModuleDescriptor, ModuleShape,
+        AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleShape,
         PortDescriptor, Sink,
     };
     use patches_core::parameter_map::ParameterMap;
@@ -163,9 +160,6 @@ mod tests {
     // ── Test-only modules ─────────────────────────────────────────────────────
 
     /// Outputs a constant value on its single output port.
-    /// Responds to `ControlSignal::Float { name: "value", .. }` by
-    /// updating the output value, letting tests observe signal delivery via
-    /// `process` output rather than downcasting.
     struct ConstSource {
         id: InstanceId,
         value: f64,
@@ -212,11 +206,6 @@ mod tests {
         }
         fn process(&mut self, _inputs: &[f64], outputs: &mut [f64]) {
             outputs[0] = self.value;
-        }
-        fn receive_signal(&mut self, signal: ControlSignal) {
-            if let ControlSignal::Float { name: "value", value: v } = signal {
-                self.value = v;
-            }
         }
         fn as_any(&self) -> &dyn Any {
             self
@@ -339,37 +328,11 @@ mod tests {
     }
 
     #[test]
-    fn tombstone_then_receive_signal_is_noop() {
-        let mut pool = ModulePool::new(4);
-        pool.install(1, Box::new(ConstSource::new(1.0)));
-        pool.tombstone(1);
-        // Must not panic.
-        pool.receive_signal(1, ControlSignal::Float { name: "x", value: 0.0 });
-    }
-
-    #[test]
     #[should_panic]
     fn process_on_empty_slot_panics() {
         let mut pool = ModulePool::new(4);
         let mut out = [0.0_f64];
         pool.process(0, &[], &mut out);
-    }
-
-    #[test]
-    fn receive_signal_on_empty_slot_is_noop() {
-        let mut pool = ModulePool::new(4);
-        // Must not panic.
-        pool.receive_signal(3, ControlSignal::Float { name: "x", value: 0.0 });
-    }
-
-    #[test]
-    fn receive_signal_updates_module_state() {
-        let mut pool = ModulePool::new(4);
-        pool.install(0, Box::new(ConstSource::new(0.0)));
-        pool.receive_signal(0, ControlSignal::Float { name: "value", value: 0.9 });
-        let mut out = [0.0_f64];
-        pool.process(0, &[], &mut out);
-        assert!((out[0] - 0.9).abs() < 1e-9, "process output should reflect the updated value");
     }
 
     #[test]

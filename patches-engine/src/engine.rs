@@ -1,14 +1,16 @@
 use std::fmt;
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig};
 
-use patches_core::{AudioEnvironment, ControlSignal, InstanceId, Module};
+use patches_core::{AudioEnvironment, Module};
 
 use crate::builder::ExecutionPlan;
 use crate::callback::{build_stream, AudioCallback};
+use crate::midi::AudioClock;
 use crate::pool::ModulePool;
 
 /// Default module pool capacity: number of `Option<Box<dyn Module>>` slots
@@ -16,13 +18,11 @@ use crate::pool::ModulePool;
 /// modules than any realistic patch.
 pub const DEFAULT_MODULE_POOL_CAPACITY: usize = 1024;
 
-/// Pre-start state: the plan channel consumer, the signal consumer, the
-/// cable buffer pool, and the module pool.
-/// Stored in [`SoundEngine`] until [`start`](SoundEngine::start) moves them
-/// into the audio closure.
+/// Pre-start state: the plan channel consumer, the cable buffer pool, and the
+/// module pool. Stored in [`SoundEngine`] until [`start`](SoundEngine::start)
+/// moves them into the audio closure.
 struct PendingState {
     plan_rx: rtrb::Consumer<ExecutionPlan>,
-    signal_rx: rtrb::Consumer<(InstanceId, ControlSignal)>,
     buffer_pool: Box<[[f64; 2]]>,
     module_pool: ModulePool,
 }
@@ -54,8 +54,6 @@ pub enum EngineError {
     /// has already been started and stopped. Create a new [`SoundEngine`] to
     /// restart with a fresh plan.
     AlreadyConsumed,
-    /// `control_period` of zero was passed to [`SoundEngine::new`].
-    InvalidControlPeriod,
     /// The OS refused to spawn the cleanup thread.
     ThreadSpawnError(std::io::Error),
     /// [`start`](SoundEngine::start) was called before [`open`](SoundEngine::open).
@@ -80,9 +78,6 @@ impl fmt::Display for EngineError {
                 f,
                 "engine has already been started and stopped; create a new SoundEngine to restart"
             ),
-            EngineError::InvalidControlPeriod => {
-                write!(f, "control_period must be greater than zero")
-            }
             EngineError::ThreadSpawnError(e) => write!(f, "failed to spawn cleanup thread: {e}"),
             EngineError::NotOpened => {
                 write!(f, "start() called before open(); call open() first")
@@ -244,8 +239,6 @@ mod tests {
 pub struct SoundEngine {
     /// Write end of the lock-free plan channel.
     plan_tx: rtrb::Producer<ExecutionPlan>,
-    /// Write end of the lock-free signal channel.
-    signal_tx: rtrb::Producer<(InstanceId, ControlSignal)>,
     /// Consumer end and pools -- stashed here until
     /// [`start`](Self::start) moves them into the audio closure.
     /// `None` after `start()` has been called.
@@ -255,12 +248,14 @@ pub struct SoundEngine {
     opened_device: Option<OpenedDevice>,
     /// Live CPAL stream while the engine is running.
     stream: Option<Stream>,
-    /// Number of samples between control-rate ticks (signal dispatch).
-    control_period: usize,
     /// Capacity of the module pool; used to size the cleanup ring buffer.
     module_pool_capacity: usize,
     /// Join handle for the cleanup thread spawned in [`start`](Self::start).
     cleanup_thread: Option<thread::JoinHandle<()>>,
+    /// Shared audio clock. The audio callback holds a raw pointer into this
+    /// allocation; `SoundEngine` keeps the `Arc` alive so the pointer remains
+    /// valid for the lifetime of the stream.
+    clock: Arc<AudioClock>,
 }
 
 impl SoundEngine {
@@ -274,32 +269,23 @@ impl SoundEngine {
     /// in the audio-thread module pool. Must be at least as large as the value
     /// used when building plans via [`build_patch`](crate::build_patch).
     ///
-    /// `control_period` is the number of audio samples between control-rate
-    /// ticks (signal dispatch). Must be greater than zero; 64 is a sensible
-    /// default (~1.3 ms at 48 kHz).
-    ///
     /// No audio device is opened until [`open`](Self::open) is called.
     pub fn new(
         buffer_pool_capacity: usize,
         module_pool_capacity: usize,
-        control_period: usize,
     ) -> Result<Self, EngineError> {
-        if control_period == 0 {
-            return Err(EngineError::InvalidControlPeriod);
-        }
         let buffer_pool = vec![[0.0_f64; 2]; buffer_pool_capacity].into_boxed_slice();
         let module_pool = ModulePool::new(module_pool_capacity);
         let (plan_tx, plan_rx) = rtrb::RingBuffer::new(1);
-        let (signal_tx, signal_rx) = rtrb::RingBuffer::new(64);
+        let clock = Arc::new(AudioClock::new());
         Ok(Self {
             plan_tx,
-            signal_tx,
-            pending: Some(PendingState { plan_rx, signal_rx, buffer_pool, module_pool }),
+            pending: Some(PendingState { plan_rx, buffer_pool, module_pool }),
             opened_device: None,
             stream: None,
-            control_period,
             module_pool_capacity,
             cleanup_thread: None,
+            clock,
         })
     }
 
@@ -354,7 +340,7 @@ impl SoundEngine {
             return Ok(());
         }
 
-        let PendingState { plan_rx, signal_rx, buffer_pool, mut module_pool } =
+        let PendingState { plan_rx, buffer_pool, mut module_pool } =
             self.pending.take().ok_or(EngineError::AlreadyConsumed)?;
 
         let OpenedDevice { device, config, sample_format, channels } =
@@ -383,9 +369,14 @@ impl SoundEngine {
 
         self.cleanup_thread = Some(cleanup_handle);
 
+        // Pass a raw pointer into the Arc's allocation. The Arc in `self.clock`
+        // keeps the AudioClock alive for at least as long as `self` exists, and
+        // `stop()` drops the stream (and thus the callback) before `self` is
+        // dropped, so the pointer is valid for the entire lifetime of the callback.
+        let clock_ptr = Arc::as_ptr(&self.clock);
         let callback = AudioCallback::new(
-            plan_rx, signal_rx, plan, buffer_pool, module_pool, channels,
-            self.control_period, cleanup_tx,
+            plan_rx, plan, buffer_pool, module_pool, channels,
+            None, clock_ptr, cleanup_tx,
         );
         let stream = match sample_format {
             SampleFormat::F32 => build_stream::<f32>(&device, &config, callback),
@@ -433,16 +424,11 @@ impl SoundEngine {
         self.plan_tx.push(new_plan).map_err(|rtrb::PushError::Full(v)| v)
     }
 
-    /// Enqueue a [`ControlSignal`] for delivery to the module identified by `id`.
+    /// Return a clone of the shared [`AudioClock`].
     ///
-    /// Returns `Err(signal)` if the ring buffer is full. Never blocks.
-    pub fn send_signal(
-        &mut self,
-        id: InstanceId,
-        signal: ControlSignal,
-    ) -> Result<(), ControlSignal> {
-        self.signal_tx
-            .push((id, signal))
-            .map_err(|rtrb::PushError::Full((_, s))| s)
+    /// MIDI connector threads call [`AudioClock::read`] on this to convert
+    /// wall-clock event timestamps to sample positions.
+    pub fn clock(&self) -> Arc<AudioClock> {
+        Arc::clone(&self.clock)
     }
 }

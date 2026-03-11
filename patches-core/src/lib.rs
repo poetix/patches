@@ -11,7 +11,7 @@ pub mod registries;
 // ── Public API ────────────────────────────────────────────────────────────────
 pub use audio_environment::AudioEnvironment;
 pub use graphs::{GraphError, ModuleGraph, NodeId};
-pub use modules::{validate_parameters, ControlSignal, Module, PortConnectivity, Sink};
+pub use modules::{validate_parameters, Module, PortConnectivity, Sink};
 pub use modules::{ModuleDescriptor, ModuleShape, ParameterDescriptor, ParameterKind, PortDescriptor, PortRef};
 pub use modules::{ParameterMap, ParameterValue};
 pub use modules::parameter_map;

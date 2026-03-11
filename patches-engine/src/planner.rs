@@ -1,4 +1,4 @@
-use patches_core::{AudioEnvironment, ControlSignal, InstanceId, ModuleGraph, NodeId, Registry};
+use patches_core::{AudioEnvironment, InstanceId, ModuleGraph, NodeId, Registry};
 
 use patches_core::PlannerState;
 
@@ -11,11 +11,6 @@ use crate::engine::{EngineError, SoundEngine, DEFAULT_MODULE_POOL_CAPACITY};
 /// than sufficient for all expected patch sizes. Each slot is 16 bytes
 /// (`[f64; 2]`), so the pool is 64 KiB.
 const DEFAULT_POOL_CAPACITY: usize = 4096;
-
-/// Default number of audio samples between control-rate ticks.
-///
-/// At 48 kHz this gives a control rate of 750 Hz (~1.3 ms per tick).
-const DEFAULT_CONTROL_PERIOD: usize = 64;
 
 /// Converts a [`ModuleGraph`] into an [`ExecutionPlan`] with stable buffer and
 /// module pool allocation.
@@ -166,27 +161,11 @@ impl From<EngineError> for PatchEngineError {
 impl PatchEngine {
     /// Create a `PatchEngine` with the given registry.
     ///
-    /// Constructs the underlying [`SoundEngine`] with the default control period
-    /// (64 samples), but does not open the audio device or build a plan.
+    /// Does not open the audio device or build a plan.
     /// Call [`start`](Self::start) to open the device and begin playback.
     pub fn new(registry: Registry) -> Result<Self, PatchEngineError> {
-        Self::with_control_period(registry, DEFAULT_CONTROL_PERIOD)
-    }
-
-    /// Create a `PatchEngine` with a specific control period.
-    ///
-    /// `control_period` is the number of audio samples between control-rate
-    /// ticks (signal dispatch). Must be greater than zero.
-    pub fn with_control_period(
-        registry: Registry,
-        control_period: usize,
-    ) -> Result<Self, PatchEngineError> {
         let planner = Planner::with_capacity(DEFAULT_POOL_CAPACITY);
-        let engine = SoundEngine::new(
-            DEFAULT_POOL_CAPACITY,
-            DEFAULT_MODULE_POOL_CAPACITY,
-            control_period,
-        )?;
+        let engine = SoundEngine::new(DEFAULT_POOL_CAPACITY, DEFAULT_MODULE_POOL_CAPACITY)?;
         Ok(Self {
             planner,
             engine,
@@ -240,18 +219,6 @@ impl PatchEngine {
         self.planner.instance_id(node)
     }
 
-    /// Enqueue a [`ControlSignal`] for delivery to the module identified by `id`.
-    ///
-    /// Delegates to [`SoundEngine::send_signal`]. Returns `Err(signal)` if the
-    /// ring buffer is full; the caller may drop or retry.
-    pub fn send_signal(
-        &mut self,
-        id: InstanceId,
-        signal: ControlSignal,
-    ) -> Result<(), ControlSignal> {
-        self.engine.send_signal(id, signal)
-    }
-
     /// Stop audio processing and close the device.
     pub fn stop(&mut self) {
         self.engine.stop();
@@ -260,13 +227,8 @@ impl PatchEngine {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    };
-
     use patches_core::{
-        AudioEnvironment, ControlSignal, InstanceId, Module, ModuleDescriptor, ModuleGraph,
+        AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleGraph,
         ModuleShape, NodeId, PortDescriptor, PortRef,
     };
     use patches_core::parameter_map::{ParameterMap, ParameterValue};
@@ -451,166 +413,4 @@ mod tests {
         assert!(planner.build(&ModuleGraph::new(), &registry, &env).is_err());
     }
 
-    // ── Signal dispatch tests ─────────────────────────────────────────────────
-
-    /// Records how many signals it has received via an `Arc<AtomicUsize>` shared
-    /// with the test.
-    struct SignalReceiver {
-        instance_id: InstanceId,
-        descriptor: ModuleDescriptor,
-        received_count: Arc<AtomicUsize>,
-    }
-
-    impl Module for SignalReceiver {
-        fn describe(shape: &ModuleShape) -> ModuleDescriptor {
-            ModuleDescriptor {
-                module_name: "SignalReceiver",
-                shape: shape.clone(),
-                inputs: vec![],
-                outputs: vec![PortDescriptor { name: "out", index: 0 }],
-                parameters: vec![],
-                is_sink: false,
-            }
-        }
-
-        fn prepare(_env: &AudioEnvironment, descriptor: ModuleDescriptor, instance_id: InstanceId) -> Self {
-            Self {
-                instance_id,
-                descriptor,
-                received_count: Arc::new(AtomicUsize::new(0)),
-            }
-        }
-
-        fn update_validated_parameters(&mut self, _params: &ParameterMap) {}
-
-        fn descriptor(&self) -> &ModuleDescriptor {
-            &self.descriptor
-        }
-
-        fn instance_id(&self) -> InstanceId {
-            self.instance_id
-        }
-
-        fn process(&mut self, _inputs: &[f64], outputs: &mut [f64]) {
-            outputs[0] = 0.0;
-        }
-
-        fn receive_signal(&mut self, _signal: ControlSignal) {
-            self.received_count.fetch_add(1, Ordering::SeqCst);
-        }
-
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
-        }
-    }
-
-    fn receiver_graph() -> ModuleGraph {
-        let recv_desc = SignalReceiver::describe(&ModuleShape { channels: 0, length: 0 });
-        let out_desc = AudioOut::describe(&ModuleShape { channels: 0, length: 0 });
-        let mut g = ModuleGraph::new();
-        g.add_module("recv", recv_desc, &ParameterMap::new()).unwrap();
-        g.add_module("out", out_desc, &ParameterMap::new()).unwrap();
-        g.connect(&NodeId::from("recv"), p("out"), &NodeId::from("out"), p("left"), 1.0).unwrap();
-        g.connect(&NodeId::from("recv"), p("out"), &NodeId::from("out"), p("right"), 1.0).unwrap();
-        g
-    }
-
-    #[test]
-    fn signal_delivered_at_control_tick_not_before() {
-        let mut registry = patches_modules::default_registry();
-        registry.register::<SignalReceiver>();
-        let env = AudioEnvironment { sample_rate: 44100.0 };
-        let mut planner = Planner::new();
-
-        let graph = receiver_graph();
-        let mut plan = planner.build(&graph, &registry, &env).unwrap();
-        let recv_id = planner.instance_id(&NodeId::from("recv")).unwrap();
-
-        let mut pool = ModulePool::new(64);
-        let mut received_count: Option<Arc<AtomicUsize>> = None;
-        for (idx, module) in plan.new_modules.drain(..) {
-            if let Some(recv) = module.as_any().downcast_ref::<SignalReceiver>() {
-                received_count = Some(Arc::clone(&recv.received_count));
-            }
-            pool.install(idx, module);
-        }
-        let received_count = received_count.expect("SignalReceiver not found in new_modules");
-
-        let mut buffer_pool = make_buffer_pool(256);
-        for i in 0..3usize {
-            plan.tick(&mut pool, &mut buffer_pool, i % 2);
-        }
-
-        assert_eq!(
-            received_count.load(Ordering::SeqCst),
-            0,
-            "signal must not arrive before dispatch_signal is called"
-        );
-
-        plan.dispatch_signal(
-            recv_id,
-            ControlSignal::Float { name: "test", value: 0.0 },
-            &mut pool,
-        );
-
-        assert_eq!(
-            received_count.load(Ordering::SeqCst),
-            1,
-            "signal must arrive after dispatch_signal is called"
-        );
-    }
-
-    #[test]
-    fn signal_for_unknown_id_is_silently_dropped() {
-        let mut registry = patches_modules::default_registry();
-        registry.register::<SignalReceiver>();
-        let env = AudioEnvironment { sample_rate: 44100.0 };
-        let mut planner = Planner::new();
-
-        let graph = receiver_graph();
-        let mut plan = planner.build(&graph, &registry, &env).unwrap();
-
-        let mut pool = ModulePool::new(64);
-        let mut received_count: Option<Arc<AtomicUsize>> = None;
-        for (idx, module) in plan.new_modules.drain(..) {
-            if let Some(recv) = module.as_any().downcast_ref::<SignalReceiver>() {
-                received_count = Some(Arc::clone(&recv.received_count));
-            }
-            pool.install(idx, module);
-        }
-        let received_count = received_count.expect("SignalReceiver not found in new_modules");
-
-        let unknown_id = InstanceId::next();
-        plan.dispatch_signal(
-            unknown_id,
-            ControlSignal::Float { name: "test", value: 0.0 },
-            &mut pool,
-        );
-
-        assert_eq!(
-            received_count.load(Ordering::SeqCst),
-            0,
-            "signal for unknown InstanceId must be silently dropped"
-        );
-    }
-
-    #[test]
-    fn send_signal_returns_err_on_full_buffer() {
-        let recv_id = InstanceId::next();
-        let mut engine =
-            SoundEngine::new(256, 64, 64).expect("SoundEngine::new should succeed");
-
-        for i in 0..64u64 {
-            engine
-                .send_signal(
-                    recv_id,
-                    ControlSignal::Float { name: "frequency", value: i as f64 },
-                )
-                .expect("push should succeed while buffer has space");
-        }
-
-        let overflow = ControlSignal::Float { name: "frequency", value: 999.0 };
-        let result = engine.send_signal(recv_id, overflow);
-        assert!(result.is_err(), "send_signal must return Err when the buffer is full");
-    }
 }

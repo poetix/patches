@@ -37,7 +37,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Two-phase startup: open the device first to get the real sample rate,
     // then build the plan and start the audio thread.
     let registry = patches_modules::default_registry();
-    let mut engine = SoundEngine::new(4096, 1024, 64)?;
+    let mut engine = SoundEngine::new(4096, 1024)?;
     let env = engine.open()?;
     let (plan, _state) = build_patch(&graph, &registry, &env, &PlannerState::empty(), 4096, 1024)?;
     engine.start(plan)?;

@@ -1,7 +1,7 @@
 # ADR 0014 — Control signals convey external events, not parameter updates
 
 **Date:** 2026-03-06
-**Status:** Accepted
+**Status:** Superseded by [ADR 0016 — MIDI as the sole external control mechanism](0016-midi-only-control-architecture.md)
 
 ## Context
 

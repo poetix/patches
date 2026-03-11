@@ -4,19 +4,6 @@ use super::instance_id::InstanceId;
 use super::module_descriptor::{ModuleDescriptor, ModuleShape, ParameterKind};
 use super::parameter_map::{ParameterMap, ParameterValue};
 
-/// A non-audio-rate control signal delivered to a module via [`Module::receive_signal`].
-///
-/// Signals are passed by value; modules that need to store the payload can do so directly.
-/// New variants may be added in future; module implementations should use a wildcard arm
-/// (`_ => {}`) to stay forward-compatible.
-///
-/// `ControlSignal` implements [`Send`] so it can be queued in the engine's ring buffer
-/// (see T-0038). All current variants use only `Send`-safe types (`&'static str`, `f64`).
-#[derive(Debug, Clone)]
-pub enum ControlSignal {
-    /// A single named float parameter update (e.g. frequency, gain).
-    Float { name: &'static str, value: f64 },
-}
 
 /// Validate `params` against `descriptor`.
 ///
@@ -239,13 +226,6 @@ pub trait Module: Send {
     fn instance_id(&self) -> InstanceId;
 
     fn process(&mut self, inputs: &[f64], outputs: &mut [f64]);
-
-    /// Deliver a non-audio-rate control signal to this module.
-    ///
-    /// The default implementation is a no-op; modules that respond to control signals
-    /// override this method. Unknown signal variants or parameter names should be
-    /// silently ignored.
-    fn receive_signal(&mut self, _signal: ControlSignal) {}
 
     /// Inform the module which of its ports are connected in the current patch.
     ///

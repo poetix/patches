@@ -10,7 +10,7 @@ use patches_core::{AudioEnvironment, Module};
 
 use crate::builder::ExecutionPlan;
 use crate::callback::{build_stream, AudioCallback};
-use crate::midi::AudioClock;
+use crate::midi::{AudioClock, EventQueueConsumer};
 use crate::pool::ModulePool;
 
 /// Default module pool capacity: number of `Option<Box<dyn Module>>` slots
@@ -335,7 +335,7 @@ impl SoundEngine {
     /// Returns [`EngineError::NotOpened`] if [`open`](Self::open) has not been
     /// called. Returns [`EngineError::AlreadyConsumed`] if the engine has
     /// already been started and stopped.
-    pub fn start(&mut self, mut plan: ExecutionPlan) -> Result<(), EngineError> {
+    pub fn start(&mut self, mut plan: ExecutionPlan, event_queue: Option<EventQueueConsumer>) -> Result<(), EngineError> {
         if self.stream.is_some() {
             return Ok(());
         }
@@ -376,7 +376,7 @@ impl SoundEngine {
         let clock_ptr = Arc::as_ptr(&self.clock);
         let callback = AudioCallback::new(
             plan_rx, plan, buffer_pool, module_pool, channels,
-            None, clock_ptr, cleanup_tx,
+            event_queue, clock_ptr, cleanup_tx,
         );
         let stream = match sample_format {
             SampleFormat::F32 => build_stream::<f32>(&device, &config, callback),

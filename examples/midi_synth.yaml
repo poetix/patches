@@ -1,0 +1,235 @@
+# midi_synth.yaml — monophonic bass synth, Boards of Canada "Roygbiv" character
+#
+# Voice architecture:
+#   osc_main  — sawtooth (primary body) + square with PWM (movement)
+#   osc_sub   — square wave, one octave down (weight and depth)
+#   filter    — low-pass, low resonance (≈2%), saturated (grit without screaming)
+#   lfo       — slow (~0.4 Hz): triangle → PWM, sine → pitch + filter drift
+#   amp env   — instant attack, punchy decay, high sustain, medium release
+#   filter env — instant attack, slightly longer decay, moderate sustain
+#
+# Signal flow:
+#
+#   kbd ──v_oct──→ glide ──out──→ osc_main ──sawtooth──────────────────┐
+#                         │                └──square (PWM)─────────────┤ mix
+#                         └──→ tune_sub ──out──→ osc_sub ──square──────┘
+#
+#   lfo ──triangle──→ osc_main.pulse_width  (PWM motion)
+#   lfo ──sine──────→ osc_main.fm           (subtle pitch drift)
+#   lfo ──sine──────→ cutoff_mix.in/1       (slow filter drift)
+#
+#   mix ──out──→ filter ──out──→ vca ──out──→ out.left / out.right
+#
+#   filter_env ──out──→ cutoff_mix.in/0    (main filter sweep)
+#   cutoff_mix ──out──→ filter.cutoff_cv
+#
+#   kbd ──trigger──→ amp_env + filter_env
+#   kbd ──gate────→ amp_env + filter_env
+#   amp_env ──out──→ vca.cv
+#
+# Hot-reload tips:
+#   - Raise filter.resonance (try 0.1–0.3) for more bite.
+#   - Increase filter_env.decay (try 0.4–0.7) for a slower, dreamier sweep.
+#   - Raise lfo.rate (try 0.6–1.0) for faster wobble; lower (0.1) for drift.
+#   - Increase scale on the lfo→pulse_width cable for wider PWM sweep.
+#   - Adjust tune_sub.octave to -2 for a deeper sub.
+#   - Raise glide_ms (try 50–80) for more obvious portamento.
+
+nodes:
+  kbd:
+    module: MonophonicMidiKeyboard
+
+  glide:
+    module: Glide
+    params:
+      glide_ms: 50.0
+
+  # Sub-oscillator: one octave below osc_main
+  tune_sub:
+    module: Tuner
+    params:
+      octave: -1
+      semi: 0
+      cent: 0
+
+  osc_main:
+    module: Oscillator
+
+  osc_sub:
+    module: Oscillator
+
+  # Three voices: saw body + PWM square + sub square
+  mix:
+    module: Sum
+    channels: 3
+
+  # Slow LFO: vintage analogue instability
+  lfo:
+    module: Lfo
+    params:
+      rate: 0.4
+
+  # Amp envelope: punchy but fluid
+  amp_env:
+    module: AdsrEnvelope
+    params:
+      attack: 0.003
+      decay: 0.10
+      sustain: 0.75
+      release: 0.35
+
+  # Filter envelope: slightly slower decay for a plucked bloom
+  filter_env:
+    module: AdsrEnvelope
+    params:
+      attack: 0.003
+      decay: 0.22
+      sustain: 0.45
+      release: 0.35
+
+  # filter cutoff CV: envelope sweep + slow LFO drift
+  cutoff_mix:
+    module: Sum
+    channels: 2
+
+  # Low resonance keeps it punchy without screaming; saturation adds grit
+  filter:
+    module: ResonantLowpass
+    params:
+      cutoff: 700.0
+      resonance: 0.02
+      saturate: true
+
+  vca:
+    module: Vca
+
+  out:
+    module: AudioOut
+
+cables:
+  # Pitch chain
+  - from: kbd
+    output: v_oct
+    to: glide
+    input: in
+
+  - from: glide
+    output: out
+    to: osc_main
+    input: voct
+
+  - from: glide
+    output: out
+    to: tune_sub
+    input: in
+
+  - from: tune_sub
+    output: out
+    to: osc_sub
+    input: voct
+
+  # LFO modulation
+  # Triangle → pulse width for smooth cyclic PWM on osc_main
+  - from: lfo
+    output: triangle
+    to: osc_main
+    input: pulse_width
+    scale: 0.4
+
+  # Sine → linear FM for subtle pitch instability (≈±0.4 Hz)
+  - from: lfo
+    output: sine
+    to: osc_main
+    input: fm
+    scale: 0.05
+
+  # Envelope triggers
+  - from: kbd
+    output: trigger
+    to: amp_env
+    input: trigger
+
+  - from: kbd
+    output: gate
+    to: amp_env
+    input: gate
+
+  - from: kbd
+    output: trigger
+    to: filter_env
+    input: trigger
+
+  - from: kbd
+    output: gate
+    to: filter_env
+    input: gate
+
+  # Oscillator mix
+  # Sawtooth: warm body
+  - from: osc_main
+    output: sawtooth
+    to: mix
+    input: in
+    scale: 0.50
+
+  # Square with PWM: harmonic motion
+  - from: osc_main
+    output: square
+    to: mix
+    input: in/1
+    scale: 0.22
+
+  # Sub square: depth
+  - from: osc_sub
+    output: square
+    to: mix
+    input: in/2
+    scale: 0.32
+
+  # Filter
+  - from: mix
+    output: out
+    to: filter
+    input: in
+
+  # Filter cutoff: envelope bloom + slow LFO drift
+  - from: filter_env
+    output: out
+    to: cutoff_mix
+    input: in
+    scale: 0.5
+
+  - from: lfo
+    output: sine
+    to: cutoff_mix
+    input: in/1
+    scale: 0.10
+
+  - from: cutoff_mix
+    output: out
+    to: filter
+    input: cutoff_cv
+
+  # VCA
+  - from: filter
+    output: out
+    to: vca
+    input: in
+
+  - from: amp_env
+    output: out
+    to: vca
+    input: cv
+
+  # Stereo output
+  - from: vca
+    output: out
+    to: out
+    input: left
+    scale: 0.85
+
+  - from: vca
+    output: out
+    to: out
+    input: right
+    scale: 0.85

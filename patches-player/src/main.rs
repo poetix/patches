@@ -10,7 +10,7 @@ use std::thread;
 use std::time::{Duration, SystemTime};
 
 use patches_core::graph_yaml::yaml_to_graph;
-use patches_engine::{PatchEngine, PatchEngineError};
+use patches_engine::{new_event_queue, EventScheduler, MidiConnector, PatchEngine, PatchEngineError};
 
 fn mtime(path: &str) -> std::io::Result<SystemTime> {
     fs::metadata(path)?.modified()
@@ -49,7 +49,27 @@ fn run(path: &str) -> Result<(), Box<dyn std::error::Error>> {
     let graph = load_graph(path, &load_registry)?;
 
     let mut engine = PatchEngine::new(patches_modules::default_registry())?;
-    engine.start(&graph)?;
+
+    // Create the MIDI event queue. The consumer goes into the audio callback;
+    // the producer goes to the MidiConnector which is opened after start().
+    let (midi_producer, midi_consumer) = new_event_queue(256);
+    engine.start(&graph, Some(midi_consumer))?;
+
+    // Open all available MIDI input ports. The connector must stay alive for
+    // the duration of playback; dropping it disconnects all ports.
+    let sample_rate = engine.sample_rate().unwrap_or(44_100.0);
+    let scheduler = EventScheduler::new(sample_rate, 128);
+    let _midi_connector = match MidiConnector::open(engine.clock(), midi_producer, scheduler) {
+        Ok(c) => {
+            println!("MIDI input open.");
+            Some(c)
+        }
+        Err(e) => {
+            eprintln!("warn: could not open MIDI input: {e}");
+            None
+        }
+    };
+
     println!("Loaded {path}");
     println!("Watching for changes… (Ctrl-C to stop)");
 

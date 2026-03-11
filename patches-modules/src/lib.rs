@@ -2,6 +2,7 @@ pub mod adsr_envelope;
 pub mod audio_out;
 pub mod clock_sequencer;
 pub mod filter;
+pub mod monophonic_midi_keyboard;
 pub mod oscillator;
 pub mod step_sequencer;
 pub mod sum;
@@ -15,6 +16,7 @@ pub use adsr_envelope::AdsrEnvelope;
 pub use audio_out::AudioOut;
 pub use clock_sequencer::ClockSequencer;
 pub use filter::ResonantLowpass;
+pub use monophonic_midi_keyboard::MonophonicMidiKeyboard;
 pub use oscillator::Oscillator;
 pub use step_sequencer::StepSequencer;
 pub use sum::Sum;
@@ -36,6 +38,7 @@ pub fn default_registry() -> patches_core::Registry {
     r.register::<Lfo>();
     r.register::<ResonantLowpass>();
     r.register::<Tuner>();
+    r.register::<MonophonicMidiKeyboard>();
     r
 }
 
@@ -63,6 +66,7 @@ mod tests {
             "Lfo",
             "ResonantLowpass",
             "Tuner",
+            "MonophonicMidiKeyboard",
         ] {
             assert!(
                 r.create(name, &env, &shape, &params, InstanceId::next()).is_ok(),

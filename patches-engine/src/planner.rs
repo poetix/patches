@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use patches_core::{AudioEnvironment, InstanceId, ModuleGraph, NodeId, Registry};
 
@@ -6,6 +7,7 @@ use patches_core::PlannerState;
 
 use crate::builder::{BuildError, ExecutionPlan, PatchBuilder};
 use crate::engine::{EngineError, SoundEngine, DEFAULT_MODULE_POOL_CAPACITY};
+use crate::midi::{AudioClock, EventQueueConsumer};
 
 /// Default cable buffer pool capacity.
 ///
@@ -215,16 +217,35 @@ impl PatchEngine {
     /// [`ExecutionPlan`] from `graph`, and starts the audio thread.
     ///
     /// Subsequent calls are no-ops if the engine is already running.
-    pub fn start(&mut self, graph: &ModuleGraph) -> Result<(), PatchEngineError> {
+    pub fn start(
+        &mut self,
+        graph: &ModuleGraph,
+        event_queue: Option<EventQueueConsumer>,
+    ) -> Result<(), PatchEngineError> {
         if self.env.is_some() {
             return Ok(()); // already started
         }
 
         let env = self.engine.open().map_err(PatchEngineError::Engine)?;
         let plan = self.planner.build(graph, &self.registry, &env)?;
-        self.engine.start(plan).map_err(PatchEngineError::Engine)?;
+        self.engine.start(plan, event_queue).map_err(PatchEngineError::Engine)?;
         self.env = Some(env);
         Ok(())
+    }
+
+    /// Return the sample rate established when the engine was opened.
+    ///
+    /// `None` if [`start`](Self::start) has not yet been called.
+    pub fn sample_rate(&self) -> Option<f64> {
+        self.env.as_ref().map(|e| e.sample_rate)
+    }
+
+    /// Return a clone of the shared [`AudioClock`].
+    ///
+    /// Pass this to [`MidiConnector::open`](crate::MidiConnector::open) so
+    /// that the MIDI callback can compute sample-accurate event positions.
+    pub fn clock(&self) -> Arc<AudioClock> {
+        self.engine.clock()
     }
 
     /// Apply an updated graph.

@@ -374,7 +374,7 @@ fn mismatch(node: &str, param: &str, expected: &'static str) -> GraphYamlError {
 mod tests {
     use super::*;
     use crate::{
-        AudioEnvironment, InstanceId, ModuleDescriptor, ParameterDescriptor, PortDescriptor,
+        AudioEnvironment, CableKind, InstanceId, ModuleDescriptor, ParameterDescriptor, PortDescriptor,
     };
     use crate::modules::Module;
 
@@ -391,7 +391,7 @@ mod tests {
                 module_name: "SineOsc",
                 shape: shape.clone(),
                 inputs: vec![],
-                outputs: vec![PortDescriptor { name: "out", index: 0 }],
+                outputs: vec![PortDescriptor { name: "out", index: 0, kind: CableKind::Mono }],
                 parameters: vec![ParameterDescriptor {
                     name: "frequency",
                     index: 0,
@@ -426,8 +426,8 @@ mod tests {
             ModuleDescriptor {
                 module_name: "Gain",
                 shape: shape.clone(),
-                inputs: vec![PortDescriptor { name: "in", index: 0 }],
-                outputs: vec![PortDescriptor { name: "out", index: 0 }],
+                inputs: vec![PortDescriptor { name: "in", index: 0, kind: CableKind::Mono }],
+                outputs: vec![PortDescriptor { name: "out", index: 0, kind: CableKind::Mono }],
                 parameters: vec![ParameterDescriptor {
                     name: "gain",
                     index: 0,
@@ -460,10 +460,10 @@ mod tests {
                 module_name: "Mix",
                 shape: shape.clone(),
                 inputs: vec![
-                    PortDescriptor { name: "in", index: 0 },
-                    PortDescriptor { name: "in", index: 1 },
+                    PortDescriptor { name: "in", index: 0, kind: CableKind::Mono },
+                    PortDescriptor { name: "in", index: 1, kind: CableKind::Mono },
                 ],
-                outputs: vec![PortDescriptor { name: "out", index: 0 }],
+                outputs: vec![PortDescriptor { name: "out", index: 0, kind: CableKind::Mono }],
                 parameters: vec![],
                 is_sink: false,
             }

@@ -325,7 +325,7 @@ mod tests {
                 module_name: "Counter",
                 shape: shape.clone(),
                 inputs: vec![],
-                outputs: vec![PortDescriptor { name: "out", index: 0 }],
+                outputs: vec![PortDescriptor { name: "out", index: 0, kind: CableKind::Mono }],
                 parameters: vec![],
                 is_sink: false,
             }
@@ -483,7 +483,7 @@ mod tests {
                 module_name: "MidiReceiver",
                 shape: shape.clone(),
                 inputs: vec![],
-                outputs: vec![PortDescriptor { name: "out", index: 0 }],
+                outputs: vec![PortDescriptor { name: "out", index: 0, kind: CableKind::Mono }],
                 parameters: vec![],
                 is_sink: false,
             }

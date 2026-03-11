@@ -30,8 +30,8 @@ impl Module for Probe {
         ModuleDescriptor {
             module_name: "Probe",
             shape: ModuleShape { channels: 0, length: 0 },
-            inputs: vec![PortDescriptor { name: "in", index: 0 }],
-            outputs: vec![PortDescriptor { name: "out", index: 0 }],
+            inputs: vec![PortDescriptor { name: "in", index: 0, kind: CableKind::Mono }],
+            outputs: vec![PortDescriptor { name: "out", index: 0, kind: CableKind::Mono }],
             parameters: vec![],
             is_sink: false,
         }

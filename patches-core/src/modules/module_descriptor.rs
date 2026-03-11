@@ -5,10 +5,15 @@
 /// of a given name, `index` is `0`. The position of a `PortDescriptor` in
 /// `ModuleDescriptor::inputs` / `outputs` determines the slice offset passed to
 /// `Module::process`; `index` is semantically distinct from that position.
+///
+/// `kind` declares whether the port carries a mono or poly signal. Port arity
+/// is fixed at module-definition time and used by [`ModuleGraph::connect`] to
+/// reject kind-mismatched connections at graph-construction time.
 #[derive(Debug, Clone)]
 pub struct PortDescriptor {
     pub name: &'static str,
     pub index: u32,
+    pub kind: crate::cables::CableKind,
 }
 
 /// A reference to a named, indexed port used in `ModuleGraph::connect()`.
@@ -113,6 +118,7 @@ pub struct ModuleDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cables::CableKind;
 
     #[test]
     fn build_a_module_descriptor() {
@@ -124,16 +130,16 @@ mod tests {
             module_name: "Mixer",
             shape: ModuleShape { channels: 2, length: 0 },
             inputs: vec![
-                PortDescriptor { name: "in", index: 0 },
-                PortDescriptor { name: "in", index: 1 },
-                PortDescriptor { name: "gain_mod", index: 0 },
-                PortDescriptor { name: "gain_mod", index: 1 },
-                PortDescriptor { name: "pan_mod", index: 0 },
-                PortDescriptor { name: "pan_mod", index: 1 },
+                PortDescriptor { name: "in", index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "in", index: 1, kind: CableKind::Mono },
+                PortDescriptor { name: "gain_mod", index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "gain_mod", index: 1, kind: CableKind::Mono },
+                PortDescriptor { name: "pan_mod", index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "pan_mod", index: 1, kind: CableKind::Mono },
             ],
             outputs: vec![
-                PortDescriptor { name: "out_l", index: 0 },
-                PortDescriptor { name: "out_r", index: 0 },
+                PortDescriptor { name: "out_l", index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "out_r", index: 0, kind: CableKind::Mono },
             ],
             parameters: vec![
                 ParameterDescriptor { name: "gain", index: 0, parameter_type: gain_amount.clone() },

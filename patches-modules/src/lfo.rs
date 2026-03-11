@@ -3,6 +3,7 @@ use patches_core::{
     ModuleShape, ParameterDescriptor, ParameterKind, PortDescriptor,
     PortConnectivity,
 };
+use patches_core::CableKind;
 use patches_core::parameter_map::{ParameterMap, ParameterValue};
 use crate::common::approximate::lookup_sine;
 
@@ -64,16 +65,16 @@ impl Module for Lfo {
             module_name: "Lfo",
             shape: shape.clone(),
             inputs: vec![
-                PortDescriptor { name: "sync",    index: 0 },
-                PortDescriptor { name: "rate_cv", index: 0 },
+                PortDescriptor { name: "sync",    index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "rate_cv", index: 0, kind: CableKind::Mono },
             ],
             outputs: vec![
-                PortDescriptor { name: "sine",     index: 0 },
-                PortDescriptor { name: "triangle", index: 0 },
-                PortDescriptor { name: "saw_up",   index: 0 },
-                PortDescriptor { name: "saw_down", index: 0 },
-                PortDescriptor { name: "square",   index: 0 },
-                PortDescriptor { name: "random",   index: 0 },
+                PortDescriptor { name: "sine",     index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "triangle", index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "saw_up",   index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "saw_down", index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "square",   index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "random",   index: 0, kind: CableKind::Mono },
             ],
             parameters: vec![
                 ParameterDescriptor {

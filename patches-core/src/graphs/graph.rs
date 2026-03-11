@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use crate::cables::CableKind;
 use crate::modules::{ModuleDescriptor, ParameterMap, PortRef};
 
 /// Stable identifier for a module node in the graph.
@@ -48,6 +49,9 @@ pub enum GraphError {
     InputAlreadyConnected { node: NodeId, port: String },
     /// `scale` must be finite and in `[-1.0, 1.0]`.
     ScaleOutOfRange(f64),
+    /// The source output port and the destination input port have different
+    /// `CableKind`s (e.g. mono output wired to poly input).
+    CableKindMismatch { from_port: String, to_port: String },
 }
 
 impl fmt::Display for GraphError {
@@ -70,6 +74,12 @@ impl fmt::Display for GraphError {
             }
             GraphError::ScaleOutOfRange(s) => {
                 write!(f, "scale {s} is out of range; must be finite and in [-1.0, 1.0]")
+            }
+            GraphError::CableKindMismatch { from_port, to_port } => {
+                write!(
+                    f,
+                    "cable kind mismatch: output port {from_port:?} and input port {to_port:?} have different arities"
+                )
             }
         }
     }
@@ -168,42 +178,52 @@ impl ModuleGraph {
             return Err(GraphError::ScaleOutOfRange(scale));
         }
 
-        // Validate source node and output port.
-        {
+        // Validate source node and output port; capture its CableKind.
+        let output_kind = {
             let from_node = self
                 .nodes
                 .get(from)
                 .ok_or_else(|| GraphError::NodeNotFound(from.clone()))?;
-            if !from_node
+            from_node
                 .module_descriptor
                 .outputs
                 .iter()
-                .any(|p| p.name == output.name && p.index == output.index)
-            {
-                return Err(GraphError::OutputPortNotFound {
+                .find(|p| p.name == output.name && p.index == output.index)
+                .map(|p| p.kind.clone())
+                .ok_or_else(|| GraphError::OutputPortNotFound {
                     node: from.clone(),
                     port: format!("{}/{}", output.name, output.index),
-                });
-            }
-        }
+                })?
+        };
 
-        // Validate destination node and input port.
-        {
+        // Validate destination node and input port; capture its CableKind.
+        let input_kind = {
             let to_node = self
                 .nodes
                 .get(to)
                 .ok_or_else(|| GraphError::NodeNotFound(to.clone()))?;
-            if !to_node
+            to_node
                 .module_descriptor
                 .inputs
                 .iter()
-                .any(|p| p.name == input.name && p.index == input.index)
-            {
-                return Err(GraphError::InputPortNotFound {
+                .find(|p| p.name == input.name && p.index == input.index)
+                .map(|p| p.kind.clone())
+                .ok_or_else(|| GraphError::InputPortNotFound {
                     node: to.clone(),
                     port: format!("{}/{}", input.name, input.index),
-                });
-            }
+                })?
+        };
+
+        // Reject connections that cross cable arities.
+        let kinds_match = matches!(
+            (&output_kind, &input_kind),
+            (CableKind::Mono, CableKind::Mono) | (CableKind::Poly, CableKind::Poly)
+        );
+        if !kinds_match {
+            return Err(GraphError::CableKindMismatch {
+                from_port: format!("{}/{}", output.name, output.index),
+                to_port: format!("{}/{}", input.name, input.index),
+            });
         }
 
         // Enforce one driver per input — O(1) via the edge index.
@@ -307,11 +327,28 @@ mod tests {
             shape: ModuleShape { channels: 0, length: 0 },
             inputs: inputs
                 .iter()
-                .map(|&n| PortDescriptor { name: n, index: 0 })
+                .map(|&n| PortDescriptor { name: n, index: 0, kind: CableKind::Mono })
                 .collect(),
             outputs: outputs
                 .iter()
-                .map(|&n| PortDescriptor { name: n, index: 0 })
+                .map(|&n| PortDescriptor { name: n, index: 0, kind: CableKind::Mono })
+                .collect(),
+            parameters: vec![],
+            is_sink: false,
+        }
+    }
+
+    fn stub_desc_poly(inputs: &[&'static str], outputs: &[&'static str]) -> ModuleDescriptor {
+        ModuleDescriptor {
+            module_name: "stub_poly",
+            shape: ModuleShape { channels: 0, length: 0 },
+            inputs: inputs
+                .iter()
+                .map(|&n| PortDescriptor { name: n, index: 0, kind: CableKind::Poly })
+                .collect(),
+            outputs: outputs
+                .iter()
+                .map(|&n| PortDescriptor { name: n, index: 0, kind: CableKind::Poly })
                 .collect(),
             parameters: vec![],
             is_sink: false,
@@ -532,8 +569,8 @@ mod tests {
             module_name: "stub",
             shape: ModuleShape { channels: 0, length: 0 },
             inputs: vec![
-                PortDescriptor { name: "in", index: 0 },
-                PortDescriptor { name: "in", index: 1 },
+                PortDescriptor { name: "in", index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "in", index: 1, kind: CableKind::Mono },
             ],
             outputs: vec![],
             parameters: vec![],
@@ -555,5 +592,51 @@ mod tests {
         assert!(g
             .connect(&src2, pref("out"), &dst, PortRef { name: "in", index: 1 }, 1.0)
             .is_ok());
+    }
+
+    #[test]
+    fn connect_mono_to_mono_succeeds() {
+        let mut g = ModuleGraph::new();
+        let src = NodeId::from("src");
+        let dst = NodeId::from("dst");
+        g.add_module(src.clone(), stub_desc(&[], &["out"]), &no_params()).unwrap();
+        g.add_module(dst.clone(), stub_desc(&["in"], &[]), &no_params()).unwrap();
+        assert!(g.connect(&src, pref("out"), &dst, pref("in"), 1.0).is_ok());
+    }
+
+    #[test]
+    fn connect_poly_to_poly_succeeds() {
+        let mut g = ModuleGraph::new();
+        let src = NodeId::from("src");
+        let dst = NodeId::from("dst");
+        g.add_module(src.clone(), stub_desc_poly(&[], &["out"]), &no_params()).unwrap();
+        g.add_module(dst.clone(), stub_desc_poly(&["in"], &[]), &no_params()).unwrap();
+        assert!(g.connect(&src, pref("out"), &dst, pref("in"), 1.0).is_ok());
+    }
+
+    #[test]
+    fn connect_mono_output_to_poly_input_returns_kind_mismatch() {
+        let mut g = ModuleGraph::new();
+        let src = NodeId::from("src");
+        let dst = NodeId::from("dst");
+        g.add_module(src.clone(), stub_desc(&[], &["out"]), &no_params()).unwrap();
+        g.add_module(dst.clone(), stub_desc_poly(&["in"], &[]), &no_params()).unwrap();
+        assert!(matches!(
+            g.connect(&src, pref("out"), &dst, pref("in"), 1.0),
+            Err(GraphError::CableKindMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn connect_poly_output_to_mono_input_returns_kind_mismatch() {
+        let mut g = ModuleGraph::new();
+        let src = NodeId::from("src");
+        let dst = NodeId::from("dst");
+        g.add_module(src.clone(), stub_desc_poly(&[], &["out"]), &no_params()).unwrap();
+        g.add_module(dst.clone(), stub_desc(&["in"], &[]), &no_params()).unwrap();
+        assert!(matches!(
+            g.connect(&src, pref("out"), &dst, pref("in"), 1.0),
+            Err(GraphError::CableKindMismatch { .. })
+        ));
     }
 }

@@ -3,6 +3,7 @@ use patches_core::{
     ModuleShape, ParameterDescriptor, ParameterKind, PortDescriptor,
     PortConnectivity,
 };
+use patches_core::CableKind;
 use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
 /// Offsets a V/OCT pitch signal by a fixed interval expressed as octaves,
@@ -34,10 +35,10 @@ impl Module for Tuner {
             module_name: "Tuner",
             shape: shape.clone(),
             inputs: vec![
-                PortDescriptor { name: "in", index: 0 },
+                PortDescriptor { name: "in", index: 0, kind: CableKind::Mono },
             ],
             outputs: vec![
-                PortDescriptor { name: "out", index: 0 },
+                PortDescriptor { name: "out", index: 0, kind: CableKind::Mono },
             ],
             parameters: vec![
                 ParameterDescriptor {

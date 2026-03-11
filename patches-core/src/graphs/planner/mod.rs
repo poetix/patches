@@ -243,6 +243,7 @@ fn compute_order(node_ids: &[NodeId], sink: &NodeId) -> Result<(Vec<NodeId>, usi
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cables::CableKind;
     use crate::modules::{InstanceId, ModuleDescriptor, ParameterValue, PortDescriptor, PortRef};
     use crate::ModuleGraph;
 
@@ -255,7 +256,7 @@ mod tests {
             module_name: "Oscillator",
             shape: ModuleShape { channels: 0, length: 0 },
             inputs: vec![],
-            outputs: vec![PortDescriptor { name: "sine", index: 0 }],
+            outputs: vec![PortDescriptor { name: "sine", index: 0, kind: CableKind::Mono }],
             parameters: vec![],
             is_sink: false,
         }
@@ -266,8 +267,8 @@ mod tests {
             module_name: "AudioOut",
             shape: ModuleShape { channels: 0, length: 0 },
             inputs: vec![
-                PortDescriptor { name: "left", index: 0 },
-                PortDescriptor { name: "right", index: 0 },
+                PortDescriptor { name: "left", index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "right", index: 0, kind: CableKind::Mono },
             ],
             outputs: vec![],
             parameters: vec![],
@@ -279,8 +280,8 @@ mod tests {
         ModuleDescriptor {
             module_name,
             shape,
-            inputs: (0..in_count as u32).map(|i| PortDescriptor { name: "in", index: i }).collect(),
-            outputs: vec![PortDescriptor { name: "out", index: 0 }],
+            inputs: (0..in_count as u32).map(|i| PortDescriptor { name: "in", index: i, kind: CableKind::Mono }).collect(),
+            outputs: vec![PortDescriptor { name: "out", index: 0, kind: CableKind::Mono }],
             parameters: vec![],
             is_sink: false,
         }

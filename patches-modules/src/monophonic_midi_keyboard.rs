@@ -2,6 +2,7 @@ use patches_core::{
     AudioEnvironment, InstanceId, MidiEvent, Module, ModuleDescriptor, ModuleShape,
     PortDescriptor, ReceivesMidi,
 };
+use patches_core::CableKind;
 use patches_core::parameter_map::ParameterMap;
 
 /// Semitones per octave, used to convert MIDI note numbers to V/oct.
@@ -100,11 +101,11 @@ impl Module for MonophonicMidiKeyboard {
             shape: shape.clone(),
             inputs: vec![],
             outputs: vec![
-                PortDescriptor { name: "v_oct",   index: 0 },
-                PortDescriptor { name: "trigger", index: 0 },
-                PortDescriptor { name: "gate",    index: 0 },
-                PortDescriptor { name: "mod",     index: 0 },
-                PortDescriptor { name: "pitch",   index: 0 },
+                PortDescriptor { name: "v_oct",   index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "trigger", index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "gate",    index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "mod",     index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "pitch",   index: 0, kind: CableKind::Mono },
             ],
             parameters: vec![],
             is_sink: false,

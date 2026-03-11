@@ -3,6 +3,7 @@ use patches_core::{
     ModuleShape, ParameterDescriptor, ParameterKind, PortDescriptor,
     PortConnectivity
 };
+use patches_core::CableKind;
 use patches_core::parameter_map::{ParameterMap, ParameterValue};
 use crate::common::approximate::lookup_sine;
 use crate::common::frequency::{C0_FREQ, UnitPhaseAccumulator, FMMode};
@@ -49,16 +50,16 @@ impl Module for Oscillator {
             module_name: "Oscillator",
             shape: shape.clone(),
             inputs: vec![
-                PortDescriptor { name: "voct",        index: 0 },
-                PortDescriptor { name: "fm",          index: 0 },
-                PortDescriptor { name: "pulse_width", index: 0 },
-                PortDescriptor { name: "phase_mod",   index: 0 },
+                PortDescriptor { name: "voct",        index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "fm",          index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "pulse_width", index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "phase_mod",   index: 0, kind: CableKind::Mono },
             ],
             outputs: vec![
-                PortDescriptor { name: "sine",     index: 0 },
-                PortDescriptor { name: "triangle", index: 0 },
-                PortDescriptor { name: "sawtooth", index: 0 },
-                PortDescriptor { name: "square",   index: 0 },
+                PortDescriptor { name: "sine",     index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "triangle", index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "sawtooth", index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "square",   index: 0, kind: CableKind::Mono },
             ],
             parameters: vec![
                 ParameterDescriptor {

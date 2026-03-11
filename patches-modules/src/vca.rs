@@ -1,4 +1,4 @@
-use patches_core::{AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleShape, PortDescriptor};
+use patches_core::{AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleShape, CableKind, PortDescriptor};
 use patches_core::parameter_map::ParameterMap;
 
 /// Voltage-controlled amplifier. Multiplies a signal by a control voltage.
@@ -19,10 +19,10 @@ impl Module for Vca {
             module_name: "Vca",
             shape: shape.clone(),
             inputs: vec![
-                PortDescriptor { name: "in", index: 0 },
-                PortDescriptor { name: "cv", index: 0 },
+                PortDescriptor { name: "in", index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "cv", index: 0, kind: CableKind::Mono },
             ],
-            outputs: vec![PortDescriptor { name: "out", index: 0 }],
+            outputs: vec![PortDescriptor { name: "out", index: 0, kind: CableKind::Mono }],
             parameters: vec![],
             is_sink: false,
         }

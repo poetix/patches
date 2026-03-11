@@ -182,7 +182,7 @@ mod tests {
                     module_name: "ConstSource",
                     shape: ModuleShape { channels: 0, length: 0 },
                     inputs: vec![],
-                    outputs: vec![PortDescriptor { name: "out", index: 0 }],
+                    outputs: vec![PortDescriptor { name: "out", index: 0, kind: CableKind::Mono }],
                     parameters: vec![],
                     is_sink: false,
                 },
@@ -196,7 +196,7 @@ mod tests {
                 module_name: "ConstSource",
                 shape: ModuleShape { channels: 0, length: 0 },
                 inputs: vec![],
-                outputs: vec![PortDescriptor { name: "out", index: 0 }],
+                outputs: vec![PortDescriptor { name: "out", index: 0, kind: CableKind::Mono }],
                 parameters: vec![],
                 is_sink: false,
             }
@@ -236,7 +236,7 @@ mod tests {
                 desc: ModuleDescriptor {
                     module_name: "RecordingSink",
                     shape: ModuleShape { channels: 0, length: 0 },
-                    inputs: vec![PortDescriptor { name: "in", index: 0 }],
+                    inputs: vec![PortDescriptor { name: "in", index: 0, kind: CableKind::Mono }],
                     outputs: vec![],
                     parameters: vec![],
                     is_sink: true,
@@ -250,7 +250,7 @@ mod tests {
             ModuleDescriptor {
                 module_name: "RecordingSink",
                 shape: ModuleShape { channels: 0, length: 0 },
-                inputs: vec![PortDescriptor { name: "in", index: 0 }],
+                inputs: vec![PortDescriptor { name: "in", index: 0, kind: CableKind::Mono }],
                 outputs: vec![],
                 parameters: vec![],
                 is_sink: true,

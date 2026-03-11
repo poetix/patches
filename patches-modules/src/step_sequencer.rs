@@ -2,6 +2,7 @@ use patches_core::{
     AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleShape,
     ParameterDescriptor, ParameterKind, PortDescriptor,
 };
+use patches_core::CableKind;
 use patches_core::build_error::BuildError;
 use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
@@ -140,15 +141,15 @@ impl Module for StepSequencer {
             module_name: "StepSequencer",
             shape: shape.clone(),
             inputs: vec![
-                PortDescriptor { name: "clock", index: 0 },
-                PortDescriptor { name: "start", index: 0 },
-                PortDescriptor { name: "stop",  index: 0 },
-                PortDescriptor { name: "reset", index: 0 },
+                PortDescriptor { name: "clock", index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "start", index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "stop",  index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "reset", index: 0, kind: CableKind::Mono },
             ],
             outputs: vec![
-                PortDescriptor { name: "pitch",   index: 0 },
-                PortDescriptor { name: "trigger", index: 0 },
-                PortDescriptor { name: "gate",    index: 0 },
+                PortDescriptor { name: "pitch",   index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "trigger", index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "gate",    index: 0, kind: CableKind::Mono },
             ],
             parameters: vec![
                 ParameterDescriptor {

@@ -1,4 +1,4 @@
-use patches_core::{AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleShape, PortDescriptor, Sink};
+use patches_core::{AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleShape, CableKind, PortDescriptor, Sink};
 use patches_core::parameter_map::ParameterMap;
 
 /// A passive stereo sink node.
@@ -21,8 +21,8 @@ impl Module for AudioOut {
             module_name: "AudioOut",
             shape: shape.clone(),
             inputs: vec![
-                PortDescriptor { name: "left", index: 0 },
-                PortDescriptor { name: "right", index: 0 },
+                PortDescriptor { name: "left", index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "right", index: 0, kind: CableKind::Mono },
             ],
             outputs: vec![],
             parameters: vec![],

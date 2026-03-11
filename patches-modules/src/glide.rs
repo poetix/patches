@@ -2,6 +2,7 @@ use patches_core::{
     AudioEnvironment, InstanceId, Module, ModuleDescriptor,
     ModuleShape, ParameterDescriptor, ParameterKind, PortDescriptor,
 };
+use patches_core::CableKind;
 use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
 /// A portamento (pitch glide) module.
@@ -45,8 +46,8 @@ impl Module for Glide {
         ModuleDescriptor {
             module_name: "Glide",
             shape: shape.clone(),
-            inputs: vec![PortDescriptor { name: "in", index: 0 }],
-            outputs: vec![PortDescriptor { name: "out", index: 0 }],
+            inputs: vec![PortDescriptor { name: "in", index: 0, kind: CableKind::Mono }],
+            outputs: vec![PortDescriptor { name: "out", index: 0, kind: CableKind::Mono }],
             parameters: vec![ParameterDescriptor {
                 name: "glide_ms",
                 index: 0,

@@ -2,6 +2,7 @@ use patches_core::{
     AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleShape,
     ParameterDescriptor, ParameterKind, PortDescriptor,
 };
+use patches_core::CableKind;
 use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
 /// Generates bar, beat, quaver, and semiquaver trigger pulses from a configurable BPM
@@ -35,10 +36,10 @@ impl Module for ClockSequencer {
             shape: shape.clone(),
             inputs: vec![],
             outputs: vec![
-                PortDescriptor { name: "bar",        index: 0 },
-                PortDescriptor { name: "beat",       index: 0 },
-                PortDescriptor { name: "quaver",     index: 0 },
-                PortDescriptor { name: "semiquaver", index: 0 },
+                PortDescriptor { name: "bar",        index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "beat",       index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "quaver",     index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "semiquaver", index: 0, kind: CableKind::Mono },
             ],
             parameters: vec![
                 ParameterDescriptor {

@@ -2,6 +2,7 @@ use patches_core::{
     AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleShape,
     ParameterDescriptor, ParameterKind, PortDescriptor,
 };
+use patches_core::CableKind;
 use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -47,11 +48,11 @@ impl Module for AdsrEnvelope {
             module_name: "AdsrEnvelope",
             shape: shape.clone(),
             inputs: vec![
-                PortDescriptor { name: "trigger", index: 0 },
-                PortDescriptor { name: "gate",    index: 0 },
+                PortDescriptor { name: "trigger", index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "gate",    index: 0, kind: CableKind::Mono },
             ],
             outputs: vec![
-                PortDescriptor { name: "out", index: 0 },
+                PortDescriptor { name: "out", index: 0, kind: CableKind::Mono },
             ],
             parameters: vec![
                 ParameterDescriptor {

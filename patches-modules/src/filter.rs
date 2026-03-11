@@ -5,6 +5,7 @@ use patches_core::{
     AudioEnvironment, InstanceId, Module, ModuleDescriptor,
     ModuleShape, ParameterDescriptor, ParameterKind, PortConnectivity, PortDescriptor,
 };
+use patches_core::CableKind;
 use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
 /// Number of samples between biquad-coefficient recomputations in the
@@ -149,11 +150,11 @@ impl Module for ResonantLowpass {
             module_name: "ResonantLowpass",
             shape: shape.clone(),
             inputs: vec![
-                PortDescriptor { name: "in", index: 0 },
-                PortDescriptor { name: "cutoff_cv", index: 0 },
-                PortDescriptor { name: "resonance_cv", index: 0 },
+                PortDescriptor { name: "in", index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "cutoff_cv", index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "resonance_cv", index: 0, kind: CableKind::Mono },
             ],
-            outputs: vec![PortDescriptor { name: "out", index: 0 }],
+            outputs: vec![PortDescriptor { name: "out", index: 0, kind: CableKind::Mono }],
             parameters: vec![
                 ParameterDescriptor {
                     name: "cutoff",

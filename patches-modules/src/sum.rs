@@ -1,6 +1,7 @@
 use patches_core::{
     AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleShape, PortDescriptor,
 };
+use patches_core::CableKind;
 use patches_core::parameter_map::ParameterMap;
 
 /// Sums a configurable number of input signals into a single output.
@@ -20,13 +21,13 @@ pub struct Sum {
 impl Module for Sum {
     fn describe(shape: &ModuleShape) -> ModuleDescriptor {
         let inputs = (0..shape.channels)
-            .map(|i| PortDescriptor { name: "in", index: i as u32 })
+            .map(|i| PortDescriptor { name: "in", index: i as u32, kind: CableKind::Mono })
             .collect();
         ModuleDescriptor {
             module_name: "Sum",
             shape: shape.clone(),
             inputs,
-            outputs: vec![PortDescriptor { name: "out", index: 0 }],
+            outputs: vec![PortDescriptor { name: "out", index: 0, kind: CableKind::Mono }],
             parameters: vec![],
             is_sink: false,
         }

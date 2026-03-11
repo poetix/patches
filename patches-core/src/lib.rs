@@ -1,5 +1,6 @@
 pub mod audio_environment;
 pub mod build_error;
+pub mod cables;
 pub mod graph_yaml;
 pub mod graphs;
 pub mod midi;
@@ -11,6 +12,7 @@ pub mod registries;
 
 // ── Public API ────────────────────────────────────────────────────────────────
 pub use audio_environment::AudioEnvironment;
+pub use cables::{CableKind, CableValue, InputPort, MonoInput, MonoOutput, OutputPort, PolyInput, PolyOutput};
 pub use graphs::{GraphError, ModuleGraph, NodeId};
 pub use midi::{MidiEvent, ReceivesMidi};
 pub use modules::{validate_parameters, Module, PortConnectivity, Sink};

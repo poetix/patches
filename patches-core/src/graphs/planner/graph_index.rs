@@ -191,6 +191,7 @@ mod tests {
 
     use super::*;
     use super::super::PlanError;
+    use crate::cables::CableKind;
     use crate::modules::{ModuleDescriptor, ModuleShape, PortDescriptor};
     use crate::parameter_map::ParameterMap;
     use crate::ModuleGraph;
@@ -200,14 +201,14 @@ mod tests {
             module_name: "Src",
             shape: ModuleShape { channels: 0, length: 0 },
             inputs: vec![],
-            outputs: vec![PortDescriptor { name: "out", index: 0 }],
+            outputs: vec![PortDescriptor { name: "out", index: 0, kind: CableKind::Mono }],
             parameters: vec![],
             is_sink: false,
         };
         let dst_desc = ModuleDescriptor {
             module_name: "Dst",
             shape: ModuleShape { channels: 0, length: 0 },
-            inputs: vec![PortDescriptor { name: "in", index: 0 }],
+            inputs: vec![PortDescriptor { name: "in", index: 0, kind: CableKind::Mono }],
             outputs: vec![],
             parameters: vec![],
             is_sink: true,
@@ -225,12 +226,12 @@ mod tests {
             module_name: "Test",
             shape: ModuleShape { channels: 0, length: 0 },
             inputs: vec![
-                PortDescriptor { name: "in", index: 0 },
-                PortDescriptor { name: "in", index: 1 },
+                PortDescriptor { name: "in", index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "in", index: 1, kind: CableKind::Mono },
             ],
             outputs: vec![
-                PortDescriptor { name: "out", index: 0 },
-                PortDescriptor { name: "out", index: 1 },
+                PortDescriptor { name: "out", index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "out", index: 1, kind: CableKind::Mono },
             ],
             parameters: vec![],
             is_sink: false,
@@ -272,8 +273,8 @@ mod tests {
             module_name: "Dst2",
             shape: ModuleShape { channels: 0, length: 0 },
             inputs: vec![
-                PortDescriptor { name: "x", index: 0 },
-                PortDescriptor { name: "y", index: 0 },
+                PortDescriptor { name: "x", index: 0, kind: CableKind::Mono },
+                PortDescriptor { name: "y", index: 0, kind: CableKind::Mono },
             ],
             outputs: vec![],
             parameters: vec![],

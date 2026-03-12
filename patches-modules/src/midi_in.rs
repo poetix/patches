@@ -75,7 +75,7 @@ impl NoteStack {
 /// | 2     | `gate`    | 1.0 while any note is held or sustain (CC 64) is active            |
 /// | 3     | `mod`     | CC 1 (mod wheel) normalised to [0.0, 1.0]                          |
 /// | 4     | `pitch`   | Pitchbend normalised to [-1.0, 1.0]                                 |
-pub struct MonophonicMidiKeyboard {
+pub struct MonoMidiIn {
     instance_id: InstanceId,
     descriptor: ModuleDescriptor,
 
@@ -100,10 +100,10 @@ pub struct MonophonicMidiKeyboard {
     out_pitch: MonoOutput,
 }
 
-impl Module for MonophonicMidiKeyboard {
+impl Module for MonoMidiIn {
     fn describe(shape: &ModuleShape) -> ModuleDescriptor {
         ModuleDescriptor {
-            module_name: "MonophonicMidiKeyboard",
+            module_name: "MidiIn",
             shape: shape.clone(),
             inputs: vec![],
             outputs: vec![
@@ -184,7 +184,7 @@ impl Module for MonophonicMidiKeyboard {
     }
 }
 
-impl ReceivesMidi for MonophonicMidiKeyboard {
+impl ReceivesMidi for MonoMidiIn {
     fn receive_midi(&mut self, event: MidiEvent) {
         let status = event.bytes[0] & 0xF0;
         let b1 = event.bytes[1];
@@ -235,9 +235,9 @@ mod tests {
 
     fn make_keyboard() -> Box<dyn Module> {
         let mut r = Registry::new();
-        r.register::<MonophonicMidiKeyboard>();
+        r.register::<MonoMidiIn>();
         r.create(
-            "MonophonicMidiKeyboard",
+            "MidiIn",
             &AudioEnvironment { sample_rate: 44100.0 },
             &ModuleShape { channels: 0, length: 0 },
             &patches_core::parameter_map::ParameterMap::new(),

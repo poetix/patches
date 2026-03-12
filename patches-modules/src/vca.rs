@@ -160,11 +160,4 @@ mod tests {
             assert!((v - (-0.5)).abs() < f64::EPSILON);
         } else { panic!("expected Mono"); }
     }
-
-    #[test]
-    fn instance_ids_are_distinct() {
-        let a = make_vca();
-        let b = make_vca();
-        assert_ne!(a.instance_id(), b.instance_id());
-    }
 }

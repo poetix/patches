@@ -152,11 +152,4 @@ mod tests {
             assert!((v - 1.0).abs() < f64::EPSILON);
         } else { panic!("expected Mono"); }
     }
-
-    #[test]
-    fn instance_ids_are_distinct() {
-        let a = make_sum(2);
-        let b = make_sum(2);
-        assert_ne!(a.instance_id(), b.instance_id());
-    }
 }

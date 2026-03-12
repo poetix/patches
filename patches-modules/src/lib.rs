@@ -1,10 +1,10 @@
-pub mod adsr_envelope;
+pub mod adsr;
 pub mod audio_out;
-pub mod clock_sequencer;
+pub mod clock;
 pub mod filter;
-pub mod monophonic_midi_keyboard;
+pub mod midi_in;
 pub mod oscillator;
-pub mod step_sequencer;
+pub mod seq;
 pub mod sum;
 pub mod vca;
 pub mod glide;
@@ -12,13 +12,13 @@ pub mod lfo;
 pub mod tuner;
 pub mod common;
 
-pub use adsr_envelope::AdsrEnvelope;
+pub use adsr::Adsr;
 pub use audio_out::AudioOut;
-pub use clock_sequencer::ClockSequencer;
+pub use clock::Clock;
 pub use filter::ResonantLowpass;
-pub use monophonic_midi_keyboard::MonophonicMidiKeyboard;
+pub use midi_in::MonoMidiIn;
 pub use oscillator::Oscillator;
-pub use step_sequencer::StepSequencer;
+pub use seq::Seq;
 pub use sum::Sum;
 pub use vca::Vca;
 pub use glide::Glide;
@@ -31,14 +31,14 @@ pub fn default_registry() -> patches_core::Registry {
     r.register::<Sum>();
     r.register::<Vca>();
     r.register::<AudioOut>();
-    r.register::<AdsrEnvelope>();
-    r.register::<ClockSequencer>();
-    r.register::<StepSequencer>();
+    r.register::<Adsr>();
+    r.register::<Clock>();
+    r.register::<Seq>();
     r.register::<Glide>();
     r.register::<Lfo>();
     r.register::<ResonantLowpass>();
     r.register::<Tuner>();
-    r.register::<MonophonicMidiKeyboard>();
+    r.register::<MonoMidiIn>();
     r
 }
 
@@ -55,18 +55,18 @@ mod tests {
         let params = ParameterMap::new();
 
         for name in &[
-            "Oscillator",
+            "Osc",
             "Sum",
             "Vca",
             "AudioOut",
-            "AdsrEnvelope",
-            "ClockSequencer",
-            "StepSequencer",
+            "Adsr",
+            "Clock",
+            "Seq",
             "Glide",
             "Lfo",
-            "ResonantLowpass",
+            "Filter",
             "Tuner",
-            "MonophonicMidiKeyboard",
+            "MidiIn",
         ] {
             assert!(
                 r.create(name, &env, &shape, &params, InstanceId::next()).is_ok(),

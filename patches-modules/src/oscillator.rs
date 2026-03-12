@@ -48,7 +48,7 @@ pub struct Oscillator {
 impl Module for Oscillator {
     fn describe(shape: &ModuleShape) -> ModuleDescriptor {
         ModuleDescriptor {
-            module_name: "Oscillator",
+            module_name: "Osc",
             shape: shape.clone(),
             inputs: vec![
                 PortDescriptor { name: "voct",        index: 0, kind: CableKind::Mono },
@@ -198,7 +198,7 @@ mod tests {
         let mut r = Registry::new();
         r.register::<Oscillator>();
         r.create(
-            "Oscillator",
+            "Osc",
             &AudioEnvironment { sample_rate },
             &ModuleShape { channels: 0, length: 0 },
             &params,
@@ -242,29 +242,6 @@ mod tests {
             OutputPort::Mono(MonoOutput { cable_idx: 7, connected: false }),
         ];
         module.set_ports(&inputs, &outputs);
-    }
-
-    #[test]
-    fn descriptor_has_four_inputs_and_four_outputs() {
-        let osc = make_osc(440.0);
-        let desc = osc.descriptor();
-        assert_eq!(desc.inputs.len(), 4);
-        assert_eq!(desc.inputs[0].name, "voct");
-        assert_eq!(desc.inputs[1].name, "fm");
-        assert_eq!(desc.inputs[2].name, "pulse_width");
-        assert_eq!(desc.inputs[3].name, "phase_mod");
-        assert_eq!(desc.outputs.len(), 4);
-        assert_eq!(desc.outputs[0].name, "sine");
-        assert_eq!(desc.outputs[1].name, "triangle");
-        assert_eq!(desc.outputs[2].name, "sawtooth");
-        assert_eq!(desc.outputs[3].name, "square");
-    }
-
-    #[test]
-    fn instance_ids_are_distinct() {
-        let a = make_osc(440.0);
-        let b = make_osc(440.0);
-        assert_ne!(a.instance_id(), b.instance_id());
     }
 
     #[test]

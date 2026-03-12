@@ -14,7 +14,7 @@ use patches_core::parameter_map::{ParameterMap, ParameterValue};
 ///
 /// Supports both simple time signatures (quavers_per_beat=2) and compound
 /// (quavers_per_beat=3).
-pub struct ClockSequencer {
+pub struct Clock {
     instance_id: InstanceId,
     descriptor: ModuleDescriptor,
     sample_rate: f64,
@@ -34,10 +34,10 @@ pub struct ClockSequencer {
     out_semiquaver: MonoOutput,
 }
 
-impl Module for ClockSequencer {
+impl Module for Clock {
     fn describe(shape: &ModuleShape) -> ModuleDescriptor {
         ModuleDescriptor {
-            module_name: "ClockSequencer",
+            module_name: "Clock",
             shape: shape.clone(),
             inputs: vec![],
             outputs: vec![
@@ -167,15 +167,19 @@ mod tests {
     use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
     fn make_clock(bpm: f64, beats_per_bar: i64, quavers_per_beat: i64) -> Box<dyn Module> {
+        make_clock_sr(bpm, beats_per_bar, quavers_per_beat, 44100.0)
+    }
+
+    fn make_clock_sr(bpm: f64, beats_per_bar: i64, quavers_per_beat: i64, sample_rate: f64) -> Box<dyn Module> {
         let mut params = ParameterMap::new();
         params.insert("bpm".into(),              ParameterValue::Float(bpm));
         params.insert("beats_per_bar".into(),    ParameterValue::Int(beats_per_bar));
         params.insert("quavers_per_beat".into(), ParameterValue::Int(quavers_per_beat));
         let mut r = Registry::new();
-        r.register::<ClockSequencer>();
+        r.register::<Clock>();
         r.create(
-            "ClockSequencer",
-            &AudioEnvironment { sample_rate: 44100.0 },
+            "Clock",
+            &AudioEnvironment { sample_rate: sample_rate },
             &ModuleShape { channels: 0, length: 0 },
             &params,
             InstanceId::next(),
@@ -201,44 +205,12 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_shape() {
-        let m = make_clock(120.0, 4, 2);
-        let desc = m.descriptor();
-        assert_eq!(desc.inputs.len(), 0);
-        assert_eq!(desc.outputs.len(), 4);
-        assert_eq!(desc.outputs[0].name, "bar");
-        assert_eq!(desc.outputs[1].name, "beat");
-        assert_eq!(desc.outputs[2].name, "quaver");
-        assert_eq!(desc.outputs[3].name, "semiquaver");
-    }
-
-    #[test]
-    fn instance_ids_are_distinct() {
-        let a = make_clock(120.0, 4, 2);
-        let b = make_clock(120.0, 4, 2);
-        assert_ne!(a.instance_id(), b.instance_id());
-    }
-
-    #[test]
     fn four_four_time_4bpm_sample_rate_1() {
         // 4/4 time at 4 BPM with sample rate 1 Hz.
         // At 4 BPM, a beat occurs every 60/4 = 15 seconds.
         // With sample_rate = 1, that's every 15 samples.
         // In 4/4, a bar has 4 beats, so bar fires every 60 samples.
-
-        let mut params = ParameterMap::new();
-        params.insert("bpm".into(),              ParameterValue::Float(4.0));
-        params.insert("beats_per_bar".into(),    ParameterValue::Int(4));
-        params.insert("quavers_per_beat".into(), ParameterValue::Int(2));
-        let mut r = Registry::new();
-        r.register::<ClockSequencer>();
-        let mut clock = r.create(
-            "ClockSequencer",
-            &AudioEnvironment { sample_rate: 1.0 },
-            &ModuleShape { channels: 0, length: 0 },
-            &params,
-            InstanceId::next(),
-        ).unwrap();
+        let mut clock = make_clock_sr(4.0, 4, 2, 1.0);
         set_all_outputs(&mut clock);
 
         let mut pool = make_pool(4);

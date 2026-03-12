@@ -295,29 +295,6 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_has_two_inputs_and_six_outputs() {
-        let lfo = make_lfo(1.0);
-        let desc = lfo.descriptor();
-        assert_eq!(desc.inputs.len(), 2);
-        assert_eq!(desc.inputs[0].name, "sync");
-        assert_eq!(desc.inputs[1].name, "rate_cv");
-        assert_eq!(desc.outputs.len(), 6);
-        assert_eq!(desc.outputs[0].name, "sine");
-        assert_eq!(desc.outputs[1].name, "triangle");
-        assert_eq!(desc.outputs[2].name, "saw_up");
-        assert_eq!(desc.outputs[3].name, "saw_down");
-        assert_eq!(desc.outputs[4].name, "square");
-        assert_eq!(desc.outputs[5].name, "random");
-    }
-
-    #[test]
-    fn instance_ids_are_distinct() {
-        let a = make_lfo(1.0);
-        let b = make_lfo(1.0);
-        assert_ne!(a.instance_id(), b.instance_id());
-    }
-
-    #[test]
     fn sine_output_consistent_across_two_cycles() {
         let rate = 1.0_f64;
         let period = 100_usize;

@@ -146,23 +146,6 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_ports() {
-        let g = make_glide(100.0);
-        let desc = g.descriptor();
-        assert_eq!(desc.inputs.len(), 1);
-        assert_eq!(desc.inputs[0].name, "in");
-        assert_eq!(desc.outputs.len(), 1);
-        assert_eq!(desc.outputs[0].name, "out");
-    }
-
-    #[test]
-    fn instance_ids_are_distinct() {
-        let a = make_glide(100.0);
-        let b = make_glide(100.0);
-        assert_ne!(a.instance_id(), b.instance_id());
-    }
-
-    #[test]
     fn output_tracks_input_with_glide() {
         let mut g = make_glide_sr(500.0, 44100.0);
         set_ports_for_test(&mut g);

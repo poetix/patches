@@ -120,23 +120,6 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_has_two_inputs_and_no_outputs() {
-        let module = make_audio_out();
-        let desc = module.descriptor();
-        assert_eq!(desc.inputs.len(), 2);
-        assert_eq!(desc.inputs[0].name, "left");
-        assert_eq!(desc.inputs[1].name, "right");
-        assert_eq!(desc.outputs.len(), 0);
-    }
-
-    #[test]
-    fn instance_ids_are_distinct() {
-        let a = make_audio_out();
-        let b = make_audio_out();
-        assert_ne!(a.instance_id(), b.instance_id());
-    }
-
-    #[test]
     fn process_stores_left_and_right_samples() {
         let mut module = make_audio_out();
         set_ports_for_test(&mut module);

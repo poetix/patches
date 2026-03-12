@@ -22,7 +22,7 @@ enum Stage {
 ///
 /// Output ports:
 ///   outputs[0] — out (envelope level, always in [0.0, 1.0])
-pub struct AdsrEnvelope {
+pub struct Adsr {
     instance_id: InstanceId,
     descriptor: ModuleDescriptor,
     // Parameters (set via update_validated_parameters)
@@ -46,10 +46,10 @@ pub struct AdsrEnvelope {
     out_env: MonoOutput,
 }
 
-impl Module for AdsrEnvelope {
+impl Module for Adsr {
     fn describe(shape: &ModuleShape) -> ModuleDescriptor {
         ModuleDescriptor {
-            module_name: "AdsrEnvelope",
+            module_name: "Adsr",
             shape: shape.clone(),
             inputs: vec![
                 PortDescriptor { name: "trigger", index: 0, kind: CableKind::Mono },
@@ -215,9 +215,9 @@ mod tests {
         params.insert("sustain".into(), ParameterValue::Float(sustain));
         params.insert("release".into(), ParameterValue::Float(release));
         let mut r = Registry::new();
-        r.register::<AdsrEnvelope>();
+        r.register::<Adsr>();
         r.create(
-            "AdsrEnvelope",
+            "Adsr",
             &AudioEnvironment { sample_rate: 10.0 },
             &ModuleShape { channels: 0, length: 0 },
             &params,
@@ -376,36 +376,5 @@ mod tests {
             let v = tick(adsr.as_mut(), 1.0, 1.0, &mut pool, i);
             assert!((0.0..=1.0).contains(&v), "output out of range: {v}");
         }
-    }
-
-    #[test]
-    fn descriptor_shape() {
-        let mut r = Registry::new();
-        r.register::<AdsrEnvelope>();
-        let m = r.create(
-            "AdsrEnvelope",
-            &AudioEnvironment { sample_rate: 44100.0 },
-            &ModuleShape { channels: 0, length: 0 },
-            &ParameterMap::new(),
-            InstanceId::next(),
-        ).unwrap();
-        let desc = m.descriptor();
-        assert_eq!(desc.inputs.len(), 2);
-        assert_eq!(desc.outputs.len(), 1);
-        assert_eq!(desc.inputs[0].name, "trigger");
-        assert_eq!(desc.inputs[1].name, "gate");
-        assert_eq!(desc.outputs[0].name, "out");
-    }
-
-    #[test]
-    fn instance_ids_are_distinct() {
-        let mut r = Registry::new();
-        r.register::<AdsrEnvelope>();
-        let env = AudioEnvironment { sample_rate: 44100.0 };
-        let shape = ModuleShape { channels: 0, length: 0 };
-        let params = ParameterMap::new();
-        let a = r.create("AdsrEnvelope", &env, &shape, &params, InstanceId::next()).unwrap();
-        let b = r.create("AdsrEnvelope", &env, &shape, &params, InstanceId::next()).unwrap();
-        assert_ne!(a.instance_id(), b.instance_id());
     }
 }

@@ -1,11 +1,8 @@
-use std::f64::consts::TAU;
-
 use patches_core::{AudioEnvironment, CableValue, Module, ModuleGraph, ModuleShape, NodeId, PortRef};
 use patches_core::parameter_map::{ParameterMap, ParameterValue};
 use patches_core::PlannerState;
 use patches_engine::{build_patch, ExecutionPlan, ModulePool};
-use patches_modules::{AudioOut, Oscillator, StepSequencer, Sum};
-use patches_modules::common::frequency::C0_FREQ;
+use patches_modules::{AudioOut, Oscillator, Seq, Sum};
 
 // ── constants ─────────────────────────────────────────────────────────────────
 
@@ -376,7 +373,7 @@ fn shape_change_forces_re_instantiation() {
     let mut graph_a = patches_core::ModuleGraph::new();
     graph_a.add_module(
         "seq",
-        StepSequencer::describe(&ModuleShape { channels: 0, length: 4 }),
+        Seq::describe(&ModuleShape { channels: 0, length: 4 }),
         &seq_params_a,
     ).unwrap();
     graph_a.add_module(
@@ -420,7 +417,7 @@ fn shape_change_forces_re_instantiation() {
     let mut graph_b = patches_core::ModuleGraph::new();
     graph_b.add_module(
         "seq",
-        StepSequencer::describe(&ModuleShape { channels: 0, length: 8 }),
+        Seq::describe(&ModuleShape { channels: 0, length: 8 }),
         &seq_params_b,
     ).unwrap();
     graph_b.add_module(

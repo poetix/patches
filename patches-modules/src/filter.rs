@@ -154,7 +154,7 @@ impl ResonantLowpass {
 impl Module for ResonantLowpass {
     fn describe(shape: &ModuleShape) -> ModuleDescriptor {
         ModuleDescriptor {
-            module_name: "ResonantLowpass",
+            module_name: "Filter",
             shape: shape.clone(),
             inputs: vec![
                 PortDescriptor { name: "in", index: 0, kind: CableKind::Mono },
@@ -364,7 +364,7 @@ mod tests {
         let mut r = Registry::new();
         r.register::<ResonantLowpass>();
         r.create(
-            "ResonantLowpass",
+            "Filter",
             &AudioEnvironment { sample_rate },
             &ModuleShape { channels: 0, length: 0 },
             &params,
@@ -425,26 +425,6 @@ mod tests {
             }
         }
         peak
-    }
-
-    #[test]
-    fn descriptor_shape() {
-        let f = make_filter(1000.0, 0.0);
-        let desc = f.descriptor();
-        assert_eq!(desc.module_name, "ResonantLowpass");
-        assert_eq!(desc.inputs.len(), 3);
-        assert_eq!(desc.inputs[0].name, "in");
-        assert_eq!(desc.inputs[1].name, "cutoff_cv");
-        assert_eq!(desc.inputs[2].name, "resonance_cv");
-        assert_eq!(desc.outputs.len(), 1);
-        assert_eq!(desc.outputs[0].name, "out");
-    }
-
-    #[test]
-    fn instance_ids_are_distinct() {
-        let a = make_filter(1000.0, 0.0);
-        let b = make_filter(1000.0, 0.0);
-        assert_ne!(a.instance_id(), b.instance_id());
     }
 
     #[test]

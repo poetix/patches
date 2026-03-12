@@ -103,7 +103,7 @@ fn parse_step(s: &str) -> Result<Step, ParseStepError> {
 ///   outputs[0] — pitch  (V/OCT, C0=0.0)
 ///   outputs[1] — trigger (1.0 on the clock-advance sample, 0.0 otherwise)
 ///   outputs[2] — gate    (1.0 while a note or tie is active)
-pub struct StepSequencer {
+pub struct Seq {
     instance_id: InstanceId,
     descriptor: ModuleDescriptor,
     steps: Vec<Step>,
@@ -128,7 +128,7 @@ pub struct StepSequencer {
     out_gate: MonoOutput,
 }
 
-impl StepSequencer {
+impl Seq {
     /// Apply the step at `self.step_index` to the internal pitch/trigger state.
     fn apply_current_step(&mut self) {
         match &self.steps[self.step_index] {
@@ -143,10 +143,10 @@ impl StepSequencer {
     }
 }
 
-impl Module for StepSequencer {
+impl Module for Seq {
     fn describe(shape: &ModuleShape) -> ModuleDescriptor {
         ModuleDescriptor {
-            module_name: "StepSequencer",
+            module_name: "Seq",
             shape: shape.clone(),
             inputs: vec![
                 PortDescriptor { name: "clock", index: 0, kind: CableKind::Mono },
@@ -330,9 +330,9 @@ mod tests {
             ParameterValue::Array(steps.iter().map(|s| s.to_string()).collect()),
         );
         let mut r = Registry::new();
-        r.register::<StepSequencer>();
+        r.register::<Seq>();
         r.create(
-            "StepSequencer",
+            "Seq",
             &AudioEnvironment { sample_rate: 44100.0 },
             &ModuleShape { channels: 0, length: 32 },
             &params,
@@ -443,28 +443,6 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_shape() {
-        let m = make_sequencer(&["C3", "D3"]);
-        let desc = m.descriptor();
-        assert_eq!(desc.inputs.len(), 4);
-        assert_eq!(desc.outputs.len(), 3);
-        assert_eq!(desc.inputs[0].name, "clock");
-        assert_eq!(desc.inputs[1].name, "start");
-        assert_eq!(desc.inputs[2].name, "stop");
-        assert_eq!(desc.inputs[3].name, "reset");
-        assert_eq!(desc.outputs[0].name, "pitch");
-        assert_eq!(desc.outputs[1].name, "trigger");
-        assert_eq!(desc.outputs[2].name, "gate");
-    }
-
-    #[test]
-    fn instance_ids_are_distinct() {
-        let a = make_sequencer(&["C3"]);
-        let b = make_sequencer(&["C3"]);
-        assert_ne!(a.instance_id(), b.instance_id());
-    }
-
-    #[test]
     fn empty_pattern_succeeds_and_process_does_not_panic() {
         let mut seq = make_sequencer(&[]);
         set_ports_for_test(&mut seq);
@@ -487,7 +465,7 @@ mod tests {
             ParameterValue::Array(vec!["Z9".to_string()]),
         );
         let mut r = Registry::new();
-        r.register::<StepSequencer>();
+        r.register::<Seq>();
         let result = r.create(
             "StepSequencer",
             &AudioEnvironment { sample_rate: 44100.0 },

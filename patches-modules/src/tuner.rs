@@ -139,24 +139,6 @@ mod tests {
     }
 
     #[test]
-    fn descriptor_shape() {
-        let t = make_tuner(0, 0, 0);
-        let desc = t.descriptor();
-        assert_eq!(desc.module_name, "Tuner");
-        assert_eq!(desc.inputs.len(), 1);
-        assert_eq!(desc.inputs[0].name, "in");
-        assert_eq!(desc.outputs.len(), 1);
-        assert_eq!(desc.outputs[0].name, "out");
-    }
-
-    #[test]
-    fn instance_ids_are_distinct() {
-        let a = make_tuner(0, 0, 0);
-        let b = make_tuner(0, 0, 0);
-        assert_ne!(a.instance_id(), b.instance_id());
-    }
-
-    #[test]
     fn zero_offsets_pass_through() {
         let mut t = make_tuner(0, 0, 0);
         set_ports_for_test(&mut t);

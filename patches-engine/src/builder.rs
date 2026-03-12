@@ -1114,7 +1114,7 @@ mod tests {
         assert!(has_s_a_update, "s_a parameter update must appear in parameter_updates");
         // s_c must not appear in parameter_updates (it is new, not surviving).
         assert_eq!(
-            plan_b.new_modules.iter().filter(|(_, m)| m.descriptor().module_name == "Oscillator").count(),
+            plan_b.new_modules.iter().filter(|(_, m)| m.descriptor().module_name == "Osc").count(),
             1,
             "exactly one new Oscillator (s_c) must appear in new_modules"
         );

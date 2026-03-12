@@ -1,6 +1,6 @@
 use patches_core::{
-    AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleShape,
-    ParameterDescriptor, ParameterKind, PortDescriptor,
+    AudioEnvironment, CableValue, InstanceId, Module, ModuleDescriptor, ModuleShape,
+    MonoOutput, OutputPort, ParameterDescriptor, ParameterKind, PortDescriptor,
 };
 use patches_core::CableKind;
 use patches_core::parameter_map::{ParameterMap, ParameterValue};
@@ -27,6 +27,11 @@ pub struct ClockSequencer {
     beat_phase: f64,
     /// Number of beats that have completed (for bar boundary detection)
     beat_count: u32,
+    // Output port fields
+    out_bar: MonoOutput,
+    out_beat: MonoOutput,
+    out_quaver: MonoOutput,
+    out_semiquaver: MonoOutput,
 }
 
 impl Module for ClockSequencer {
@@ -73,6 +78,10 @@ impl Module for ClockSequencer {
             beat_phase_delta: 0.0,
             beat_phase: 0.0,
             beat_count: 0,
+            out_bar: MonoOutput::default(),
+            out_beat: MonoOutput::default(),
+            out_quaver: MonoOutput::default(),
+            out_semiquaver: MonoOutput::default(),
         }
     }
 
@@ -97,29 +106,29 @@ impl Module for ClockSequencer {
         self.instance_id
     }
 
-    fn process(&mut self, _inputs: &[f64], outputs: &mut [f64]) {
-        // Initialize all outputs to 0
-        outputs[0] = 0.0; // bar
-        outputs[1] = 0.0; // beat
-        outputs[2] = 0.0; // quaver
-        outputs[3] = 0.0; // semiquaver
+    fn set_ports(&mut self, _inputs: &[patches_core::InputPort], outputs: &[OutputPort]) {
+        self.out_bar = MonoOutput::from_ports(outputs, 0);
+        self.out_beat = MonoOutput::from_ports(outputs, 1);
+        self.out_quaver = MonoOutput::from_ports(outputs, 2);
+        self.out_semiquaver = MonoOutput::from_ports(outputs, 3);
+    }
 
+    fn process(&mut self, pool: &mut [[CableValue; 2]], wi: usize) {
         // Record old phase before increment
         let old_phase = self.beat_phase;
 
         // Increment beat phase
         self.beat_phase += self.beat_phase_delta;
 
-        // Detect beat wrap and bar boundaries
+        let mut bar_fired = false;
         let beat_fired = if self.beat_phase >= 1.0 {
             self.beat_phase -= 1.0;
             self.beat_count = self.beat_count.wrapping_add(1);
 
             // Check for bar boundary
             if self.beat_count.is_multiple_of(self.beats_per_bar) {
-                outputs[0] = 1.0; // bar
+                bar_fired = true;
             }
-            outputs[1] = 1.0; // beat
             true
         } else {
             false
@@ -131,17 +140,18 @@ impl Module for ClockSequencer {
         let quaver_buckets = self.quavers_per_beat;
         let old_quaver_bucket = (old_phase * quaver_buckets as f64) as u64;
         let new_quaver_bucket = (new_phase * quaver_buckets as f64) as u64;
-        if new_quaver_bucket > old_quaver_bucket || beat_fired {
-            outputs[2] = 1.0; // quaver
-        }
+        let quaver_fired = new_quaver_bucket > old_quaver_bucket || beat_fired;
 
         // Check for semiquaver boundary (half of a quaver)
         let semiquaver_buckets = self.quavers_per_beat * 2;
         let old_semiquaver_bucket = (old_phase * semiquaver_buckets as f64) as u64;
         let new_semiquaver_bucket = (new_phase * semiquaver_buckets as f64) as u64;
-        if new_semiquaver_bucket > old_semiquaver_bucket || beat_fired {
-            outputs[3] = 1.0; // semiquaver
-        }
+        let semiquaver_fired = new_semiquaver_bucket > old_semiquaver_bucket || beat_fired;
+
+        self.out_bar.write_to(pool, wi, if bar_fired { 1.0 } else { 0.0 });
+        self.out_beat.write_to(pool, wi, if beat_fired { 1.0 } else { 0.0 });
+        self.out_quaver.write_to(pool, wi, if quaver_fired { 1.0 } else { 0.0 });
+        self.out_semiquaver.write_to(pool, wi, if semiquaver_fired { 1.0 } else { 0.0 });
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -170,6 +180,24 @@ mod tests {
             &params,
             InstanceId::next(),
         ).unwrap()
+    }
+
+    fn make_pool(n: usize) -> Vec<[CableValue; 2]> {
+        vec![[CableValue::Mono(0.0); 2]; n]
+    }
+
+    fn set_all_outputs(module: &mut Box<dyn Module>) {
+        let outputs = vec![
+            OutputPort::Mono(MonoOutput { cable_idx: 0, connected: true }),
+            OutputPort::Mono(MonoOutput { cable_idx: 1, connected: true }),
+            OutputPort::Mono(MonoOutput { cable_idx: 2, connected: true }),
+            OutputPort::Mono(MonoOutput { cable_idx: 3, connected: true }),
+        ];
+        module.set_ports(&[], &outputs);
+    }
+
+    fn read_output(pool: &Vec<[CableValue; 2]>, idx: usize, wi: usize) -> f64 {
+        if let CableValue::Mono(v) = pool[idx][wi] { v } else { panic!("expected Mono") }
     }
 
     #[test]
@@ -211,20 +239,18 @@ mod tests {
             &params,
             InstanceId::next(),
         ).unwrap();
+        set_all_outputs(&mut clock);
 
-        let mut outputs = [0.0f64; 4];
+        let mut pool = make_pool(4);
         let mut beat_count = 0;
         let mut bar_count = 0;
 
         // Process 64 samples and count pulses
-        for _ in 0..64 {
-            clock.process(&[], &mut outputs);
-            if outputs[1] > 0.5 {
-                beat_count += 1;
-            }
-            if outputs[0] > 0.5 {
-                bar_count += 1;
-            }
+        for i in 0..64 {
+            let wi = i % 2;
+            clock.process(&mut pool, wi);
+            if read_output(&pool, 1, wi) > 0.5 { beat_count += 1; }
+            if read_output(&pool, 0, wi) > 0.5 { bar_count += 1; }
         }
 
         // In 64 samples at 4 BPM / 1 Hz:
@@ -244,28 +270,22 @@ mod tests {
         // 6 beats per bar = bar every 132300 samples
 
         let mut clock = make_clock(120.0, 6, 3);
+        set_all_outputs(&mut clock);
 
-        let mut outputs = [0.0f64; 4];
+        let mut pool = make_pool(4);
         let mut beat_count = 0;
         let mut bar_count = 0;
         let mut quaver_count = 0;
         let mut semiquaver_count = 0;
 
         // Process 150000 samples
-        for _ in 0..150000 {
-            clock.process(&[], &mut outputs);
-            if outputs[0] > 0.5 {
-                bar_count += 1;
-            }
-            if outputs[1] > 0.5 {
-                beat_count += 1;
-            }
-            if outputs[2] > 0.5 {
-                quaver_count += 1;
-            }
-            if outputs[3] > 0.5 {
-                semiquaver_count += 1;
-            }
+        for i in 0..150000usize {
+            let wi = i % 2;
+            clock.process(&mut pool, wi);
+            if read_output(&pool, 0, wi) > 0.5 { bar_count += 1; }
+            if read_output(&pool, 1, wi) > 0.5 { beat_count += 1; }
+            if read_output(&pool, 2, wi) > 0.5 { quaver_count += 1; }
+            if read_output(&pool, 3, wi) > 0.5 { semiquaver_count += 1; }
         }
 
         // 150000 / 22050 ≈ 6.8 beats, so ~6 beats complete within the window
@@ -282,17 +302,19 @@ mod tests {
     #[test]
     fn all_outputs_initialized_to_zero() {
         let mut clock = make_clock(120.0, 4, 2);
+        set_all_outputs(&mut clock);
 
-        let mut outputs = [0.0f64; 4];
+        let mut pool = make_pool(4);
         // First few samples should not fire anything unless we're at a boundary
-        for i in 0..5 {
-            clock.process(&[], &mut outputs);
+        for i in 0..5usize {
+            let wi = i % 2;
+            clock.process(&mut pool, wi);
             if i > 0 {
                 // Only the first sample can fire a beat if we start at phase 0
-                assert_eq!(outputs[0], 0.0, "bar should be 0 at sample {}", i);
-                assert_eq!(outputs[1], 0.0, "beat should be 0 at sample {}", i);
-                assert_eq!(outputs[2], 0.0, "quaver should be 0 at sample {}", i);
-                assert_eq!(outputs[3], 0.0, "semiquaver should be 0 at sample {}", i);
+                assert_eq!(read_output(&pool, 0, wi), 0.0, "bar should be 0 at sample {}", i);
+                assert_eq!(read_output(&pool, 1, wi), 0.0, "beat should be 0 at sample {}", i);
+                assert_eq!(read_output(&pool, 2, wi), 0.0, "quaver should be 0 at sample {}", i);
+                assert_eq!(read_output(&pool, 3, wi), 0.0, "semiquaver should be 0 at sample {}", i);
             }
         }
     }

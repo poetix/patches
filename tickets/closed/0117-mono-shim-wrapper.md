@@ -5,7 +5,14 @@ priority: medium
 epic: "E022"
 depends_on: ["0115"]
 created: 2026-03-11
+status: will-not-do
+closed: 2026-03-12
 ---
+
+## Decision
+
+Skipped. All modules in `patches-modules` were migrated directly to the new `Module` trait
+in T-0118 (implementing `set_ports` + `process` with pool access), making the shim unnecessary.
 
 ## Summary
 

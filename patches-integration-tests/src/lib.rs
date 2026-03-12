@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use patches_core::Module;
+use patches_core::{CableValue, Module};
 use patches_engine::{ExecutionPlan, ModulePool};
 
 /// Synchronous, device-free engine fixture that mirrors the audio callback's
@@ -12,16 +12,15 @@ use patches_engine::{ExecutionPlan, ModulePool};
 ///   1. Tombstone removed modules and push them to the cleanup ring buffer.
 ///   2. Install pre-initialised new modules.
 ///   3. Apply parameter diffs to surviving modules.
-///   4. Apply connectivity updates to surviving modules.
-///   5. Zero cable buffer slots listed in `to_zero`.
-///   6. Replace the current plan.
+///   4. Zero cable buffer slots listed in `to_zero`.
+///   5. Replace the current plan.
 ///
 /// `stop` drops the cleanup producer (signalling the cleanup thread to exit)
 /// and joins the thread, guaranteeing all tombstoned modules have been dropped
 /// before returning.
 pub struct HeadlessEngine {
     plan: ExecutionPlan,
-    buffer_pool: Box<[[f64; 2]]>,
+    buffer_pool: Box<[[CableValue; 2]]>,
     module_pool: ModulePool,
     wi: usize,
     cleanup_tx: Option<rtrb::Producer<Box<dyn Module>>>,
@@ -39,14 +38,17 @@ impl HeadlessEngine {
     ///
     /// Panics if the OS refuses to spawn the cleanup thread.
     pub fn new(mut plan: ExecutionPlan, buffer_capacity: usize, module_capacity: usize) -> Self {
-        let mut buffer_pool = vec![[0.0_f64; 2]; buffer_capacity].into_boxed_slice();
+        let mut buffer_pool = (0..buffer_capacity)
+            .map(|_| [CableValue::Mono(0.0), CableValue::Mono(0.0)])
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
         let mut module_pool = ModulePool::new(module_capacity);
 
         for (idx, m) in plan.new_modules.drain(..) {
             module_pool.install(idx, m);
         }
         for &i in &plan.to_zero {
-            buffer_pool[i] = [0.0; 2];
+            buffer_pool[i] = [CableValue::Mono(0.0), CableValue::Mono(0.0)];
         }
 
         let (cleanup_tx, mut cleanup_rx) =
@@ -74,8 +76,14 @@ impl HeadlessEngine {
 
     /// Adopt a new plan, mirroring the audio callback's plan-swap sequence.
     ///
-    /// Tombstoned modules are pushed to the cleanup ring buffer. If the ring
-    /// buffer is full, the module is dropped inline.
+    /// 1. Tombstone removed modules and push them to the cleanup ring buffer.
+    /// 2. Install pre-initialised new modules (`set_ports` already called by the builder).
+    /// 3. Apply parameter diffs to surviving modules.
+    /// 4. Apply port updates to surviving modules.
+    /// 5. Zero freed/new cable buffer slots.
+    /// 6. Replace the current plan.
+    ///
+    /// If the cleanup ring buffer is full, the module is dropped inline.
     pub fn adopt_plan(&mut self, mut plan: ExecutionPlan) {
         for &idx in &plan.tombstones {
             if let Some(module) = self.module_pool.tombstone(idx) {
@@ -92,11 +100,11 @@ impl HeadlessEngine {
         for (idx, params) in &plan.parameter_updates {
             self.module_pool.update_parameters(*idx, params);
         }
-        for (idx, conn) in plan.connectivity_updates.drain(..) {
-            self.module_pool.set_connectivity(idx, conn);
+        for (idx, inputs, outputs) in &plan.port_updates {
+            self.module_pool.set_ports(*idx, inputs, outputs);
         }
         for &i in &plan.to_zero {
-            self.buffer_pool[i] = [0.0; 2];
+            self.buffer_pool[i] = [CableValue::Mono(0.0), CableValue::Mono(0.0)];
         }
         self.plan = plan;
     }
@@ -118,7 +126,7 @@ impl HeadlessEngine {
     }
 
     /// Inspect a cable buffer pool slot. Useful for verifying zeroing behaviour.
-    pub fn pool_slot(&self, idx: usize) -> [f64; 2] {
+    pub fn pool_slot(&self, idx: usize) -> [CableValue; 2] {
         self.buffer_pool[idx]
     }
 

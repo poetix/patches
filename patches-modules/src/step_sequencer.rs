@@ -1,6 +1,6 @@
 use patches_core::{
-    AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleShape,
-    ParameterDescriptor, ParameterKind, PortDescriptor,
+    AudioEnvironment, CableValue, InputPort, InstanceId, Module, ModuleDescriptor,
+    MonoInput, MonoOutput, ModuleShape, OutputPort, ParameterDescriptor, ParameterKind, PortDescriptor,
 };
 use patches_core::CableKind;
 use patches_core::build_error::BuildError;
@@ -118,6 +118,14 @@ pub struct StepSequencer {
     prev_start: f64,
     prev_stop: f64,
     prev_reset: f64,
+    // Port fields
+    in_clock: MonoInput,
+    in_start: MonoInput,
+    in_stop: MonoInput,
+    in_reset: MonoInput,
+    out_pitch: MonoOutput,
+    out_trigger: MonoOutput,
+    out_gate: MonoOutput,
 }
 
 impl StepSequencer {
@@ -176,6 +184,13 @@ impl Module for StepSequencer {
             prev_start: 0.0,
             prev_stop: 0.0,
             prev_reset: 0.0,
+            in_clock: MonoInput::default(),
+            in_start: MonoInput::default(),
+            in_stop: MonoInput::default(),
+            in_reset: MonoInput::default(),
+            out_pitch: MonoOutput::default(),
+            out_trigger: MonoOutput::default(),
+            out_gate: MonoOutput::default(),
         }
     }
 
@@ -220,19 +235,31 @@ impl Module for StepSequencer {
         self.instance_id
     }
 
-    fn process(&mut self, inputs: &[f64], outputs: &mut [f64]) {
+    fn set_ports(&mut self, inputs: &[InputPort], outputs: &[OutputPort]) {
+        self.in_clock = MonoInput::from_ports(inputs, 0);
+        self.in_start = MonoInput::from_ports(inputs, 1);
+        self.in_stop = MonoInput::from_ports(inputs, 2);
+        self.in_reset = MonoInput::from_ports(inputs, 3);
+        self.out_pitch = MonoOutput::from_ports(outputs, 0);
+        self.out_trigger = MonoOutput::from_ports(outputs, 1);
+        self.out_gate = MonoOutput::from_ports(outputs, 2);
+    }
+
+    fn process(&mut self, pool: &mut [[CableValue; 2]], wi: usize) {
+        let ri = 1 - wi;
+
         // Guard: when the pattern is empty all outputs hold at rest values.
         if self.steps.is_empty() {
-            outputs[0] = 0.0;
-            outputs[1] = 0.0;
-            outputs[2] = 0.0;
+            self.out_pitch.write_to(pool, wi, 0.0);
+            self.out_trigger.write_to(pool, wi, 0.0);
+            self.out_gate.write_to(pool, wi, 0.0);
             return;
         }
 
-        let clock = inputs[0];
-        let start = inputs[1];
-        let stop  = inputs[2];
-        let reset = inputs[3];
+        let clock = self.in_clock.read_from(pool, ri);
+        let start = self.in_start.read_from(pool, ri);
+        let stop  = self.in_stop.read_from(pool, ri);
+        let reset = self.in_reset.read_from(pool, ri);
 
         let clock_rose = clock >= 0.5 && self.prev_clock < 0.5;
         let start_rose = start >= 0.5 && self.prev_start < 0.5;
@@ -277,9 +304,9 @@ impl Module for StepSequencer {
             }
         };
 
-        outputs[0] = self.current_pitch;
-        outputs[1] = trigger;
-        outputs[2] = gate;
+        self.out_pitch.write_to(pool, wi, self.current_pitch);
+        self.out_trigger.write_to(pool, wi, trigger);
+        self.out_gate.write_to(pool, wi, gate);
 
         // trigger is a one-sample pulse
         self.trigger_pending = false;
@@ -313,24 +340,60 @@ mod tests {
         ).unwrap()
     }
 
-    fn tick(seq: &mut dyn Module, clock: f64) -> (f64, f64, f64) {
-        let inputs = [clock, 0.0, 0.0, 0.0];
-        let mut outputs = [0.0f64; 3];
-        seq.process(&inputs, &mut outputs);
-        (outputs[0], outputs[1], outputs[2]) // pitch, trigger, gate
+    fn make_pool(n: usize) -> Vec<[CableValue; 2]> {
+        vec![[CableValue::Mono(0.0); 2]; n]
+    }
+
+    fn set_ports_for_test(module: &mut Box<dyn Module>) {
+        // 0=clock, 1=start, 2=stop, 3=reset; 4=pitch, 5=trigger, 6=gate
+        let inputs = vec![
+            InputPort::Mono(MonoInput { cable_idx: 0, scale: 1.0, connected: true }),
+            InputPort::Mono(MonoInput { cable_idx: 1, scale: 1.0, connected: true }),
+            InputPort::Mono(MonoInput { cable_idx: 2, scale: 1.0, connected: true }),
+            InputPort::Mono(MonoInput { cable_idx: 3, scale: 1.0, connected: true }),
+        ];
+        let outputs = vec![
+            OutputPort::Mono(MonoOutput { cable_idx: 4, connected: true }),
+            OutputPort::Mono(MonoOutput { cable_idx: 5, connected: true }),
+            OutputPort::Mono(MonoOutput { cable_idx: 6, connected: true }),
+        ];
+        module.set_ports(&inputs, &outputs);
+    }
+
+    fn tick(seq: &mut dyn Module, pool: &mut Vec<[CableValue; 2]>, clock: f64, tick_count: usize) -> (f64, f64, f64) {
+        let wi = tick_count % 2;
+        let ri = 1 - wi;
+        pool[0][ri] = CableValue::Mono(clock);
+        pool[1][ri] = CableValue::Mono(0.0);
+        pool[2][ri] = CableValue::Mono(0.0);
+        pool[3][ri] = CableValue::Mono(0.0);
+        seq.process(pool, wi);
+        let pitch = if let CableValue::Mono(v) = pool[4][wi] { v } else { panic!(); };
+        let trigger = if let CableValue::Mono(v) = pool[5][wi] { v } else { panic!(); };
+        let gate = if let CableValue::Mono(v) = pool[6][wi] { v } else { panic!(); };
+        (pitch, trigger, gate)
     }
 
     fn tick_ctrl(
         seq: &mut dyn Module,
+        pool: &mut Vec<[CableValue; 2]>,
         clock: f64,
         start: f64,
         stop: f64,
         reset: f64,
+        tick_count: usize,
     ) -> (f64, f64, f64) {
-        let inputs = [clock, start, stop, reset];
-        let mut outputs = [0.0f64; 3];
-        seq.process(&inputs, &mut outputs);
-        (outputs[0], outputs[1], outputs[2])
+        let wi = tick_count % 2;
+        let ri = 1 - wi;
+        pool[0][ri] = CableValue::Mono(clock);
+        pool[1][ri] = CableValue::Mono(start);
+        pool[2][ri] = CableValue::Mono(stop);
+        pool[3][ri] = CableValue::Mono(reset);
+        seq.process(pool, wi);
+        let pitch = if let CableValue::Mono(v) = pool[4][wi] { v } else { panic!(); };
+        let trigger = if let CableValue::Mono(v) = pool[5][wi] { v } else { panic!(); };
+        let gate = if let CableValue::Mono(v) = pool[6][wi] { v } else { panic!(); };
+        (pitch, trigger, gate)
     }
 
     #[test]
@@ -345,7 +408,6 @@ mod tests {
 
     #[test]
     fn parse_note_sharp() {
-        // C#2: semitone 1, octave 2 → voct = 2 + 1/12
         let expected = 2.0 + 1.0 / 12.0;
         match parse_step("C#2").unwrap() {
             Step::Note { voct } => assert!((voct - expected).abs() < 1e-12),
@@ -355,7 +417,6 @@ mod tests {
 
     #[test]
     fn parse_note_flat() {
-        // Bb3: B(11) + b(-1) = 10, octave 3 → voct = 3.0 + 10/12
         let expected = 3.0 + 10.0 / 12.0;
         match parse_step("Bb3").unwrap() {
             Step::Note { voct } => assert!((voct - expected).abs() < 1e-12),
@@ -406,12 +467,13 @@ mod tests {
     #[test]
     fn empty_pattern_succeeds_and_process_does_not_panic() {
         let mut seq = make_sequencer(&[]);
-        let (pitch, trigger, gate) = tick(seq.as_mut(), 0.0);
+        set_ports_for_test(&mut seq);
+        let mut pool = make_pool(7);
+        let (pitch, trigger, gate) = tick(seq.as_mut(), &mut pool, 0.0, 0);
         assert_eq!(pitch, 0.0, "pitch should be 0.0 for empty pattern");
         assert_eq!(trigger, 0.0, "trigger should be 0.0 for empty pattern");
         assert_eq!(gate, 0.0, "gate should be 0.0 for empty pattern");
-        // Also tick with a rising clock edge to confirm no panic
-        let (pitch, trigger, gate) = tick(seq.as_mut(), 1.0);
+        let (pitch, trigger, gate) = tick(seq.as_mut(), &mut pool, 1.0, 1);
         assert_eq!(pitch, 0.0);
         assert_eq!(trigger, 0.0);
         assert_eq!(gate, 0.0);
@@ -438,54 +500,45 @@ mod tests {
 
     #[test]
     fn basic_sequence_pitch_trigger_gate() {
-        // Pattern: C3 D3 - _
-        // step 0=C3, step 1=D3, step 2=Rest, step 3=Tie
-        // Note: playing starts as false, so we use start signal or simply clock to advance.
-        // The sequencer starts with playing=false; we need to start it first.
         let mut seq = make_sequencer(&["C3", "D3", "-", "_"]);
+        set_ports_for_test(&mut seq);
+        let mut pool = make_pool(7);
+        let mut tc = 0usize;
 
         // Start playing
-        tick_ctrl(seq.as_mut(), 0.0, 1.0, 0.0, 0.0);
-        tick_ctrl(seq.as_mut(), 0.0, 0.0, 0.0, 0.0);
+        tick_ctrl(seq.as_mut(), &mut pool, 0.0, 1.0, 0.0, 0.0, tc); tc += 1;
+        tick_ctrl(seq.as_mut(), &mut pool, 0.0, 0.0, 0.0, 0.0, tc); tc += 1;
 
-        // Before first clock: step_index=0 → C3 Note, but trigger_pending=false.
-        // playing=true, current_pitch=0.0 (C0), gate=1 (Note step), trigger=0.
-        let (pitch, trigger, gate) = tick(seq.as_mut(), 0.0);
+        let (pitch, trigger, gate) = tick(seq.as_mut(), &mut pool, 0.0, tc); tc += 1;
         assert_eq!(gate, 1.0, "gate at step 0 (C3)");
         assert_eq!(trigger, 0.0, "no trigger before first clock");
         assert_eq!(pitch, 0.0, "pitch is initial current_pitch C0");
 
-        // Rising edge → advance to step 1 = D3
-        let d3 = 3.0 + 2.0 / 12.0; // octave 3 + semitone(D=2)/12
-        let (pitch, trigger, gate) = tick(seq.as_mut(), 1.0);
+        let d3 = 3.0 + 2.0 / 12.0;
+        let (pitch, trigger, gate) = tick(seq.as_mut(), &mut pool, 1.0, tc); tc += 1;
         assert_eq!(gate, 1.0, "gate on D3");
         assert_eq!(trigger, 1.0, "trigger on D3 advance");
         assert!((pitch - d3).abs() < 1e-12, "D3 voct = {}, got {}", d3, pitch);
 
-        // Clock held high → no second rising edge; trigger drops
-        let (_, trigger, gate) = tick(seq.as_mut(), 1.0);
+        let (_, trigger, gate) = tick(seq.as_mut(), &mut pool, 1.0, tc); tc += 1;
         assert_eq!(trigger, 0.0);
         assert_eq!(gate, 1.0);
 
-        // Clock low
-        tick(seq.as_mut(), 0.0);
+        tick(seq.as_mut(), &mut pool, 0.0, tc); tc += 1;
 
-        // Rising edge → advance to step 2 = Rest
-        let (pitch, trigger, gate) = tick(seq.as_mut(), 1.0);
+        let (pitch, trigger, gate) = tick(seq.as_mut(), &mut pool, 1.0, tc); tc += 1;
         assert_eq!(gate, 0.0, "gate on rest");
         assert_eq!(trigger, 0.0, "no trigger on rest");
         assert!((pitch - d3).abs() < 1e-12, "pitch holds D3 on rest");
 
-        // Clock low, then rising edge → advance to step 3 = Tie
-        tick(seq.as_mut(), 0.0);
-        let (_, trigger, gate) = tick(seq.as_mut(), 1.0);
+        tick(seq.as_mut(), &mut pool, 0.0, tc); tc += 1;
+        let (_, trigger, gate) = tick(seq.as_mut(), &mut pool, 1.0, tc); tc += 1;
         assert_eq!(gate, 1.0, "gate on tie");
         assert_eq!(trigger, 0.0, "no trigger on tie");
 
-        // Clock low, then rising edge → wraps back to step 0 = C3
-        tick(seq.as_mut(), 0.0);
-        let c3 = 3.0; // octave 3 + 0/12
-        let (pitch, trigger, gate) = tick(seq.as_mut(), 1.0);
+        tick(seq.as_mut(), &mut pool, 0.0, tc); tc += 1;
+        let c3 = 3.0;
+        let (pitch, trigger, gate) = tick(seq.as_mut(), &mut pool, 1.0, tc);
         assert_eq!(gate, 1.0, "gate on C3 re-entry");
         assert_eq!(trigger, 1.0, "trigger on C3 re-entry");
         assert!((pitch - c3).abs() < 1e-12, "C3 voct = {}, got {}", c3, pitch);
@@ -494,54 +547,50 @@ mod tests {
     #[test]
     fn stop_suppresses_gate_and_blocks_clock() {
         let mut seq = make_sequencer(&["C3", "D3"]);
+        set_ports_for_test(&mut seq);
+        let mut pool = make_pool(7);
+        let mut tc = 0usize;
 
-        // Start playing first
-        tick_ctrl(seq.as_mut(), 0.0, 1.0, 0.0, 0.0);
-        tick_ctrl(seq.as_mut(), 0.0, 0.0, 0.0, 0.0);
+        tick_ctrl(seq.as_mut(), &mut pool, 0.0, 1.0, 0.0, 0.0, tc); tc += 1;
+        tick_ctrl(seq.as_mut(), &mut pool, 0.0, 0.0, 0.0, 0.0, tc); tc += 1;
 
-        // Advance to step 1 = D3 via rising edge
-        tick(seq.as_mut(), 1.0);
-        tick(seq.as_mut(), 0.0);
+        tick(seq.as_mut(), &mut pool, 1.0, tc); tc += 1;
+        tick(seq.as_mut(), &mut pool, 0.0, tc); tc += 1;
 
-        // Stop
-        let (_, trigger, gate) = tick_ctrl(seq.as_mut(), 0.0, 0.0, 1.0, 0.0);
+        let (_, trigger, gate) = tick_ctrl(seq.as_mut(), &mut pool, 0.0, 0.0, 1.0, 0.0, tc); tc += 1;
         assert_eq!(gate, 0.0, "gate suppressed on stop");
         assert_eq!(trigger, 0.0);
 
-        // Clock while stopped → no advance, gate stays 0
-        tick_ctrl(seq.as_mut(), 0.0, 0.0, 0.0, 0.0);
-        let (_, _, gate) = tick_ctrl(seq.as_mut(), 1.0, 0.0, 0.0, 0.0);
+        tick_ctrl(seq.as_mut(), &mut pool, 0.0, 0.0, 0.0, 0.0, tc); tc += 1;
+        let (_, _, gate) = tick_ctrl(seq.as_mut(), &mut pool, 1.0, 0.0, 0.0, 0.0, tc); tc += 1;
         assert_eq!(gate, 0.0, "gate stays 0 while stopped");
 
-        // Start
-        tick_ctrl(seq.as_mut(), 0.0, 0.0, 0.0, 0.0);
-        tick_ctrl(seq.as_mut(), 0.0, 1.0, 0.0, 0.0);
-        let (_, _, gate) = tick_ctrl(seq.as_mut(), 0.0, 0.0, 0.0, 0.0);
-        // Should be at step 1 still (D3), gate=1
+        tick_ctrl(seq.as_mut(), &mut pool, 0.0, 0.0, 0.0, 0.0, tc); tc += 1;
+        tick_ctrl(seq.as_mut(), &mut pool, 0.0, 1.0, 0.0, 0.0, tc); tc += 1;
+        let (_, _, gate) = tick_ctrl(seq.as_mut(), &mut pool, 0.0, 0.0, 0.0, 0.0, tc);
         assert_eq!(gate, 1.0, "gate restored after start");
     }
 
     #[test]
     fn reset_returns_to_step_zero_then_advance() {
         let mut seq = make_sequencer(&["C3", "D3", "E3"]);
+        set_ports_for_test(&mut seq);
+        let mut pool = make_pool(7);
+        let mut tc = 0usize;
 
-        // Start playing first
-        tick_ctrl(seq.as_mut(), 0.0, 1.0, 0.0, 0.0);
-        tick_ctrl(seq.as_mut(), 0.0, 0.0, 0.0, 0.0);
+        tick_ctrl(seq.as_mut(), &mut pool, 0.0, 1.0, 0.0, 0.0, tc); tc += 1;
+        tick_ctrl(seq.as_mut(), &mut pool, 0.0, 0.0, 0.0, 0.0, tc); tc += 1;
 
-        // Advance to step 2 = E3
-        tick(seq.as_mut(), 1.0);
-        tick(seq.as_mut(), 0.0);
-        tick(seq.as_mut(), 1.0);
-        tick(seq.as_mut(), 0.0);
+        tick(seq.as_mut(), &mut pool, 1.0, tc); tc += 1;
+        tick(seq.as_mut(), &mut pool, 0.0, tc); tc += 1;
+        tick(seq.as_mut(), &mut pool, 1.0, tc); tc += 1;
+        tick(seq.as_mut(), &mut pool, 0.0, tc); tc += 1;
 
-        // Reset → step_index = 0
-        tick_ctrl(seq.as_mut(), 0.0, 0.0, 0.0, 1.0);
-        tick_ctrl(seq.as_mut(), 0.0, 0.0, 0.0, 0.0);
+        tick_ctrl(seq.as_mut(), &mut pool, 0.0, 0.0, 0.0, 1.0, tc); tc += 1;
+        tick_ctrl(seq.as_mut(), &mut pool, 0.0, 0.0, 0.0, 0.0, tc); tc += 1;
 
-        // Next clock → advance from 0 to step 1 = D3
-        let (pitch, trigger, gate) = tick(seq.as_mut(), 1.0);
-        let d3 = 3.0 + 2.0 / 12.0; // D3: octave 3 + semitone(D=2)/12
+        let (pitch, trigger, gate) = tick(seq.as_mut(), &mut pool, 1.0, tc);
+        let d3 = 3.0 + 2.0 / 12.0;
         assert!((pitch - d3).abs() < 1e-12, "D3 voct after reset, got {}", pitch);
         assert_eq!(trigger, 1.0);
         assert_eq!(gate, 1.0);

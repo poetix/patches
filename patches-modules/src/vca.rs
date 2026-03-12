@@ -1,4 +1,7 @@
-use patches_core::{AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleShape, CableKind, PortDescriptor};
+use patches_core::{
+    AudioEnvironment, CableValue, InputPort, InstanceId, Module, ModuleDescriptor,
+    MonoInput, MonoOutput, ModuleShape, OutputPort, CableKind, PortDescriptor,
+};
 use patches_core::parameter_map::ParameterMap;
 
 /// Voltage-controlled amplifier. Multiplies a signal by a control voltage.
@@ -11,6 +14,9 @@ use patches_core::parameter_map::ParameterMap;
 pub struct Vca {
     instance_id: InstanceId,
     descriptor: ModuleDescriptor,
+    in_signal: MonoInput,
+    in_cv: MonoInput,
+    out_audio: MonoOutput,
 }
 
 impl Module for Vca {
@@ -32,6 +38,9 @@ impl Module for Vca {
         Self {
             instance_id,
             descriptor,
+            in_signal: MonoInput::default(),
+            in_cv: MonoInput::default(),
+            out_audio: MonoOutput::default(),
         }
     }
 
@@ -46,8 +55,17 @@ impl Module for Vca {
         self.instance_id
     }
 
-    fn process(&mut self, inputs: &[f64], outputs: &mut [f64]) {
-        outputs[0] = inputs[0] * inputs[1];
+    fn set_ports(&mut self, inputs: &[InputPort], outputs: &[OutputPort]) {
+        self.in_signal = MonoInput::from_ports(inputs, 0);
+        self.in_cv = MonoInput::from_ports(inputs, 1);
+        self.out_audio = MonoOutput::from_ports(outputs, 0);
+    }
+
+    fn process(&mut self, pool: &mut [[CableValue; 2]], wi: usize) {
+        let ri = 1 - wi;
+        let signal = self.in_signal.read_from(pool, ri);
+        let cv = self.in_cv.read_from(pool, ri);
+        self.out_audio.write_to(pool, wi, signal * cv);
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -74,6 +92,22 @@ mod tests {
         ).unwrap()
     }
 
+    fn make_pool(n: usize) -> Vec<[CableValue; 2]> {
+        vec![[CableValue::Mono(0.0); 2]; n]
+    }
+
+    fn set_ports_for_test(module: &mut Box<dyn Module>) {
+        // 0=in, 1=cv, 2=out
+        let inputs = vec![
+            InputPort::Mono(MonoInput { cable_idx: 0, scale: 1.0, connected: true }),
+            InputPort::Mono(MonoInput { cable_idx: 1, scale: 1.0, connected: true }),
+        ];
+        let outputs = vec![
+            OutputPort::Mono(MonoOutput { cable_idx: 2, connected: true }),
+        ];
+        module.set_ports(&inputs, &outputs);
+    }
+
     #[test]
     fn descriptor_shape() {
         let m = make_vca();
@@ -91,25 +125,40 @@ mod tests {
     #[test]
     fn multiplies_signal_by_cv() {
         let mut m = make_vca();
-        let mut out = [0.0f64];
-        m.process(&[0.5, 0.8], &mut out);
-        assert!((out[0] - 0.4).abs() < f64::EPSILON);
+        set_ports_for_test(&mut m);
+        let mut pool = make_pool(3);
+        pool[0][1] = CableValue::Mono(0.5);
+        pool[1][1] = CableValue::Mono(0.8);
+        m.process(&mut pool, 0);
+        if let CableValue::Mono(v) = pool[2][0] {
+            assert!((v - 0.4).abs() < f64::EPSILON);
+        } else { panic!("expected Mono"); }
     }
 
     #[test]
     fn zero_cv_silences_signal() {
         let mut m = make_vca();
-        let mut out = [0.0f64];
-        m.process(&[1.0, 0.0], &mut out);
-        assert_eq!(out[0], 0.0);
+        set_ports_for_test(&mut m);
+        let mut pool = make_pool(3);
+        pool[0][1] = CableValue::Mono(1.0);
+        pool[1][1] = CableValue::Mono(0.0);
+        m.process(&mut pool, 0);
+        if let CableValue::Mono(v) = pool[2][0] {
+            assert_eq!(v, 0.0);
+        } else { panic!("expected Mono"); }
     }
 
     #[test]
     fn negative_cv_inverts_phase() {
         let mut m = make_vca();
-        let mut out = [0.0f64];
-        m.process(&[0.5, -1.0], &mut out);
-        assert!((out[0] - (-0.5)).abs() < f64::EPSILON);
+        set_ports_for_test(&mut m);
+        let mut pool = make_pool(3);
+        pool[0][1] = CableValue::Mono(0.5);
+        pool[1][1] = CableValue::Mono(-1.0);
+        m.process(&mut pool, 0);
+        if let CableValue::Mono(v) = pool[2][0] {
+            assert!((v - (-0.5)).abs() < f64::EPSILON);
+        } else { panic!("expected Mono"); }
     }
 
     #[test]

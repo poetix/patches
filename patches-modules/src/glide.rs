@@ -1,6 +1,6 @@
 use patches_core::{
-    AudioEnvironment, InstanceId, Module, ModuleDescriptor,
-    ModuleShape, ParameterDescriptor, ParameterKind, PortDescriptor,
+    AudioEnvironment, CableValue, InputPort, InstanceId, Module, ModuleDescriptor,
+    MonoInput, MonoOutput, ModuleShape, OutputPort, ParameterDescriptor, ParameterKind, PortDescriptor,
 };
 use patches_core::CableKind;
 use patches_core::parameter_map::{ParameterMap, ParameterValue};
@@ -23,6 +23,9 @@ pub struct Glide {
     beta: f64,
     glide_ms: f64,
     sample_rate: f64,
+    // Port fields
+    in_port: MonoInput,
+    out_port: MonoOutput,
 }
 
 impl Glide {
@@ -70,6 +73,8 @@ impl Module for Glide {
             beta: 0.0,
             glide_ms: 0.0,
             sample_rate: audio_environment.sample_rate,
+            in_port: MonoInput::default(),
+            out_port: MonoOutput::default(),
         }
     }
 
@@ -87,11 +92,17 @@ impl Module for Glide {
         self.instance_id
     }
 
-    fn process(&mut self, inputs: &[f64], outputs: &mut [f64]) {
+    fn set_ports(&mut self, inputs: &[InputPort], outputs: &[OutputPort]) {
+        self.in_port = MonoInput::from_ports(inputs, 0);
+        self.out_port = MonoOutput::from_ports(outputs, 0);
+    }
+
+    fn process(&mut self, pool: &mut [[CableValue; 2]], wi: usize) {
         // Input is V/OCT (C2 = 0.0). Interpolate directly in V/OCT space —
         // no ln/exp needed since V/OCT is already a log-frequency scale.
-        self.voct += self.beta * (inputs[0] - self.voct);
-        outputs[0] = self.voct;
+        let input = self.in_port.read_from(pool, 1 - wi);
+        self.voct += self.beta * (input - self.voct);
+        self.out_port.write_to(pool, wi, self.voct);
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -124,6 +135,16 @@ mod tests {
         ).unwrap()
     }
 
+    fn make_pool(n: usize) -> Vec<[CableValue; 2]> {
+        vec![[CableValue::Mono(0.0); 2]; n]
+    }
+
+    fn set_ports_for_test(module: &mut Box<dyn Module>) {
+        let inputs = vec![InputPort::Mono(MonoInput { cable_idx: 0, scale: 1.0, connected: true })];
+        let outputs = vec![OutputPort::Mono(MonoOutput { cable_idx: 1, connected: true })];
+        module.set_ports(&inputs, &outputs);
+    }
+
     #[test]
     fn descriptor_ports() {
         let g = make_glide(100.0);
@@ -143,28 +164,24 @@ mod tests {
 
     #[test]
     fn output_tracks_input_with_glide() {
-        // With a non-zero glide time the output should not jump immediately to
-        // the target V/OCT. It should be moving toward it but still differ
-        // from it after a small number of samples.
         let mut g = make_glide_sr(500.0, 44100.0);
-        let start_voct = 1.0_f64; // C3
-        let target_voct = 2.0_f64; // C4
+        set_ports_for_test(&mut g);
+        let start_voct = 1.0_f64;
+        let target_voct = 2.0_f64;
 
-        // Seed the module at the starting V/OCT.
-        let mut out = [0.0_f64; 1];
-        g.process(&[start_voct], &mut out);
-        let after_start = out[0];
+        let mut pool = make_pool(2);
+        pool[0][1] = CableValue::Mono(start_voct);
+        g.process(&mut pool, 0);
+        let after_start = if let CableValue::Mono(v) = pool[1][0] { v } else { panic!(); };
 
-        // Now switch to a higher target and process one more sample.
-        g.process(&[target_voct], &mut out);
-        let after_step = out[0];
+        pool[0][0] = CableValue::Mono(target_voct);
+        g.process(&mut pool, 1);
+        let after_step = if let CableValue::Mono(v) = pool[1][1] { v } else { panic!(); };
 
-        // The output must not have jumped all the way to the target in one sample.
         assert!(
             after_step < target_voct,
             "expected output {after_step} to be below target {target_voct} (glide should smooth)"
         );
-        // But it must have moved in the right direction.
         assert!(
             after_step > after_start,
             "expected output {after_step} to have increased from {after_start}"
@@ -173,34 +190,40 @@ mod tests {
 
     #[test]
     fn zero_glide_ms_tracks_instantly() {
-        // With glide_ms=0.0 beta must be 1.0 so the output matches the input
-        // in the same sample.
         let mut g = make_glide_sr(0.0, 44100.0);
-        let target_voct = 2.0_f64; // C4
-        let mut out = [0.0_f64; 1];
-        g.process(&[target_voct], &mut out);
-        assert!(
-            (out[0] - target_voct).abs() < 1e-9,
-            "expected instant tracking, got {}", out[0]
-        );
+        set_ports_for_test(&mut g);
+        let target_voct = 2.0_f64;
+        let mut pool = make_pool(2);
+        pool[0][1] = CableValue::Mono(target_voct);
+        g.process(&mut pool, 0);
+        if let CableValue::Mono(v) = pool[1][0] {
+            assert!(
+                (v - target_voct).abs() < 1e-9,
+                "expected instant tracking, got {}", v
+            );
+        } else { panic!("expected Mono"); }
     }
 
     #[test]
     fn c2_voct_zero_is_not_held() {
-        // C2 = 0.0 V/OCT. With zero glide the output must track it immediately.
-        // (The old Hz-based implementation treated 0.0 as invalid and held the
-        // previous value, causing C2 to sound like the previous note.)
         let mut g = make_glide_sr(0.0, 44100.0);
-        let mut out = [0.0_f64; 1];
-        // Prime the module at C3 = 1.0 V/OCT.
-        g.process(&[1.0], &mut out);
-        assert!((out[0] - 1.0).abs() < 1e-9);
-        // Now target C2 = 0.0 V/OCT; output must follow.
-        g.process(&[0.0], &mut out);
-        assert!(
-            out[0].abs() < 1e-9,
-            "C2 (0.0 V/OCT) must not be ignored; got {}", out[0]
-        );
+        set_ports_for_test(&mut g);
+        let mut pool = make_pool(2);
+        // Prime at C3 = 1.0 V/OCT.
+        pool[0][1] = CableValue::Mono(1.0);
+        g.process(&mut pool, 0);
+        if let CableValue::Mono(v) = pool[1][0] {
+            assert!((v - 1.0).abs() < 1e-9);
+        }
+        // Now target C2 = 0.0 V/OCT.
+        pool[0][0] = CableValue::Mono(0.0);
+        g.process(&mut pool, 1);
+        if let CableValue::Mono(v) = pool[1][1] {
+            assert!(
+                v.abs() < 1e-9,
+                "C2 (0.0 V/OCT) must not be ignored; got {}", v
+            );
+        } else { panic!("expected Mono"); }
     }
 
 }

@@ -7,7 +7,7 @@ pub enum CableKind {
 
 /// A value carried by a cable. `Poly` holds exactly 16 channels; no heap
 /// allocation is required.
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum CableValue {
     Mono(f64),
     Poly([f64; 16]),
@@ -17,7 +17,7 @@ pub enum CableValue {
 
 /// A mono input port. `cable_idx` indexes the shared cable pool; `scale` is
 /// applied on read; `connected` tracks whether a cable is attached.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct MonoInput {
     pub cable_idx: usize,
     pub scale: f64,
@@ -31,6 +31,19 @@ impl Default for MonoInput {
 }
 
 impl MonoInput {
+    /// Extract the `MonoInput` at position `idx` from a port slice.
+    ///
+    /// # Panics
+    /// Panics if `idx` is out of bounds or the port at that position is not
+    /// `InputPort::Mono`.  The planner guarantees correct port types, so a
+    /// panic here indicates a module descriptor / `set_ports` mismatch.
+    pub fn from_ports(ports: &[InputPort], idx: usize) -> Self {
+        match &ports[idx] {
+            InputPort::Mono(p) => p.clone(),
+            InputPort::Poly(_) => panic!("MonoInput::from_ports: port {idx} is Poly, expected Mono"),
+        }
+    }
+
     pub fn is_connected(&self) -> bool {
         self.connected
     }
@@ -48,10 +61,24 @@ impl MonoInput {
             ),
         }
     }
+
+    /// Read the current value from the ping-pong `pool` at read-index `ri`,
+    /// applying `self.scale`.
+    ///
+    /// `ri` is `1 - wi` where `wi` is the current write index passed to
+    /// [`Module::process`](crate::Module::process).
+    pub fn read_from(&self, pool: &[[CableValue; 2]], ri: usize) -> f64 {
+        match pool[self.cable_idx][ri] {
+            CableValue::Mono(v) => v * self.scale,
+            CableValue::Poly(_) => unreachable!(
+                "MonoInput::read_from encountered a Poly cable — graph validation should prevent this"
+            ),
+        }
+    }
 }
 
 /// A poly input port (16-channel).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct PolyInput {
     pub cable_idx: usize,
     pub scale: f64,
@@ -65,6 +92,18 @@ impl Default for PolyInput {
 }
 
 impl PolyInput {
+    /// Extract the `PolyInput` at position `idx` from a port slice.
+    ///
+    /// # Panics
+    /// Panics if `idx` is out of bounds or the port at that position is not
+    /// `InputPort::Poly`.
+    pub fn from_ports(ports: &[InputPort], idx: usize) -> Self {
+        match &ports[idx] {
+            InputPort::Poly(p) => p.clone(),
+            InputPort::Mono(_) => panic!("PolyInput::from_ports: port {idx} is Mono, expected Poly"),
+        }
+    }
+
     pub fn is_connected(&self) -> bool {
         self.connected
     }
@@ -84,16 +123,39 @@ impl PolyInput {
             ),
         }
     }
+
+    /// Read all 16 channels from the ping-pong `pool` at read-index `ri`,
+    /// applying `self.scale` to each.
+    pub fn read_from(&self, pool: &[[CableValue; 2]], ri: usize) -> [f64; 16] {
+        match pool[self.cable_idx][ri] {
+            CableValue::Poly(channels) => channels.map(|v| v * self.scale),
+            CableValue::Mono(_) => unreachable!(
+                "PolyInput::read_from encountered a Mono cable — graph validation should prevent this"
+            ),
+        }
+    }
 }
 
 /// A mono output port.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct MonoOutput {
     pub cable_idx: usize,
     pub connected: bool,
 }
 
 impl MonoOutput {
+    /// Extract the `MonoOutput` at position `idx` from a port slice.
+    ///
+    /// # Panics
+    /// Panics if `idx` is out of bounds or the port at that position is not
+    /// `OutputPort::Mono`.
+    pub fn from_ports(ports: &[OutputPort], idx: usize) -> Self {
+        match &ports[idx] {
+            OutputPort::Mono(p) => p.clone(),
+            OutputPort::Poly(_) => panic!("MonoOutput::from_ports: port {idx} is Poly, expected Mono"),
+        }
+    }
+
     pub fn is_connected(&self) -> bool {
         self.connected
     }
@@ -102,16 +164,33 @@ impl MonoOutput {
     pub fn write(&self, pool: &mut [CableValue], value: f64) {
         pool[self.cable_idx] = CableValue::Mono(value);
     }
+
+    /// Write `value` into the ping-pong `pool` at write-index `wi`.
+    pub fn write_to(&self, pool: &mut [[CableValue; 2]], wi: usize, value: f64) {
+        pool[self.cable_idx][wi] = CableValue::Mono(value);
+    }
 }
 
 /// A poly output port (16-channel).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct PolyOutput {
     pub cable_idx: usize,
     pub connected: bool,
 }
 
 impl PolyOutput {
+    /// Extract the `PolyOutput` at position `idx` from a port slice.
+    ///
+    /// # Panics
+    /// Panics if `idx` is out of bounds or the port at that position is not
+    /// `OutputPort::Poly`.
+    pub fn from_ports(ports: &[OutputPort], idx: usize) -> Self {
+        match &ports[idx] {
+            OutputPort::Poly(p) => p.clone(),
+            OutputPort::Mono(_) => panic!("PolyOutput::from_ports: port {idx} is Mono, expected Poly"),
+        }
+    }
+
     pub fn is_connected(&self) -> bool {
         self.connected
     }
@@ -120,13 +199,18 @@ impl PolyOutput {
     pub fn write(&self, pool: &mut [CableValue], value: [f64; 16]) {
         pool[self.cable_idx] = CableValue::Poly(value);
     }
+
+    /// Write a 16-channel `value` into the ping-pong `pool` at write-index `wi`.
+    pub fn write_to(&self, pool: &mut [[CableValue; 2]], wi: usize, value: [f64; 16]) {
+        pool[self.cable_idx][wi] = CableValue::Poly(value);
+    }
 }
 
 // ── Enum wrappers for heterogeneous port delivery ─────────────────────────
 
 /// Heterogeneous input-port wrapper used by the planner to deliver ports to
 /// `Module::set_ports` without boxing.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum InputPort {
     Mono(MonoInput),
     Poly(PolyInput),
@@ -134,7 +218,7 @@ pub enum InputPort {
 
 /// Heterogeneous output-port wrapper used by the planner to deliver ports to
 /// `Module::set_ports` without boxing.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum OutputPort {
     Mono(MonoOutput),
     Poly(PolyOutput),

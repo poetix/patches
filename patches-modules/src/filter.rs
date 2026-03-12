@@ -2,8 +2,8 @@ use std::f64::consts::{FRAC_1_SQRT_2, TAU};
 use crate::common::approximate::fast_tanh;
 
 use patches_core::{
-    AudioEnvironment, InstanceId, Module, ModuleDescriptor,
-    ModuleShape, ParameterDescriptor, ParameterKind, PortConnectivity, PortDescriptor,
+    AudioEnvironment, CableValue, InputPort, InstanceId, Module, ModuleDescriptor,
+    MonoInput, MonoOutput, ModuleShape, OutputPort, ParameterDescriptor, ParameterKind, PortDescriptor,
 };
 use patches_core::CableKind;
 use patches_core::parameter_map::{ParameterMap, ParameterValue};
@@ -109,14 +109,17 @@ pub struct ResonantLowpass {
     s1: f64,
     s2: f64,
 
-    // ── Connectivity ──────────────────────────────────────────────────────
-    any_cv_connected: bool,
-
     // ── Update counter (CV path only) ─────────────────────────────────────
     update_counter: u32,
 
     // ── Saturation ────────────────────────────────────────────────────────
     saturate: bool,
+
+    // ── Port fields ───────────────────────────────────────────────────────
+    in_audio: MonoInput,
+    in_cutoff_cv: MonoInput,
+    in_resonance_cv: MonoInput,
+    out_audio: MonoOutput,
 }
 
 impl ResonantLowpass {
@@ -141,6 +144,10 @@ impl ResonantLowpass {
         self.db2 = 0.0;
         self.da1 = 0.0;
         self.da2 = 0.0;
+    }
+
+    fn any_cv_connected(&self) -> bool {
+        self.in_cutoff_cv.is_connected() || self.in_resonance_cv.is_connected()
     }
 }
 
@@ -212,9 +219,12 @@ impl Module for ResonantLowpass {
             da2: 0.0,
             s1: 0.0,
             s2: 0.0,
-            any_cv_connected: false,
             update_counter: 0,
             saturate: false,
+            in_audio: MonoInput::default(),
+            in_cutoff_cv: MonoInput::default(),
+            in_resonance_cv: MonoInput::default(),
+            out_audio: MonoOutput::default(),
         }
     }
 
@@ -231,7 +241,7 @@ impl Module for ResonantLowpass {
         // In the CV path the next update_counter == 0 will recompute using the
         // new base parameters combined with the live CV values. In the static
         // path we recompute immediately.
-        if !self.any_cv_connected {
+        if !self.any_cv_connected() {
             self.recompute_static_coeffs();
         }
     }
@@ -244,36 +254,31 @@ impl Module for ResonantLowpass {
         self.instance_id
     }
 
-    fn set_connectivity(&mut self, connectivity: PortConnectivity) {
-        let cutoff_cv_connected = connectivity.inputs[1];
-        let resonance_cv_connected = connectivity.inputs[2];
-        let any_cv_connected = cutoff_cv_connected || resonance_cv_connected;
-        if any_cv_connected != self.any_cv_connected {
-            self.any_cv_connected = any_cv_connected;
-            if !any_cv_connected {
-                // Transitioning to static path: sync coefficients to the current
-                // target to prevent zipper noise.
-                self.b0 = self.b0t;
-                self.b1 = self.b1t;
-                self.b2 = self.b2t;
-                self.a1 = self.a1t;
-                self.a2 = self.a2t;
-            }
+    fn set_ports(&mut self, inputs: &[InputPort], outputs: &[OutputPort]) {
+        self.in_audio = MonoInput::from_ports(inputs, 0);
+        self.in_cutoff_cv = MonoInput::from_ports(inputs, 1);
+        self.in_resonance_cv = MonoInput::from_ports(inputs, 2);
+        self.out_audio = MonoOutput::from_ports(outputs, 0);
+        // If connectivity changed to non-CV, recompute static coefficients.
+        if !self.any_cv_connected() {
+            self.recompute_static_coeffs();
         }
     }
 
-    fn process(&mut self, inputs: &[f64], outputs: &mut [f64]) {
-        if !self.any_cv_connected {
+    fn process(&mut self, pool: &mut [[CableValue; 2]], wi: usize) {
+        let ri = 1 - wi;
+
+        if !self.any_cv_connected() {
             // ── Static path: coefficients do not change ───────────────────
-            let x = inputs[0];
+            let x = self.in_audio.read_from(pool, ri);
             let y = self.b0 * x + self.s1;
             let fb = if self.saturate { fast_tanh(y) } else { y };
             self.s1 = self.b1 * x - self.a1 * fb + self.s2;
             self.s2 = self.b2 * x - self.a2 * fb;
-            outputs[0] = y;
+            self.out_audio.write_to(pool, wi, y);
             return;
         }
-        
+
         // ── CV path: recompute coefficients every COEFF_UPDATE_INTERVAL ──
         if self.update_counter == 0 {
             // Snap to the previous target to eliminate accumulated float
@@ -286,9 +291,19 @@ impl Module for ResonantLowpass {
 
             // Effective parameters: base values offset by CV.
             // cutoff_cv is V/oct: +1 V doubles the frequency.
+            let cutoff_cv = if self.in_cutoff_cv.is_connected() {
+                self.in_cutoff_cv.read_from(pool, ri)
+            } else {
+                0.0
+            };
+            let resonance_cv = if self.in_resonance_cv.is_connected() {
+                self.in_resonance_cv.read_from(pool, ri)
+            } else {
+                0.0
+            };
             let effective_cutoff =
-                (self.cutoff * inputs[1].exp2()).clamp(20.0, self.sample_rate * 0.499);
-            let effective_resonance = (self.resonance + inputs[2]).clamp(0.0, 1.0);
+                (self.cutoff * cutoff_cv.exp2()).clamp(20.0, self.sample_rate * 0.499);
+            let effective_resonance = (self.resonance + resonance_cv).clamp(0.0, 1.0);
 
             let (b0t, b1t, b2t, a1t, a2t) =
                 compute_biquad_lowpass(effective_cutoff, effective_resonance, self.sample_rate);
@@ -307,12 +322,12 @@ impl Module for ResonantLowpass {
         }
 
         // Apply filter (Transposed Direct Form II).
-        let x = inputs[0];
+        let x = self.in_audio.read_from(pool, ri);
         let y = self.b0 * x + self.s1;
         let fb = if self.saturate { fast_tanh(y) } else { y };
         self.s1 = self.b1 * x - self.a1 * fb + self.s2;
         self.s2 = self.b2 * x - self.a2 * fb;
-        outputs[0] = y;
+        self.out_audio.write_to(pool, wi, y);
 
         // Advance interpolation toward the target.
         self.b0 += self.db0;
@@ -335,7 +350,7 @@ impl Module for ResonantLowpass {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use patches_core::{AudioEnvironment, Module, ModuleShape, PortConnectivity, Registry};
+    use patches_core::{AudioEnvironment, Module, ModuleShape, Registry};
     use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
     fn make_filter(cutoff: f64, resonance: f64) -> Box<dyn Module> {
@@ -358,23 +373,56 @@ mod tests {
         .unwrap()
     }
 
+    fn make_pool(n: usize) -> Vec<[CableValue; 2]> {
+        vec![[CableValue::Mono(0.0); 2]; n]
+    }
+
+    // Ports: 0=in, 1=cutoff_cv, 2=resonance_cv, 3=out
+    fn set_static_ports(module: &mut Box<dyn Module>) {
+        let inputs = vec![
+            InputPort::Mono(MonoInput { cable_idx: 0, scale: 1.0, connected: true }),
+            InputPort::Mono(MonoInput { cable_idx: 1, scale: 1.0, connected: false }),
+            InputPort::Mono(MonoInput { cable_idx: 2, scale: 1.0, connected: false }),
+        ];
+        let outputs = vec![
+            OutputPort::Mono(MonoOutput { cable_idx: 3, connected: true }),
+        ];
+        module.set_ports(&inputs, &outputs);
+    }
+
+    fn set_cv_ports(module: &mut Box<dyn Module>) {
+        let inputs = vec![
+            InputPort::Mono(MonoInput { cable_idx: 0, scale: 1.0, connected: true }),
+            InputPort::Mono(MonoInput { cable_idx: 1, scale: 1.0, connected: true }),
+            InputPort::Mono(MonoInput { cable_idx: 2, scale: 1.0, connected: true }),
+        ];
+        let outputs = vec![
+            OutputPort::Mono(MonoOutput { cable_idx: 3, connected: true }),
+        ];
+        module.set_ports(&inputs, &outputs);
+    }
+
     /// Settle a filter by running `n` silent samples through it.
     fn settle(m: &mut Box<dyn Module>, n: usize) {
-        let mut out = [0.0f64];
-        for _ in 0..n {
-            m.process(&[0.0, 0.0, 0.0], &mut out);
+        let mut pool = make_pool(4);
+        for i in 0..n {
+            pool[0][1 - (i % 2)] = CableValue::Mono(0.0);
+            m.process(&mut pool, i % 2);
         }
     }
 
     /// Measure the peak absolute output of `m` driven by a sine at `freq_hz`
     /// over `n` samples at `sample_rate`.
     fn measure_peak(m: &mut Box<dyn Module>, freq_hz: f64, sample_rate: f64, n: usize) -> f64 {
-        let mut out = [0.0f64];
+        let mut pool = make_pool(4);
         let mut peak = 0.0f64;
         for i in 0..n {
             let x = (TAU * freq_hz * i as f64 / sample_rate).sin();
-            m.process(&[x, 0.0, 0.0], &mut out);
-            peak = peak.max(out[0].abs());
+            pool[0][1 - (i % 2)] = CableValue::Mono(x);
+            m.process(&mut pool, i % 2);
+            if let CableValue::Mono(v) = pool[3][i % 2] {
+                peak = peak.max(v.abs());
+            }
         }
         peak
     }
@@ -401,26 +449,27 @@ mod tests {
 
     #[test]
     fn passes_dc_after_settling() {
-        // A DC signal (constant 1.0) should pass through a lowpass nearly
-        // unattenuated once the filter has settled.
         let mut f = make_filter(1000.0, 0.0);
-        let mut out = [0.0f64];
-        for _ in 0..4096 {
-            f.process(&[1.0, 0.0, 0.0], &mut out);
+        set_static_ports(&mut f);
+        let mut pool = make_pool(4);
+        for i in 0..4096 {
+            pool[0][1 - (i % 2)] = CableValue::Mono(1.0);
+            f.process(&mut pool, i % 2);
         }
-        assert!(
-            (out[0] - 1.0).abs() < 0.001,
-            "DC should pass through lowpass; got {}",
-            out[0]
-        );
+        if let CableValue::Mono(v) = pool[3][4095 % 2] {
+            assert!(
+                (v - 1.0).abs() < 0.001,
+                "DC should pass through lowpass; got {}",
+                v
+            );
+        } else { panic!("expected Mono"); }
     }
 
     #[test]
     fn attenuates_above_cutoff() {
-        // A second-order lowpass has −40 dB/decade rolloff. At 10× the cutoff
-        // the signal should be attenuated to below 5% of the input amplitude.
         let sr = 44100.0;
         let mut f = make_filter_sr(1000.0, 0.0, sr);
+        set_static_ports(&mut f);
         settle(&mut f, 4096);
         let peak = measure_peak(&mut f, 10_000.0, sr, 1024);
         assert!(
@@ -432,12 +481,12 @@ mod tests {
 
     #[test]
     fn resonance_boosts_near_cutoff() {
-        // High resonance should boost signals near the cutoff relative to the
-        // Butterworth (resonance=0) case.
         let sr = 44100.0;
         let cutoff = 1000.0;
         let mut flat = make_filter_sr(cutoff, 0.0, sr);
         let mut resonant = make_filter_sr(cutoff, 0.8, sr);
+        set_static_ports(&mut flat);
+        set_static_ports(&mut resonant);
         settle(&mut flat, 4096);
         settle(&mut resonant, 4096);
         let flat_peak = measure_peak(&mut flat, cutoff, sr, 4096);
@@ -450,39 +499,44 @@ mod tests {
 
     #[test]
     fn cutoff_cv_shifts_cutoff_upward() {
-        // cutoff_cv = +1.0 V/oct doubles the cutoff. A signal between the
-        // original and doubled cutoff should be less attenuated with +1 V CV.
         let sr = 44100.0;
         let base_cutoff = 500.0;
-        let test_freq = 800.0; // between 500 Hz and 1000 Hz
+        let test_freq = 800.0;
 
         let mut no_cv = make_filter_sr(base_cutoff, 0.0, sr);
         let mut with_cv = make_filter_sr(base_cutoff, 0.0, sr);
+        set_static_ports(&mut no_cv);
+        set_cv_ports(&mut with_cv);
 
-        // Tell with_cv that cutoff_cv is connected so it uses the CV path.
-        with_cv.set_connectivity(PortConnectivity {
-            inputs: vec![true, true, false].into_boxed_slice(),
-            outputs: vec![true].into_boxed_slice(),
-        });
-
-        let mut no_cv_out = [0.0f64];
-        let mut with_cv_out = [0.0f64];
+        let mut pool_no_cv = make_pool(4);
+        let mut pool_with_cv = make_pool(4);
 
         // Settle both filters; with_cv receives +1 V during settling.
-        for _ in 0..4096 {
-            no_cv.process(&[0.0, 0.0, 0.0], &mut no_cv_out);
-            with_cv.process(&[0.0, 1.0, 0.0], &mut with_cv_out);
+        for i in 0..4096 {
+            pool_no_cv[0][1 - (i % 2)] = CableValue::Mono(0.0);
+            no_cv.process(&mut pool_no_cv, i % 2);
+            pool_with_cv[0][1 - (i % 2)] = CableValue::Mono(0.0);
+            pool_with_cv[1][1 - (i % 2)] = CableValue::Mono(1.0);
+            pool_with_cv[2][1 - (i % 2)] = CableValue::Mono(0.0);
+            with_cv.process(&mut pool_with_cv, i % 2);
         }
 
-        // Measure peak output for a sine at test_freq.
         let mut no_cv_peak = 0.0f64;
         let mut with_cv_peak = 0.0f64;
         for i in 0..4096usize {
             let x = (TAU * test_freq * i as f64 / sr).sin();
-            no_cv.process(&[x, 0.0, 0.0], &mut no_cv_out);
-            with_cv.process(&[x, 1.0, 0.0], &mut with_cv_out);
-            no_cv_peak = no_cv_peak.max(no_cv_out[0].abs());
-            with_cv_peak = with_cv_peak.max(with_cv_out[0].abs());
+            pool_no_cv[0][1 - (i % 2)] = CableValue::Mono(x);
+            no_cv.process(&mut pool_no_cv, i % 2);
+            if let CableValue::Mono(v) = pool_no_cv[3][i % 2] {
+                no_cv_peak = no_cv_peak.max(v.abs());
+            }
+            pool_with_cv[0][1 - (i % 2)] = CableValue::Mono(x);
+            pool_with_cv[1][1 - (i % 2)] = CableValue::Mono(1.0);
+            pool_with_cv[2][1 - (i % 2)] = CableValue::Mono(0.0);
+            with_cv.process(&mut pool_with_cv, i % 2);
+            if let CableValue::Mono(v) = pool_with_cv[3][i % 2] {
+                with_cv_peak = with_cv_peak.max(v.abs());
+            }
         }
 
         assert!(
@@ -494,21 +548,19 @@ mod tests {
 
     #[test]
     fn static_path_passes_dc_when_no_cv() {
-        // Explicit connectivity update declaring no CV inputs should keep the
-        // filter on the static path and produce correct DC behaviour.
         let mut f = make_filter(1000.0, 0.0);
-        f.set_connectivity(PortConnectivity {
-            inputs: vec![true, false, false].into_boxed_slice(),
-            outputs: vec![true].into_boxed_slice(),
-        });
-        let mut out = [0.0f64];
-        for _ in 0..4096 {
-            f.process(&[1.0, 0.0, 0.0], &mut out);
+        set_static_ports(&mut f);
+        let mut pool = make_pool(4);
+        for i in 0..4096 {
+            pool[0][1 - (i % 2)] = CableValue::Mono(1.0);
+            f.process(&mut pool, i % 2);
         }
-        assert!(
-            (out[0] - 1.0).abs() < 0.001,
-            "DC should pass in static path; got {}",
-            out[0]
-        );
+        if let CableValue::Mono(v) = pool[3][4095 % 2] {
+            assert!(
+                (v - 1.0).abs() < 0.001,
+                "DC should pass in static path; got {}",
+                v
+            );
+        } else { panic!("expected Mono"); }
     }
 }

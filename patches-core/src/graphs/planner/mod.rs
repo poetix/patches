@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use crate::cables::{InputPort, OutputPort};
 use crate::modules::{InstanceId, ModuleShape, ParameterMap, PortConnectivity};
 use super::graph::{ModuleGraph, NodeId};
 
@@ -65,6 +66,13 @@ pub struct NodeState {
     /// Stored so that the engine can diff against it to emit connectivity updates only
     /// when the wiring actually changes.
     pub connectivity: PortConnectivity,
+    /// The `InputPort` objects computed during the last build, for change detection.
+    ///
+    /// Compared against the newly computed ports in the action phase to decide whether
+    /// to emit a `port_updates` entry for this surviving module.
+    pub input_ports: Vec<InputPort>,
+    /// The `OutputPort` objects computed during the last build, for change detection.
+    pub output_ports: Vec<OutputPort>,
 }
 
 // ── PlannerState ──────────────────────────────────────────────────────────────
@@ -304,6 +312,8 @@ mod tests {
                 parameter_map: params,
                 shape,
                 connectivity,
+                input_ports: Vec::new(),
+                output_ports: Vec::new(),
             },
         );
         state

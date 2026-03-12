@@ -1,5 +1,6 @@
 use crate::audio_environment::AudioEnvironment;
 use crate::build_error::BuildError;
+use crate::cables::{CableValue, InputPort, OutputPort};
 use crate::midi::ReceivesMidi;
 use super::instance_id::InstanceId;
 use super::module_descriptor::{ModuleDescriptor, ModuleShape, ParameterKind};
@@ -103,7 +104,9 @@ pub fn validate_parameters(
 /// has at least one incoming cable; `outputs[i]` is `true` if the i-th output port has at
 /// least one outgoing cable.
 ///
-/// Construct with [`PortConnectivity::new`], which fills both slices with `false`.
+/// Used internally by the planner for connectivity change-detection across successive builds.
+/// Connectivity information is delivered to modules via port objects in
+/// [`Module::set_ports`] rather than via this struct directly.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PortConnectivity {
     pub inputs: Box<[bool]>,
@@ -226,19 +229,29 @@ pub trait Module: Send {
     /// return the same value for the lifetime of the instance.
     fn instance_id(&self) -> InstanceId;
 
-    fn process(&mut self, inputs: &[f64], outputs: &mut [f64]);
+    /// Process one sample using the shared ping-pong cable buffer pool.
+    ///
+    /// `pool` is the full ping-pong buffer pool (`pool[cable_idx][wi]` is the write slot;
+    /// `pool[cable_idx][1 - wi]` is the read slot). `wi` is the current write index (0 or 1).
+    /// Modules index into the pool via the `cable_idx` fields on their stored port objects
+    /// (delivered by [`set_ports`](Module::set_ports)), using `read_from(pool, 1 - wi)` and
+    /// `write_to(pool, wi, value)`.
+    ///
+    /// **Must not allocate, block, or perform I/O.**
+    fn process(&mut self, pool: &mut [[CableValue; 2]], wi: usize);
 
-    /// Inform the module which of its ports are connected in the current patch.
+    /// Deliver pre-resolved port objects to the module.
     ///
     /// Called by the engine whenever the patch topology changes (e.g. after a hot-reload).
-    /// Implementations may use this to skip computation for unconnected ports, cache
-    /// derived coefficients, or mirror state across channels.
+    /// Each entry in `inputs` / `outputs` corresponds positionally to the module's declared
+    /// [`ModuleDescriptor`] inputs / outputs. Connectivity information is carried by the
+    /// `connected` field on each concrete port type.
     ///
-    /// **Implementations must not allocate, block, or perform I/O.** This method may be
-    /// called on the audio thread immediately before the next `process` call.
+    /// **Must not allocate, block, or perform I/O.** This method may be called on the
+    /// audio thread immediately before the next `process` call.
     ///
     /// The default implementation is a no-op.
-    fn set_connectivity(&mut self, _connectivity: PortConnectivity) {}
+    fn set_ports(&mut self, _inputs: &[InputPort], _outputs: &[OutputPort]) {}
 
     fn as_any(&self) -> &dyn std::any::Any;
 

@@ -1,6 +1,6 @@
 use patches_core::{
-    AudioEnvironment, InstanceId, MidiEvent, Module, ModuleDescriptor, ModuleShape,
-    PortDescriptor, ReceivesMidi,
+    AudioEnvironment, CableValue, InputPort, InstanceId, MidiEvent, Module, ModuleDescriptor,
+    ModuleShape, MonoOutput, OutputPort, PortDescriptor, ReceivesMidi,
 };
 use patches_core::CableKind;
 use patches_core::parameter_map::ParameterMap;
@@ -92,6 +92,12 @@ pub struct MonophonicMidiKeyboard {
     mod_value: f64,
     /// Current pitchbend value normalised to [-1.0, 1.0].
     pitch_value: f64,
+    // Output port fields
+    out_v_oct: MonoOutput,
+    out_trigger: MonoOutput,
+    out_gate: MonoOutput,
+    out_mod: MonoOutput,
+    out_pitch: MonoOutput,
 }
 
 impl Module for MonophonicMidiKeyboard {
@@ -126,6 +132,11 @@ impl Module for MonophonicMidiKeyboard {
             trigger_armed: false,
             mod_value: 0.0,
             pitch_value: 0.0,
+            out_v_oct: MonoOutput::default(),
+            out_trigger: MonoOutput::default(),
+            out_gate: MonoOutput::default(),
+            out_mod: MonoOutput::default(),
+            out_pitch: MonoOutput::default(),
         }
     }
 
@@ -139,19 +150,29 @@ impl Module for MonophonicMidiKeyboard {
         self.instance_id
     }
 
-    fn process(&mut self, _inputs: &[f64], outputs: &mut [f64]) {
-        outputs[0] = self.current_note as f64 * VOCT_SCALING;
+    fn set_ports(&mut self, _inputs: &[InputPort], outputs: &[OutputPort]) {
+        self.out_v_oct = MonoOutput::from_ports(outputs, 0);
+        self.out_trigger = MonoOutput::from_ports(outputs, 1);
+        self.out_gate = MonoOutput::from_ports(outputs, 2);
+        self.out_mod = MonoOutput::from_ports(outputs, 3);
+        self.out_pitch = MonoOutput::from_ports(outputs, 4);
+    }
 
-        outputs[1] = if self.trigger_armed {
+    fn process(&mut self, pool: &mut [[CableValue; 2]], wi: usize) {
+        self.out_v_oct.write_to(pool, wi, self.current_note as f64 * VOCT_SCALING);
+
+        let trigger_val = if self.trigger_armed {
             self.trigger_armed = false;
             1.0
         } else {
             0.0
         };
+        self.out_trigger.write_to(pool, wi, trigger_val);
 
-        outputs[2] = if !self.stack.is_empty() || self.sustain { 1.0 } else { 0.0 };
-        outputs[3] = self.mod_value;
-        outputs[4] = self.pitch_value;
+        let gate_val = if !self.stack.is_empty() || self.sustain { 1.0 } else { 0.0 };
+        self.out_gate.write_to(pool, wi, gate_val);
+        self.out_mod.write_to(pool, wi, self.mod_value);
+        self.out_pitch.write_to(pool, wi, self.pitch_value);
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -242,9 +263,29 @@ mod tests {
         MidiEvent { bytes: [0xE0, (raw & 0x7F) as u8, ((raw >> 7) & 0x7F) as u8] }
     }
 
-    fn tick(m: &mut Box<dyn Module>) -> [f64; 5] {
+    fn make_pool(n: usize) -> Vec<[CableValue; 2]> {
+        vec![[CableValue::Mono(0.0); 2]; n]
+    }
+
+    fn set_all_outputs_connected(module: &mut Box<dyn Module>) {
+        // 5 outputs: 0=v_oct, 1=trigger, 2=gate, 3=mod, 4=pitch
+        let outputs = vec![
+            OutputPort::Mono(MonoOutput { cable_idx: 0, connected: true }),
+            OutputPort::Mono(MonoOutput { cable_idx: 1, connected: true }),
+            OutputPort::Mono(MonoOutput { cable_idx: 2, connected: true }),
+            OutputPort::Mono(MonoOutput { cable_idx: 3, connected: true }),
+            OutputPort::Mono(MonoOutput { cable_idx: 4, connected: true }),
+        ];
+        module.set_ports(&[], &outputs);
+    }
+
+    fn tick(m: &mut Box<dyn Module>, pool: &mut Vec<[CableValue; 2]>, tick_count: usize) -> [f64; 5] {
+        let wi = tick_count % 2;
+        m.process(pool, wi);
         let mut out = [0.0f64; 5];
-        m.process(&[], &mut out);
+        for (i, v) in out.iter_mut().enumerate() {
+            if let CableValue::Mono(val) = pool[i][wi] { *v = val; }
+        }
         out
     }
 
@@ -323,9 +364,10 @@ mod tests {
     #[test]
     fn note_on_sets_voct_gate_trigger() {
         let mut m = make_keyboard();
-        // MIDI note 60 = C5 in system convention (60/12 = 5.0 V)
+        set_all_outputs_connected(&mut m);
+        let mut pool = make_pool(5);
         m.as_midi_receiver().unwrap().receive_midi(note_on(60, 100));
-        let out = tick(&mut m);
+        let out = tick(&mut m, &mut pool, 0);
         assert_eq!(out[0], 5.0,  "v_oct: note 60 should be 5.0");
         assert_eq!(out[1], 1.0,  "trigger should be high on first tick after note-on");
         assert_eq!(out[2], 1.0,  "gate should be high while note held");
@@ -334,27 +376,30 @@ mod tests {
     #[test]
     fn trigger_clears_after_one_tick() {
         let mut m = make_keyboard();
+        set_all_outputs_connected(&mut m);
+        let mut pool = make_pool(5);
         m.as_midi_receiver().unwrap().receive_midi(note_on(69, 100));
-        tick(&mut m); // consume trigger
-        let out = tick(&mut m);
+        tick(&mut m, &mut pool, 0); // consume trigger
+        let out = tick(&mut m, &mut pool, 1);
         assert_eq!(out[1], 0.0, "trigger should be 0 on the second tick");
         assert_eq!(out[2], 1.0, "gate should still be high");
     }
 
     #[test]
     fn voct_correct_for_various_notes() {
-        // Convention: note / 12.0, matching StepSequencer (C0=0V, C1=1V, C2=2V, …)
         let cases: &[(u8, f64)] = &[
-            (0,  0.0),           // C0 = 0 V
-            (12, 1.0),           // C1 = 1 V
-            (60, 5.0),           // C5 = 5 V (middle C in MIDI)
-            (69, 69.0 / 12.0),   // A5 in system convention
-            (1,  1.0 / 12.0),    // C#0
+            (0,  0.0),
+            (12, 1.0),
+            (60, 5.0),
+            (69, 69.0 / 12.0),
+            (1,  1.0 / 12.0),
         ];
         for &(note, expected) in cases {
             let mut m = make_keyboard();
+            set_all_outputs_connected(&mut m);
+            let mut pool = make_pool(5);
             m.as_midi_receiver().unwrap().receive_midi(note_on(note, 100));
-            let out = tick(&mut m);
+            let out = tick(&mut m, &mut pool, 0);
             let diff = (out[0] - expected).abs();
             assert!(diff < 1e-10, "note {note}: expected v_oct {expected}, got {}", out[0]);
         }
@@ -363,40 +408,43 @@ mod tests {
     #[test]
     fn note_off_drops_gate_when_no_sustain() {
         let mut m = make_keyboard();
+        set_all_outputs_connected(&mut m);
+        let mut pool = make_pool(5);
         m.as_midi_receiver().unwrap().receive_midi(note_on(60, 100));
-        tick(&mut m);
+        tick(&mut m, &mut pool, 0);
         m.as_midi_receiver().unwrap().receive_midi(note_off(60));
-        let out = tick(&mut m);
+        let out = tick(&mut m, &mut pool, 1);
         assert_eq!(out[2], 0.0, "gate should drop after note-off with no sustain");
     }
 
     #[test]
     fn releasing_top_note_falls_back_to_previous_note() {
         let mut m = make_keyboard();
+        set_all_outputs_connected(&mut m);
+        let mut pool = make_pool(5);
         m.as_midi_receiver().unwrap().receive_midi(note_on(60, 100));
-        tick(&mut m);
+        tick(&mut m, &mut pool, 0);
         m.as_midi_receiver().unwrap().receive_midi(note_on(64, 100));
-        tick(&mut m);
+        tick(&mut m, &mut pool, 1);
 
-        // Release the top note — should fall back to 60
         m.as_midi_receiver().unwrap().receive_midi(note_off(64));
-        let out = tick(&mut m);
+        let out = tick(&mut m, &mut pool, 2);
         assert_eq!(out[2], 1.0,  "gate should stay high (60 is still held)");
         assert_eq!(out[0], 5.0,  "v_oct should revert to note 60 (5.0 V)");
-        // No new trigger — this is a legato fallback, not a fresh note-on
         assert_eq!(out[1], 0.0,  "no trigger on fallback");
     }
 
     #[test]
     fn releasing_non_top_note_does_not_change_pitch() {
         let mut m = make_keyboard();
+        set_all_outputs_connected(&mut m);
+        let mut pool = make_pool(5);
         m.as_midi_receiver().unwrap().receive_midi(note_on(60, 100));
         m.as_midi_receiver().unwrap().receive_midi(note_on(64, 100));
-        tick(&mut m);
+        tick(&mut m, &mut pool, 0);
 
-        // Release 60 while 64 is still on top
         m.as_midi_receiver().unwrap().receive_midi(note_off(60));
-        let out = tick(&mut m);
+        let out = tick(&mut m, &mut pool, 1);
         assert_eq!(out[2], 1.0,                "gate stays high");
         assert_eq!(out[0], 64.0 * VOCT_SCALING, "v_oct stays at 64");
     }
@@ -404,39 +452,45 @@ mod tests {
     #[test]
     fn sustain_holds_gate_after_note_off() {
         let mut m = make_keyboard();
+        set_all_outputs_connected(&mut m);
+        let mut pool = make_pool(5);
         m.as_midi_receiver().unwrap().receive_midi(cc(64, 127)); // sustain on
         m.as_midi_receiver().unwrap().receive_midi(note_on(60, 100));
-        tick(&mut m);
+        tick(&mut m, &mut pool, 0);
         m.as_midi_receiver().unwrap().receive_midi(note_off(60));
-        let out = tick(&mut m);
+        let out = tick(&mut m, &mut pool, 1);
         assert_eq!(out[2], 1.0, "gate should remain high while sustain is active");
     }
 
     #[test]
     fn sustain_release_drops_gate_when_no_note_held() {
         let mut m = make_keyboard();
+        set_all_outputs_connected(&mut m);
+        let mut pool = make_pool(5);
         m.as_midi_receiver().unwrap().receive_midi(cc(64, 127)); // sustain on
         m.as_midi_receiver().unwrap().receive_midi(note_on(60, 100));
-        tick(&mut m);
+        tick(&mut m, &mut pool, 0);
         m.as_midi_receiver().unwrap().receive_midi(note_off(60));
         m.as_midi_receiver().unwrap().receive_midi(cc(64, 0)); // sustain off
-        let out = tick(&mut m);
+        let out = tick(&mut m, &mut pool, 1);
         assert_eq!(out[2], 0.0, "gate should drop when sustain released with no note held");
     }
 
     #[test]
     fn mod_wheel_updates_mod_output() {
         let mut m = make_keyboard();
+        set_all_outputs_connected(&mut m);
+        let mut pool = make_pool(5);
         m.as_midi_receiver().unwrap().receive_midi(cc(1, 127));
-        let out = tick(&mut m);
+        let out = tick(&mut m, &mut pool, 0);
         assert_eq!(out[3], 1.0, "mod at CC 127 should be 1.0");
 
         m.as_midi_receiver().unwrap().receive_midi(cc(1, 0));
-        let out = tick(&mut m);
+        let out = tick(&mut m, &mut pool, 1);
         assert_eq!(out[3], 0.0, "mod at CC 0 should be 0.0");
 
         m.as_midi_receiver().unwrap().receive_midi(cc(1, 64));
-        let out = tick(&mut m);
+        let out = tick(&mut m, &mut pool, 2);
         let expected = 64.0 / 127.0;
         let diff = (out[3] - expected).abs();
         assert!(diff < 1e-10, "mod at CC 64 should be {expected}, got {}", out[3]);
@@ -445,42 +499,43 @@ mod tests {
     #[test]
     fn pitchbend_normalises_correctly() {
         let mut m = make_keyboard();
+        set_all_outputs_connected(&mut m);
+        let mut pool = make_pool(5);
 
-        // Centre (no bend)
         m.as_midi_receiver().unwrap().receive_midi(pitch_bend(8192));
-        let out = tick(&mut m);
+        let out = tick(&mut m, &mut pool, 0);
         assert_eq!(out[4], 0.0, "pitchbend centre should be 0.0");
 
-        // Full up
         m.as_midi_receiver().unwrap().receive_midi(pitch_bend(16383));
-        let out = tick(&mut m);
+        let out = tick(&mut m, &mut pool, 1);
         let expected = (16383.0 - 8192.0) / 8192.0;
         let diff = (out[4] - expected).abs();
         assert!(diff < 1e-10, "pitchbend full-up should be ~1.0, got {}", out[4]);
 
-        // Full down
         m.as_midi_receiver().unwrap().receive_midi(pitch_bend(0));
-        let out = tick(&mut m);
+        let out = tick(&mut m, &mut pool, 2);
         assert_eq!(out[4], -1.0, "pitchbend full-down should be -1.0");
     }
 
     #[test]
     fn unknown_cc_is_ignored() {
         let mut m = make_keyboard();
-        // CC 7 (volume) is not handled; should not panic or alter state
+        set_all_outputs_connected(&mut m);
+        let mut pool = make_pool(5);
         m.as_midi_receiver().unwrap().receive_midi(cc(7, 100));
-        let out = tick(&mut m);
+        let out = tick(&mut m, &mut pool, 0);
         assert_eq!(out[3], 0.0, "unknown CC should not affect mod output");
     }
 
     #[test]
     fn note_on_velocity_zero_treated_as_note_off() {
         let mut m = make_keyboard();
+        set_all_outputs_connected(&mut m);
+        let mut pool = make_pool(5);
         m.as_midi_receiver().unwrap().receive_midi(note_on(60, 100));
-        tick(&mut m);
-        // NoteOn with velocity 0 = NoteOff
+        tick(&mut m, &mut pool, 0);
         m.as_midi_receiver().unwrap().receive_midi(MidiEvent { bytes: [0x90, 60, 0] });
-        let out = tick(&mut m);
+        let out = tick(&mut m, &mut pool, 1);
         assert_eq!(out[2], 0.0, "NoteOn vel=0 should drop gate");
         assert_eq!(out[1], 0.0, "NoteOn vel=0 should not fire trigger");
     }

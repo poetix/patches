@@ -1,5 +1,6 @@
 use patches_core::{
-    AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleShape, PortDescriptor,
+    AudioEnvironment, CableValue, InputPort, InstanceId, Module, ModuleDescriptor,
+    MonoInput, MonoOutput, ModuleShape, OutputPort, PortDescriptor,
 };
 use patches_core::CableKind;
 use patches_core::parameter_map::ParameterMap;
@@ -16,6 +17,9 @@ pub struct Sum {
     instance_id: InstanceId,
     descriptor: ModuleDescriptor,
     size: usize,
+    // Port fields
+    in_ports: Vec<MonoInput>,
+    out_port: MonoOutput,
 }
 
 impl Module for Sum {
@@ -39,6 +43,8 @@ impl Module for Sum {
             instance_id,
             size,
             descriptor,
+            in_ports: vec![MonoInput::default(); size],
+            out_port: MonoOutput::default(),
         }
     }
 
@@ -53,8 +59,20 @@ impl Module for Sum {
         self.instance_id
     }
 
-    fn process(&mut self, inputs: &[f64], outputs: &mut [f64]) {
-        outputs[0] = inputs[..self.size].iter().sum();
+    fn set_ports(&mut self, inputs: &[InputPort], outputs: &[OutputPort]) {
+        for i in 0..self.size {
+            self.in_ports[i] = MonoInput::from_ports(inputs, i);
+        }
+        self.out_port = MonoOutput::from_ports(outputs, 0);
+    }
+
+    fn process(&mut self, pool: &mut [[CableValue; 2]], wi: usize) {
+        let ri = 1 - wi;
+        let total: f64 = self.in_ports[..self.size]
+            .iter()
+            .map(|p| p.read_from(pool, ri))
+            .sum();
+        self.out_port.write_to(pool, wi, total);
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -81,6 +99,20 @@ mod tests {
         ).unwrap()
     }
 
+    fn make_pool(n: usize) -> Vec<[CableValue; 2]> {
+        vec![[CableValue::Mono(0.0); 2]; n]
+    }
+
+    fn set_ports_for_test(module: &mut Box<dyn Module>, n_inputs: usize) {
+        let inputs: Vec<InputPort> = (0..n_inputs)
+            .map(|i| InputPort::Mono(MonoInput { cable_idx: i, scale: 1.0, connected: true }))
+            .collect();
+        let outputs = vec![
+            OutputPort::Mono(MonoOutput { cable_idx: n_inputs, connected: true }),
+        ];
+        module.set_ports(&inputs, &outputs);
+    }
+
     #[test]
     fn descriptor_shape_size_3() {
         let m = make_sum(3);
@@ -98,17 +130,27 @@ mod tests {
     #[test]
     fn size_1_passes_input_unchanged() {
         let mut m = make_sum(1);
-        let mut out = [0.0f64];
-        m.process(&[0.75], &mut out);
-        assert_eq!(out[0], 0.75);
+        set_ports_for_test(&mut m, 1);
+        let mut pool = make_pool(2);
+        pool[0][1] = CableValue::Mono(0.75);
+        m.process(&mut pool, 0);
+        if let CableValue::Mono(v) = pool[1][0] {
+            assert_eq!(v, 0.75);
+        } else { panic!("expected Mono"); }
     }
 
     #[test]
     fn size_3_sums_inputs() {
         let mut m = make_sum(3);
-        let mut out = [0.0f64];
-        m.process(&[0.2, 0.3, 0.5], &mut out);
-        assert!((out[0] - 1.0).abs() < f64::EPSILON);
+        set_ports_for_test(&mut m, 3);
+        let mut pool = make_pool(4);
+        pool[0][1] = CableValue::Mono(0.2);
+        pool[1][1] = CableValue::Mono(0.3);
+        pool[2][1] = CableValue::Mono(0.5);
+        m.process(&mut pool, 0);
+        if let CableValue::Mono(v) = pool[3][0] {
+            assert!((v - 1.0).abs() < f64::EPSILON);
+        } else { panic!("expected Mono"); }
     }
 
     #[test]

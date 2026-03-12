@@ -1,7 +1,6 @@
 use patches_core::{
-    AudioEnvironment, InstanceId, Module, ModuleDescriptor,
-    ModuleShape, ParameterDescriptor, ParameterKind, PortDescriptor,
-    PortConnectivity
+    AudioEnvironment, CableValue, InputPort, InstanceId, Module, ModuleDescriptor,
+    MonoInput, MonoOutput, ModuleShape, OutputPort, ParameterDescriptor, ParameterKind, PortDescriptor,
 };
 use patches_core::CableKind;
 use patches_core::parameter_map::{ParameterMap, ParameterValue};
@@ -34,14 +33,16 @@ pub struct Oscillator {
     instance_id: InstanceId,
     phase_accumulator: UnitPhaseAccumulator,
     descriptor: ModuleDescriptor,
-    // Output connectivity
-    out_sine: bool,
-    out_triangle: bool,
-    out_sawtooth: bool,
-    out_square: bool,
-    // Input connectivity
-    in_pulse_width: bool,
-    in_phase_mod: bool,
+    // Input port fields
+    in_voct: MonoInput,
+    in_fm: MonoInput,
+    in_pulse_width: MonoInput,
+    in_phase_mod: MonoInput,
+    // Output port fields
+    out_sine: MonoOutput,
+    out_triangle: MonoOutput,
+    out_sawtooth: MonoOutput,
+    out_square: MonoOutput,
 }
 
 impl Module for Oscillator {
@@ -89,12 +90,14 @@ impl Module for Oscillator {
             instance_id,
             phase_accumulator: UnitPhaseAccumulator::new(audio_environment.sample_rate, C0_FREQ),
             descriptor,
-            out_sine: false,
-            out_triangle: false,
-            out_sawtooth: false,
-            out_square: false,
-            in_pulse_width: false,
-            in_phase_mod: false,
+            in_voct: MonoInput::default(),
+            in_fm: MonoInput::default(),
+            in_pulse_width: MonoInput::default(),
+            in_phase_mod: MonoInput::default(),
+            out_sine: MonoOutput::default(),
+            out_triangle: MonoOutput::default(),
+            out_sawtooth: MonoOutput::default(),
+            out_square: MonoOutput::default(),
         }
     }
 
@@ -112,19 +115,6 @@ impl Module for Oscillator {
         }
     }
 
-    fn set_connectivity(&mut self, connectivity: PortConnectivity) {
-        self.phase_accumulator.set_modulation(
-            connectivity.inputs[0], // voct
-            connectivity.inputs[1], // fm
-        );
-        self.in_pulse_width = connectivity.inputs[2];
-        self.in_phase_mod  = connectivity.inputs[3];
-        self.out_sine     = connectivity.outputs[0];
-        self.out_triangle = connectivity.outputs[1];
-        self.out_sawtooth = connectivity.outputs[2];
-        self.out_square   = connectivity.outputs[3];
-    }
-
     fn descriptor(&self) -> &ModuleDescriptor {
         &self.descriptor
     }
@@ -133,39 +123,53 @@ impl Module for Oscillator {
         self.instance_id
     }
 
-    fn process(&mut self, inputs: &[f64], outputs: &mut [f64]) {
+    fn set_ports(&mut self, inputs: &[InputPort], outputs: &[OutputPort]) {
+        self.in_voct = MonoInput::from_ports(inputs, 0);
+        self.in_fm = MonoInput::from_ports(inputs, 1);
+        self.in_pulse_width = MonoInput::from_ports(inputs, 2);
+        self.in_phase_mod = MonoInput::from_ports(inputs, 3);
+        self.out_sine = MonoOutput::from_ports(outputs, 0);
+        self.out_triangle = MonoOutput::from_ports(outputs, 1);
+        self.out_sawtooth = MonoOutput::from_ports(outputs, 2);
+        self.out_square = MonoOutput::from_ports(outputs, 3);
+    }
+
+    fn process(&mut self, pool: &mut [[CableValue; 2]], wi: usize) {
+        let ri = 1 - wi;
         let phase = self.phase_accumulator.phase;
-        let read_phase = if self.in_phase_mod {
-            (phase + inputs[3]).rem_euclid(1.0)
+        let read_phase = if self.in_phase_mod.is_connected() {
+            (phase + self.in_phase_mod.read_from(pool, ri)).rem_euclid(1.0)
         } else {
             phase
         };
 
-        if self.out_sine {
-            outputs[0] = lookup_sine(read_phase);
+        if self.out_sine.is_connected() {
+            self.out_sine.write_to(pool, wi, lookup_sine(read_phase));
         }
-        if self.out_triangle {
-            outputs[1] = 1.0 - 4.0 * (read_phase - 0.5).abs();
+        if self.out_triangle.is_connected() {
+            self.out_triangle.write_to(pool, wi, 1.0 - 4.0 * (read_phase - 0.5).abs());
         }
-        if self.out_sawtooth {
+        if self.out_sawtooth.is_connected() {
             let dt = self.phase_accumulator.phase_increment;
-            outputs[2] = (2.0 * read_phase - 1.0) - polyblep(read_phase, dt);
+            self.out_sawtooth.write_to(pool, wi, (2.0 * read_phase - 1.0) - polyblep(read_phase, dt));
         }
-        if self.out_square {
+        if self.out_square.is_connected() {
             let dt = self.phase_accumulator.phase_increment;
-            let duty = if self.in_pulse_width {
-                (0.5 + 0.5 * inputs[2]).clamp(0.01, 0.99)
+            let duty = if self.in_pulse_width.is_connected() {
+                (0.5 + 0.5 * self.in_pulse_width.read_from(pool, ri)).clamp(0.01, 0.99)
             } else {
                 0.5
             };
             let raw = if read_phase < duty { 1.0 } else { -1.0 };
             let blep = polyblep(read_phase, dt)
                 - polyblep((read_phase - duty).rem_euclid(1.0), dt);
-            outputs[3] = raw + blep;
+            self.out_square.write_to(pool, wi, raw + blep);
         }
 
         if self.phase_accumulator.is_modulating {
-            self.phase_accumulator.advance_modulating(inputs[0], inputs[1]);
+            let voct = self.in_voct.read_from(pool, ri);
+            let fm = self.in_fm.read_from(pool, ri);
+            self.phase_accumulator.advance_modulating(voct, fm);
         } else {
             self.phase_accumulator.advance();
         }
@@ -181,7 +185,7 @@ mod tests {
 
     use super::*;
     use crate::common::frequency::C0_FREQ;
-    use patches_core::{AudioEnvironment, Module, ModuleShape, PortConnectivity, Registry};
+    use patches_core::{AudioEnvironment, Module, ModuleShape, Registry};
     use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
     fn make_osc(frequency: f64) -> Box<dyn Module> {
@@ -202,11 +206,42 @@ mod tests {
         ).unwrap()
     }
 
-    fn all_outputs_connected() -> PortConnectivity {
-        PortConnectivity {
-            inputs: vec![false, false, false, false].into_boxed_slice(),
-            outputs: vec![true, true, true, true].into_boxed_slice(),
-        }
+    fn make_pool(n: usize) -> Vec<[CableValue; 2]> {
+        vec![[CableValue::Mono(0.0); 2]; n]
+    }
+
+/// Set up ports with only voct connected as input, all outputs connected.
+    fn set_ports_outputs_only(module: &mut Box<dyn Module>) {
+        let inputs = vec![
+            InputPort::Mono(MonoInput { cable_idx: 0, scale: 1.0, connected: false }),
+            InputPort::Mono(MonoInput { cable_idx: 1, scale: 1.0, connected: false }),
+            InputPort::Mono(MonoInput { cable_idx: 2, scale: 1.0, connected: false }),
+            InputPort::Mono(MonoInput { cable_idx: 3, scale: 1.0, connected: false }),
+        ];
+        let outputs = vec![
+            OutputPort::Mono(MonoOutput { cable_idx: 4, connected: true }),
+            OutputPort::Mono(MonoOutput { cable_idx: 5, connected: true }),
+            OutputPort::Mono(MonoOutput { cable_idx: 6, connected: true }),
+            OutputPort::Mono(MonoOutput { cable_idx: 7, connected: true }),
+        ];
+        module.set_ports(&inputs, &outputs);
+    }
+
+    /// Set up ports with no outputs connected.
+    fn set_ports_none_connected(module: &mut Box<dyn Module>) {
+        let inputs = vec![
+            InputPort::Mono(MonoInput { cable_idx: 0, scale: 1.0, connected: false }),
+            InputPort::Mono(MonoInput { cable_idx: 1, scale: 1.0, connected: false }),
+            InputPort::Mono(MonoInput { cable_idx: 2, scale: 1.0, connected: false }),
+            InputPort::Mono(MonoInput { cable_idx: 3, scale: 1.0, connected: false }),
+        ];
+        let outputs = vec![
+            OutputPort::Mono(MonoOutput { cable_idx: 4, connected: false }),
+            OutputPort::Mono(MonoOutput { cable_idx: 5, connected: false }),
+            OutputPort::Mono(MonoOutput { cable_idx: 6, connected: false }),
+            OutputPort::Mono(MonoOutput { cable_idx: 7, connected: false }),
+        ];
+        module.set_ports(&inputs, &outputs);
     }
 
     #[test]
@@ -234,25 +269,26 @@ mod tests {
 
     #[test]
     fn sine_output_completes_full_cycle_in_period_samples() {
-        // base = C0_FREQ + frequency. Choose sample_rate so period is exact.
         let frequency = 1.0_f64;
         let period = 100_usize;
         let sample_rate = (C0_FREQ + frequency) * period as f64;
 
         let mut osc = make_osc_sr(frequency, sample_rate);
-        osc.set_connectivity(all_outputs_connected());
-        let mut outputs = [0.0_f64; 4];
+        set_ports_outputs_only(&mut osc);
+        let mut pool = make_pool(8);
 
         let mut first_cycle = Vec::with_capacity(period);
-        for _ in 0..period {
-            osc.process(&[0.0, 0.0, 0.0], &mut outputs);
-            first_cycle.push(outputs[0]);
+        for i in 0..period {
+            osc.process(&mut pool, i % 2);
+            let wi = i % 2;
+            if let CableValue::Mono(v) = pool[4][wi] { first_cycle.push(v); }
         }
 
         let mut second_cycle = Vec::with_capacity(period);
-        for _ in 0..period {
-            osc.process(&[0.0, 0.0, 0.0], &mut outputs);
-            second_cycle.push(outputs[0]);
+        for i in 0..period {
+            osc.process(&mut pool, (period + i) % 2);
+            let wi = (period + i) % 2;
+            if let CableValue::Mono(v) = pool[4][wi] { second_cycle.push(v); }
         }
 
         for (a, b) in first_cycle.iter().zip(second_cycle.iter()) {
@@ -267,19 +303,21 @@ mod tests {
         let sample_rate = (C0_FREQ + frequency) * period as f64;
 
         let mut osc = make_osc_sr(frequency, sample_rate);
-        osc.set_connectivity(all_outputs_connected());
-        let mut outputs = [0.0_f64; 4];
+        set_ports_outputs_only(&mut osc);
+        let mut pool = make_pool(8);
 
         let mut first_cycle = Vec::with_capacity(period);
-        for _ in 0..period {
-            osc.process(&[0.0, 0.0, 0.0], &mut outputs);
-            first_cycle.push(outputs[1]);
+        for i in 0..period {
+            osc.process(&mut pool, i % 2);
+            let wi = i % 2;
+            if let CableValue::Mono(v) = pool[5][wi] { first_cycle.push(v); }
         }
 
         let mut second_cycle = Vec::with_capacity(period);
-        for _ in 0..period {
-            osc.process(&[0.0, 0.0, 0.0], &mut outputs);
-            second_cycle.push(outputs[1]);
+        for i in 0..period {
+            osc.process(&mut pool, (period + i) % 2);
+            let wi = (period + i) % 2;
+            if let CableValue::Mono(v) = pool[5][wi] { second_cycle.push(v); }
         }
 
         for (a, b) in first_cycle.iter().zip(second_cycle.iter()) {
@@ -289,102 +327,111 @@ mod tests {
 
     #[test]
     fn sawtooth_polyblep_smooths_transition() {
-        // At phase=0 the raw sawtooth would output -1.0, but PolyBLEP should give a value
-        // strictly above -1.0.
         let frequency = 1.0_f64;
         let period = 100_usize;
         let sample_rate = (C0_FREQ + frequency) * period as f64;
 
         let mut osc = make_osc_sr(frequency, sample_rate);
-        osc.set_connectivity(all_outputs_connected());
-        let mut outputs = [0.0_f64; 4];
+        set_ports_outputs_only(&mut osc);
+        let mut pool = make_pool(8);
 
-        // First sample: phase = 0 (transition wrap point).
-        osc.process(&[0.0, 0.0, 0.0], &mut outputs);
-        assert!(
-            outputs[2] > -1.0,
-            "sawtooth at wrap transition must not output exact -1.0; got {}", outputs[2]
-        );
+        osc.process(&mut pool, 0);
+        if let CableValue::Mono(v) = pool[6][0] {
+            assert!(
+                v > -1.0,
+                "sawtooth at wrap transition must not output exact -1.0; got {}", v
+            );
+        } else { panic!("expected Mono"); }
     }
 
     #[test]
     fn sawtooth_non_transition_samples_match_formula() {
-        // Non-transition samples (well away from the wrap) must match 2*phase - 1 exactly.
         let frequency = 1.0_f64;
         let period = 100_usize;
         let sample_rate = (C0_FREQ + frequency) * period as f64;
 
         let mut osc = make_osc_sr(frequency, sample_rate);
-        osc.set_connectivity(all_outputs_connected());
-        let mut outputs = [0.0_f64; 4];
+        set_ports_outputs_only(&mut osc);
+        let mut pool = make_pool(8);
 
-        osc.process(&[0.0, 0.0, 0.0], &mut outputs); // i=0 is the transition; skip
+        osc.process(&mut pool, 0); // i=0 is the transition; skip
         for i in 1..period {
-            osc.process(&[0.0, 0.0, 0.0], &mut outputs);
-            let phase = i as f64 / period as f64;
-            let expected = 2.0 * phase - 1.0;
-            assert!(
-                (outputs[2] - expected).abs() < 1e-10,
-                "sawtooth mismatch at sample {i}: got {}, expected {expected}", outputs[2]
-            );
+            osc.process(&mut pool, i % 2);
+            let wi = i % 2;
+            if let CableValue::Mono(v) = pool[6][wi] {
+                let phase = i as f64 / period as f64;
+                let expected = 2.0 * phase - 1.0;
+                assert!(
+                    (v - expected).abs() < 1e-10,
+                    "sawtooth mismatch at sample {i}: got {}, expected {expected}", v
+                );
+            } else { panic!("expected Mono"); }
         }
     }
 
     #[test]
     fn square_polyblep_at_transition_not_exactly_plus_minus_one() {
-        // At phase=0 (rising edge) and phase≈duty (falling edge), PolyBLEP correction
-        // must produce a value strictly between -1 and +1.
         let frequency = 1.0_f64;
         let period = 100_usize;
         let sample_rate = (C0_FREQ + frequency) * period as f64;
 
         let mut osc = make_osc_sr(frequency, sample_rate);
-        osc.set_connectivity(PortConnectivity {
-            inputs: vec![false, false, false, false].into_boxed_slice(),
-            outputs: vec![false, false, false, true].into_boxed_slice(),
-        });
-        let mut outputs = [0.0_f64; 4];
+        set_ports_outputs_only(&mut osc);
+        let mut pool = make_pool(8);
 
-        // First sample: phase = 0 (rising edge). Raw would be +1; PolyBLEP gives ~0.
-        osc.process(&[0.0, 0.0, 0.0], &mut outputs);
-        assert!(
-            outputs[3] > -1.0 && outputs[3] < 1.0,
-            "square at rising edge must not be exactly ±1; got {}", outputs[3]
-        );
+        osc.process(&mut pool, 0);
+        if let CableValue::Mono(v) = pool[7][0] {
+            assert!(
+                v > -1.0 && v < 1.0,
+                "square at rising edge must not be exactly ±1; got {}", v
+            );
+        } else { panic!("expected Mono"); }
 
-        // Advance to the falling edge (phase = 0.50 = duty).
-        // After the first call above, phase = 0.01. Run 49 more to bring phase to 0.50,
-        // then sample once at that phase.
-        for _ in 0..49 {
-            osc.process(&[0.0, 0.0, 0.0], &mut outputs);
+        for i in 0..49 {
+            osc.process(&mut pool, (1 + i) % 2);
         }
-        // Phase is now 0.50; sample it (falling edge transition).
-        osc.process(&[0.0, 0.0, 0.0], &mut outputs);
-        assert!(
-            outputs[3] > -1.0 && outputs[3] < 1.0,
-            "square at falling edge must not be exactly ±1; got {}", outputs[3]
-        );
+        osc.process(&mut pool, 50 % 2);
+        if let CableValue::Mono(v) = pool[7][50 % 2] {
+            assert!(
+                v > -1.0 && v < 1.0,
+                "square at falling edge must not be exactly ±1; got {}", v
+            );
+        } else { panic!("expected Mono"); }
     }
 
     #[test]
     fn square_duty_cycle_responds_to_pulse_width_input() {
-        // pulse_width input = 1.0 → duty = 0.5 + 0.5*1.0 = 1.0, clamped to 0.99
-        // → ~99% of samples should be +1.0
         let frequency = 1.0_f64;
         let period = 100_usize;
         let sample_rate = (C0_FREQ + frequency) * period as f64;
 
         let mut osc = make_osc_sr(frequency, sample_rate);
-        osc.set_connectivity(PortConnectivity {
-            inputs: vec![false, false, true, false].into_boxed_slice(),
-            outputs: vec![false, false, false, true].into_boxed_slice(),
-        });
-        let mut outputs = [0.0_f64; 4];
+        // Connect pulse_width input and square output
+        let inputs = vec![
+            InputPort::Mono(MonoInput { cable_idx: 0, scale: 1.0, connected: false }),
+            InputPort::Mono(MonoInput { cable_idx: 1, scale: 1.0, connected: false }),
+            InputPort::Mono(MonoInput { cable_idx: 2, scale: 1.0, connected: true }),
+            InputPort::Mono(MonoInput { cable_idx: 3, scale: 1.0, connected: false }),
+        ];
+        let outputs = vec![
+            OutputPort::Mono(MonoOutput { cable_idx: 4, connected: false }),
+            OutputPort::Mono(MonoOutput { cable_idx: 5, connected: false }),
+            OutputPort::Mono(MonoOutput { cable_idx: 6, connected: false }),
+            OutputPort::Mono(MonoOutput { cable_idx: 7, connected: true }),
+        ];
+        osc.set_ports(&inputs, &outputs);
+
+        let mut pool = make_pool(8);
+        // pulse_width input = 1.0 → duty = 0.5 + 0.5*1.0 = 1.0, clamped to 0.99
+        pool[2][1] = CableValue::Mono(1.0);
 
         let mut positive_count = 0usize;
-        for _ in 0..period {
-            osc.process(&[0.0, 0.0, 1.0], &mut outputs);
-            if outputs[3] > 0.0 { positive_count += 1; }
+        for i in 0..period {
+            pool[2][1 - (i % 2)] = CableValue::Mono(1.0);
+            osc.process(&mut pool, i % 2);
+            if let CableValue::Mono(v) = pool[7][i % 2] {
+                if v > 0.0 { positive_count += 1; }
+            }
         }
         assert!(
             positive_count >= 95,
@@ -395,52 +442,76 @@ mod tests {
     #[test]
     fn disconnected_outputs_are_not_written() {
         let mut osc = make_osc(440.0);
-        osc.set_connectivity(PortConnectivity {
-            inputs: vec![false, false, false, false].into_boxed_slice(),
-            outputs: vec![false, false, false, false].into_boxed_slice(),
-        });
-        let mut outputs = [99.0_f64; 4]; // sentinel values
-        osc.process(&[0.0, 0.0, 0.0], &mut outputs);
-        for (i, &v) in outputs.iter().enumerate() {
-            assert_eq!(v, 99.0, "output[{i}] was written despite being disconnected");
+        set_ports_none_connected(&mut osc);
+        // Pool slots 4..8 start at 99.0 sentinel
+        let mut pool: Vec<[CableValue; 2]> = (0..8).map(|_| [CableValue::Mono(99.0); 2]).collect();
+        osc.process(&mut pool, 0);
+        for i in 4..8 {
+            if let CableValue::Mono(v) = pool[i][0] {
+                assert_eq!(v, 99.0, "output cable {i} was written despite being disconnected");
+            }
         }
     }
 
     #[test]
     fn phase_mod_half_cycle_shifts_sine_output() {
-        // With phase_mod = 0.5 and accumulator phase = 0.0, read_phase = 0.5.
-        // lookup_sine(0.5) ≈ 0.0 (sine at half cycle).
         let mut osc = make_osc(440.0);
-        osc.set_connectivity(PortConnectivity {
-            inputs: vec![false, false, false, true].into_boxed_slice(),
-            outputs: vec![true, false, false, false].into_boxed_slice(),
-        });
-        let mut outputs = [0.0_f64; 4];
-        // Phase starts at 0. With phase_mod = 0.5, read_phase = (0 + 0.5).rem_euclid(1) = 0.5.
-        osc.process(&[0.0, 0.0, 0.0, 0.5], &mut outputs);
+        // Connect phase_mod input and sine output
+        let inputs = vec![
+            InputPort::Mono(MonoInput { cable_idx: 0, scale: 1.0, connected: false }),
+            InputPort::Mono(MonoInput { cable_idx: 1, scale: 1.0, connected: false }),
+            InputPort::Mono(MonoInput { cable_idx: 2, scale: 1.0, connected: false }),
+            InputPort::Mono(MonoInput { cable_idx: 3, scale: 1.0, connected: true }),
+        ];
+        let outputs = vec![
+            OutputPort::Mono(MonoOutput { cable_idx: 4, connected: true }),
+            OutputPort::Mono(MonoOutput { cable_idx: 5, connected: false }),
+            OutputPort::Mono(MonoOutput { cable_idx: 6, connected: false }),
+            OutputPort::Mono(MonoOutput { cable_idx: 7, connected: false }),
+        ];
+        osc.set_ports(&inputs, &outputs);
+
+        let mut pool = make_pool(8);
+        // phase_mod input = 0.5 in read slot (ri=1 when wi=0)
+        pool[3][1] = CableValue::Mono(0.5);
+        osc.process(&mut pool, 0);
         let expected = crate::common::approximate::lookup_sine(0.5);
-        assert!(
-            (outputs[0] - expected).abs() < 1e-6,
-            "phase_mod=0.5 must shift sine to lookup_sine(0.5); got {}, expected {expected}",
-            outputs[0]
-        );
+        if let CableValue::Mono(v) = pool[4][0] {
+            assert!(
+                (v - expected).abs() < 1e-6,
+                "phase_mod=0.5 must shift sine to lookup_sine(0.5); got {}, expected {expected}",
+                v
+            );
+        } else { panic!("expected Mono"); }
     }
 
     #[test]
     fn phase_mod_disconnected_restores_normal_sine() {
-        // Without phase_mod, sine at phase=0 should equal lookup_sine(0).
         let mut osc = make_osc(440.0);
-        osc.set_connectivity(PortConnectivity {
-            inputs: vec![false, false, false, false].into_boxed_slice(),
-            outputs: vec![true, false, false, false].into_boxed_slice(),
-        });
-        let mut outputs = [0.0_f64; 4];
-        osc.process(&[0.0, 0.0, 0.0, 0.5], &mut outputs); // inputs[3] ignored
+        // phase_mod disconnected, sine connected
+        let inputs = vec![
+            InputPort::Mono(MonoInput { cable_idx: 0, scale: 1.0, connected: false }),
+            InputPort::Mono(MonoInput { cable_idx: 1, scale: 1.0, connected: false }),
+            InputPort::Mono(MonoInput { cable_idx: 2, scale: 1.0, connected: false }),
+            InputPort::Mono(MonoInput { cable_idx: 3, scale: 1.0, connected: false }),
+        ];
+        let outputs = vec![
+            OutputPort::Mono(MonoOutput { cable_idx: 4, connected: true }),
+            OutputPort::Mono(MonoOutput { cable_idx: 5, connected: false }),
+            OutputPort::Mono(MonoOutput { cable_idx: 6, connected: false }),
+            OutputPort::Mono(MonoOutput { cable_idx: 7, connected: false }),
+        ];
+        osc.set_ports(&inputs, &outputs);
+
+        let mut pool = make_pool(8);
+        osc.process(&mut pool, 0);
         let expected = crate::common::approximate::lookup_sine(0.0);
-        assert!(
-            (outputs[0] - expected).abs() < 1e-6,
-            "with phase_mod disconnected sine must equal lookup_sine(0.0); got {}",
-            outputs[0]
-        );
+        if let CableValue::Mono(v) = pool[4][0] {
+            assert!(
+                (v - expected).abs() < 1e-6,
+                "with phase_mod disconnected sine must equal lookup_sine(0.0); got {}",
+                v
+            );
+        } else { panic!("expected Mono"); }
     }
 }

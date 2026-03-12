@@ -1,7 +1,7 @@
 use std::any::Any;
 use std::sync::{Arc, Mutex};
 
-use patches_core::{AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleShape};
+use patches_core::{AudioEnvironment, CableValue, InstanceId, Module, ModuleDescriptor, ModuleShape};
 use patches_core::parameter_map::ParameterMap;
 use patches_engine::{build_patch, PlannerState};
 use patches_modules::{AudioOut, Oscillator};
@@ -69,7 +69,7 @@ impl Module for ThreadIdDropSpy {
         self.instance_id
     }
 
-    fn process(&mut self, _inputs: &[f64], _outputs: &mut [f64]) {}
+    fn process(&mut self, _pool: &mut [[CableValue; 2]], _wi: usize) {}
 
     fn as_any(&self) -> &dyn Any {
         self

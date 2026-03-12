@@ -1,6 +1,6 @@
 use patches_core::{
-    AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleShape,
-    ParameterDescriptor, ParameterKind, PortDescriptor,
+    AudioEnvironment, CableValue, InputPort, InstanceId, Module, ModuleDescriptor,
+    MonoInput, MonoOutput, ModuleShape, OutputPort, ParameterDescriptor, ParameterKind, PortDescriptor,
 };
 use patches_core::CableKind;
 use patches_core::parameter_map::{ParameterMap, ParameterValue};
@@ -40,6 +40,10 @@ pub struct AdsrEnvelope {
     stage: Stage,
     level: f64,
     prev_trigger: f64,
+    // Port fields
+    in_trigger: MonoInput,
+    in_gate: MonoInput,
+    out_env: MonoOutput,
 }
 
 impl Module for AdsrEnvelope {
@@ -95,6 +99,9 @@ impl Module for AdsrEnvelope {
             stage: Stage::Idle,
             level: 0.0,
             prev_trigger: 0.0,
+            in_trigger: MonoInput::default(),
+            in_gate: MonoInput::default(),
+            out_env: MonoOutput::default(),
         }
     }
 
@@ -128,9 +135,16 @@ impl Module for AdsrEnvelope {
         self.instance_id
     }
 
-    fn process(&mut self, inputs: &[f64], outputs: &mut [f64]) {
-        let trigger = inputs[0];
-        let gate = inputs[1];
+    fn set_ports(&mut self, inputs: &[InputPort], outputs: &[OutputPort]) {
+        self.in_trigger = MonoInput::from_ports(inputs, 0);
+        self.in_gate = MonoInput::from_ports(inputs, 1);
+        self.out_env = MonoOutput::from_ports(outputs, 0);
+    }
+
+    fn process(&mut self, pool: &mut [[CableValue; 2]], wi: usize) {
+        let ri = 1 - wi;
+        let trigger = self.in_trigger.read_from(pool, ri);
+        let gate = self.in_gate.read_from(pool, ri);
 
         let trigger_rose = trigger >= 0.5 && self.prev_trigger < 0.5;
         self.prev_trigger = trigger;
@@ -179,7 +193,7 @@ impl Module for AdsrEnvelope {
             }
         }
 
-        outputs[0] = self.level.clamp(0.0, 1.0);
+        self.out_env.write_to(pool, wi, self.level.clamp(0.0, 1.0));
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -211,38 +225,60 @@ mod tests {
         ).unwrap()
     }
 
-    fn tick(env: &mut dyn Module, trigger: f64, gate: f64) -> f64 {
-        let mut out = [0.0f64];
-        env.process(&[trigger, gate], &mut out);
-        out[0]
+    fn make_pool(n: usize) -> Vec<[CableValue; 2]> {
+        vec![[CableValue::Mono(0.0); 2]; n]
+    }
+
+    fn set_ports_for_test(module: &mut Box<dyn Module>) {
+        // 0=trigger, 1=gate, 2=out
+        let inputs = vec![
+            InputPort::Mono(MonoInput { cable_idx: 0, scale: 1.0, connected: true }),
+            InputPort::Mono(MonoInput { cable_idx: 1, scale: 1.0, connected: true }),
+        ];
+        let outputs = vec![
+            OutputPort::Mono(MonoOutput { cable_idx: 2, connected: true }),
+        ];
+        module.set_ports(&inputs, &outputs);
+    }
+
+    fn tick(env: &mut dyn Module, trigger: f64, gate: f64, pool: &mut Vec<[CableValue; 2]>, tick_count: usize) -> f64 {
+        let wi = tick_count % 2;
+        let ri = 1 - wi;
+        pool[0][ri] = CableValue::Mono(trigger);
+        pool[1][ri] = CableValue::Mono(gate);
+        env.process(pool, wi);
+        if let CableValue::Mono(v) = pool[2][wi] { v } else { panic!("expected Mono"); }
     }
 
     #[test]
     fn idle_output_is_zero() {
         let mut adsr = make_envelope(0.5, 0.5, 0.5, 0.5);
-        assert_eq!(tick(adsr.as_mut(), 0.0, 0.0), 0.0);
-        assert_eq!(tick(adsr.as_mut(), 0.0, 0.0), 0.0);
+        set_ports_for_test(&mut adsr);
+        let mut pool = make_pool(3);
+        assert_eq!(tick(adsr.as_mut(), 0.0, 0.0, &mut pool, 0), 0.0);
+        assert_eq!(tick(adsr.as_mut(), 0.0, 0.0, &mut pool, 1), 0.0);
     }
 
     #[test]
     fn attack_rises_linearly_to_one() {
         // attack=0.5s at 10Hz → 5 samples, inc=0.2
         let mut adsr = make_envelope(0.5, 1.0, 0.5, 0.5);
+        set_ports_for_test(&mut adsr);
+        let mut pool = make_pool(3);
 
-        // Trigger rising edge (gate held high throughout)
-        let v0 = tick(adsr.as_mut(), 1.0, 1.0); // sample 1: level = 0.0 + 0.2 = 0.2
+        let v0 = tick(adsr.as_mut(), 1.0, 1.0, &mut pool, 0);
         assert!((v0 - 0.2).abs() < 1e-12, "expected 0.2, got {v0}");
 
-        let v1 = tick(adsr.as_mut(), 0.0, 1.0); // 0.4
+        let v1 = tick(adsr.as_mut(), 0.0, 1.0, &mut pool, 1);
         assert!((v1 - 0.4).abs() < 1e-12, "expected 0.4, got {v1}");
 
-        let v2 = tick(adsr.as_mut(), 0.0, 1.0); // 0.6
+        let v2 = tick(adsr.as_mut(), 0.0, 1.0, &mut pool, 2);
         assert!((v2 - 0.6).abs() < 1e-12, "expected 0.6, got {v2}");
 
-        let v3 = tick(adsr.as_mut(), 0.0, 1.0); // 0.8
+        let v3 = tick(adsr.as_mut(), 0.0, 1.0, &mut pool, 3);
         assert!((v3 - 0.8).abs() < 1e-12, "expected 0.8, got {v3}");
 
-        let v4 = tick(adsr.as_mut(), 0.0, 1.0); // 1.0 → clamp, transitions to Decay
+        let v4 = tick(adsr.as_mut(), 0.0, 1.0, &mut pool, 4);
         assert!((v4 - 1.0).abs() < 1e-12, "expected 1.0, got {v4}");
     }
 
@@ -251,37 +287,36 @@ mod tests {
         // attack=0.1s (1 sample), decay=0.5s (5 samples), sustain=0.5
         // decay_inc = (1.0 - 0.5) / (0.5 * 10) = 0.5/5 = 0.1
         let mut adsr = make_envelope(0.1, 0.5, 0.5, 1.0);
+        set_ports_for_test(&mut adsr);
+        let mut pool = make_pool(3);
 
-        // Trigger → attack completes in 1 sample (inc=1.0)
-        let v_attack = tick(adsr.as_mut(), 1.0, 1.0);
+        let v_attack = tick(adsr.as_mut(), 1.0, 1.0, &mut pool, 0);
         assert!((v_attack - 1.0).abs() < 1e-12, "attack should reach 1.0, got {v_attack}");
 
-        // Decay: 5 steps from 1.0 down to 0.5
         let expected = [0.9, 0.8, 0.7, 0.6, 0.5];
         for (i, &exp) in expected.iter().enumerate() {
-            let v = tick(adsr.as_mut(), 0.0, 1.0);
+            let v = tick(adsr.as_mut(), 0.0, 1.0, &mut pool, 1 + i);
             assert!(
                 (v - exp).abs() < 1e-12,
                 "decay sample {i}: expected {exp}, got {v}"
             );
         }
 
-        // Now in Sustain — level holds
-        let v_sus = tick(adsr.as_mut(), 0.0, 1.0);
+        let v_sus = tick(adsr.as_mut(), 0.0, 1.0, &mut pool, 6);
         assert!((v_sus - 0.5).abs() < 1e-12, "sustain holds at 0.5, got {v_sus}");
     }
 
     #[test]
     fn sustain_holds_while_gate_high() {
-        // Fast attack (1 sample), fast decay (1 sample), sustain=0.6
         let mut adsr = make_envelope(0.1, 0.1, 0.6, 1.0);
+        set_ports_for_test(&mut adsr);
+        let mut pool = make_pool(3);
 
-        tick(adsr.as_mut(), 1.0, 1.0); // attack: 1.0
-        tick(adsr.as_mut(), 0.0, 1.0); // decay: 0.6
+        tick(adsr.as_mut(), 1.0, 1.0, &mut pool, 0);
+        tick(adsr.as_mut(), 0.0, 1.0, &mut pool, 1);
 
-        // Several sustain samples
-        for _ in 0..5 {
-            let v = tick(adsr.as_mut(), 0.0, 1.0);
+        for i in 0..5 {
+            let v = tick(adsr.as_mut(), 0.0, 1.0, &mut pool, 2 + i);
             assert!((v - 0.6).abs() < 1e-12, "sustain should hold at 0.6, got {v}");
         }
     }
@@ -291,51 +326,54 @@ mod tests {
         // attack=0.1s, decay=0.1s, sustain=0.5, release=0.5s (5 samples)
         // release_inc = 0.5 / (0.5 * 10) = 0.1
         let mut adsr = make_envelope(0.1, 0.1, 0.5, 0.5);
+        set_ports_for_test(&mut adsr);
+        let mut pool = make_pool(3);
 
-        tick(adsr.as_mut(), 1.0, 1.0); // attack → 1.0
-        tick(adsr.as_mut(), 0.0, 1.0); // decay → 0.5
+        tick(adsr.as_mut(), 1.0, 1.0, &mut pool, 0);
+        tick(adsr.as_mut(), 0.0, 1.0, &mut pool, 1);
 
-        // Gate drops → Release
-        let r0 = tick(adsr.as_mut(), 0.0, 0.0); // enters release: 0.5 - 0.1 = 0.4
+        let r0 = tick(adsr.as_mut(), 0.0, 0.0, &mut pool, 2);
         assert!((r0 - 0.4).abs() < 1e-12, "release[0]: expected 0.4, got {r0}");
 
-        let r1 = tick(adsr.as_mut(), 0.0, 0.0); // 0.3
+        let r1 = tick(adsr.as_mut(), 0.0, 0.0, &mut pool, 3);
         assert!((r1 - 0.3).abs() < 1e-12, "release[1]: expected 0.3, got {r1}");
 
-        let r2 = tick(adsr.as_mut(), 0.0, 0.0); // 0.2
+        let r2 = tick(adsr.as_mut(), 0.0, 0.0, &mut pool, 4);
         assert!((r2 - 0.2).abs() < 1e-12, "release[2]: expected 0.2, got {r2}");
 
-        let r3 = tick(adsr.as_mut(), 0.0, 0.0); // 0.1
+        let r3 = tick(adsr.as_mut(), 0.0, 0.0, &mut pool, 5);
         assert!((r3 - 0.1).abs() < 1e-12, "release[3]: expected 0.1, got {r3}");
 
-        let r4 = tick(adsr.as_mut(), 0.0, 0.0); // 0.0 → Idle
+        let r4 = tick(adsr.as_mut(), 0.0, 0.0, &mut pool, 6);
         assert!((r4 - 0.0).abs() < 1e-12, "release[4]: expected 0.0, got {r4}");
 
-        // Back to Idle
-        let after = tick(adsr.as_mut(), 0.0, 0.0);
+        let after = tick(adsr.as_mut(), 0.0, 0.0, &mut pool, 7);
         assert_eq!(after, 0.0, "idle after release");
     }
 
     #[test]
     fn retrigger_mid_release_restarts_attack() {
         let mut adsr = make_envelope(0.1, 0.1, 0.5, 0.5);
+        set_ports_for_test(&mut adsr);
+        let mut pool = make_pool(3);
 
-        tick(adsr.as_mut(), 1.0, 1.0); // attack → 1.0
-        tick(adsr.as_mut(), 0.0, 1.0); // decay → 0.5
-        tick(adsr.as_mut(), 0.0, 0.0); // release starts → 0.4
-        tick(adsr.as_mut(), 0.0, 0.0); // 0.3
+        tick(adsr.as_mut(), 1.0, 1.0, &mut pool, 0);
+        tick(adsr.as_mut(), 0.0, 1.0, &mut pool, 1);
+        tick(adsr.as_mut(), 0.0, 0.0, &mut pool, 2);
+        tick(adsr.as_mut(), 0.0, 0.0, &mut pool, 3);
 
-        // Retrigger: should restart Attack from current level (0.3)
-        let v = tick(adsr.as_mut(), 1.0, 1.0); // attack_inc = 1.0, so 0.3 + 1.0 → clamped 1.0
+        let v = tick(adsr.as_mut(), 1.0, 1.0, &mut pool, 4);
         assert!((v - 1.0).abs() < 1e-12, "retrigger should reach 1.0, got {v}");
     }
 
     #[test]
     fn output_clamped_to_unit_range() {
         let mut adsr = make_envelope(0.1, 0.1, 0.5, 0.5);
+        set_ports_for_test(&mut adsr);
+        let mut pool = make_pool(3);
 
-        for _ in 0..20 {
-            let v = tick(adsr.as_mut(), 1.0, 1.0);
+        for i in 0..20 {
+            let v = tick(adsr.as_mut(), 1.0, 1.0, &mut pool, i);
             assert!((0.0..=1.0).contains(&v), "output out of range: {v}");
         }
     }

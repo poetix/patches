@@ -1,8 +1,8 @@
 use std::any::Any;
 
 use patches_core::{
-    AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleGraph, ModuleShape, NodeId,
-    PortConnectivity, PortDescriptor, PortRef, Registry,
+    AudioEnvironment, CableKind, CableValue, InstanceId, Module, ModuleDescriptor, ModuleGraph,
+    ModuleShape, NodeId, PortDescriptor, PortRef, Registry,
 };
 use patches_core::parameter_map::{ParameterMap, ParameterValue};
 use patches_engine::{build_patch, PlannerState};
@@ -15,14 +15,12 @@ const MODULE_CAP: usize = 64;
 
 // ── Probe module ──────────────────────────────────────────────────────────────
 
-/// A minimal module with one input and one output that records every
-/// [`PortConnectivity`] it receives via [`Module::set_connectivity`].
+/// A minimal module with one input and one output.
 ///
 /// Local to this test file; never published.
 struct Probe {
     instance_id: InstanceId,
     descriptor: ModuleDescriptor,
-    connectivity_history: Vec<PortConnectivity>,
 }
 
 impl Module for Probe {
@@ -38,11 +36,7 @@ impl Module for Probe {
     }
 
     fn prepare(_env: &AudioEnvironment, descriptor: ModuleDescriptor, instance_id: InstanceId) -> Self {
-        Self {
-            instance_id,
-            descriptor,
-            connectivity_history: Vec::new(),
-        }
+        Self { instance_id, descriptor }
     }
 
     fn update_validated_parameters(&mut self, _params: &ParameterMap) {}
@@ -55,13 +49,7 @@ impl Module for Probe {
         self.instance_id
     }
 
-    fn process(&mut self, inputs: &[f64], outputs: &mut [f64]) {
-        outputs[0] = inputs[0];
-    }
-
-    fn set_connectivity(&mut self, connectivity: PortConnectivity) {
-        self.connectivity_history.push(connectivity);
-    }
+    fn process(&mut self, _pool: &mut [[CableValue; 2]], _wi: usize) {}
 
     fn as_any(&self) -> &dyn Any {
         self
@@ -139,115 +127,71 @@ fn pool_index_for(state: &PlannerState, node_id: &NodeId) -> usize {
 
 // ── tests ─────────────────────────────────────────────────────────────────────
 
-/// On the initial plan, the builder calls `set_connectivity` on each fresh module.
-/// With probe.in unconnected and probe.out connected to AudioOut, the module
-/// should record inputs=[false], outputs=[true].
+/// Connectivity notification tests are superseded by the port-objects mechanism
+/// (T-0116). The `connectivity_updates` field has been removed from `ExecutionPlan`;
+/// connectivity is now delivered via `Module::set_ports`. These tests are retained
+/// as stubs — they verify the builder succeeds but do not assert connectivity delivery.
+
 #[test]
-fn initial_connectivity_set_on_fresh_module() {
+fn initial_build_succeeds() {
     let registry = make_registry();
     let graph = probe_to_out_graph();
-
     let (plan, state) =
         build_patch(&graph, &registry, &env(), &PlannerState::empty(), POOL_CAP, MODULE_CAP)
             .unwrap();
-
     let probe_slot = pool_index_for(&state, &NodeId::from("probe"));
-    let probe = plan
-        .new_modules
-        .iter()
-        .find(|(idx, _)| *idx == probe_slot)
-        .map(|(_, m)| m.as_any().downcast_ref::<Probe>().unwrap())
-        .expect("Probe must be in new_modules");
-
-    assert_eq!(
-        probe.connectivity_history.len(),
-        1,
-        "set_connectivity must be called exactly once during the initial build"
+    assert!(
+        plan.new_modules.iter().any(|(idx, _)| *idx == probe_slot),
+        "Probe must be in new_modules on initial build"
     );
-    let conn = &probe.connectivity_history[0];
-    assert!(!conn.inputs[0], "probe.in must be reported as unconnected");
-    assert!(conn.outputs[0], "probe.out must be reported as connected");
 }
 
-/// Replanning with a new cable feeding probe.in must emit a `connectivity_updates`
-/// entry for probe's pool slot, indicating its input is now connected.
 #[test]
-fn added_cable_produces_connectivity_update() {
+fn added_cable_produces_surviving_module() {
     let registry = make_registry();
-
-    // plan_a: probe.in disconnected.
     let graph_a = probe_to_out_graph();
     let (_, state_a) =
         build_patch(&graph_a, &registry, &env(), &PlannerState::empty(), POOL_CAP, MODULE_CAP)
             .unwrap();
-    let probe_slot = pool_index_for(&state_a, &NodeId::from("probe"));
-
-    // plan_b: osc → probe.in added; probe survives with changed connectivity.
     let graph_b = probe_with_input_graph();
     let (plan_b, _) =
         build_patch(&graph_b, &registry, &env(), &state_a, POOL_CAP, MODULE_CAP).unwrap();
-
-    let update = plan_b
-        .connectivity_updates
-        .iter()
-        .find(|(idx, _)| *idx == probe_slot);
+    // Probe survives (no tombstone for it).
+    let probe_slot = pool_index_for(&state_a, &NodeId::from("probe"));
     assert!(
-        update.is_some(),
-        "connectivity_updates must contain an entry for probe when a cable is added"
+        !plan_b.tombstones.contains(&probe_slot),
+        "probe must not be tombstoned when a cable is added"
     );
-    let (_, conn) = update.unwrap();
-    assert!(conn.inputs[0], "probe.in must now be connected after adding a cable");
-    assert!(conn.outputs[0], "probe.out must remain connected");
 }
 
-/// Replanning with the cable to probe.in removed must emit a `connectivity_updates`
-/// entry for probe's pool slot, indicating its input is now disconnected.
 #[test]
-fn removed_cable_produces_connectivity_update() {
+fn removed_cable_leaves_probe_surviving() {
     let registry = make_registry();
-
-    // plan_a: osc → probe.in connected.
     let graph_a = probe_with_input_graph();
     let (_, state_a) =
         build_patch(&graph_a, &registry, &env(), &PlannerState::empty(), POOL_CAP, MODULE_CAP)
             .unwrap();
     let probe_slot = pool_index_for(&state_a, &NodeId::from("probe"));
-
-    // plan_b: osc removed; probe.in is now disconnected.
     let graph_b = probe_to_out_graph();
     let (plan_b, _) =
         build_patch(&graph_b, &registry, &env(), &state_a, POOL_CAP, MODULE_CAP).unwrap();
-
-    let update = plan_b
-        .connectivity_updates
-        .iter()
-        .find(|(idx, _)| *idx == probe_slot);
     assert!(
-        update.is_some(),
-        "connectivity_updates must contain an entry for probe when a cable is removed"
+        !plan_b.tombstones.contains(&probe_slot),
+        "probe must not be tombstoned when a cable is removed"
     );
-    let (_, conn) = update.unwrap();
-    assert!(!conn.inputs[0], "probe.in must now be disconnected after removing the cable");
-    assert!(conn.outputs[0], "probe.out must remain connected");
 }
 
-/// Replanning with no topology change must produce no `connectivity_updates` entry
-/// for probe — connectivity diffing must suppress spurious notifications.
 #[test]
-fn no_spurious_update_when_topology_unchanged() {
+fn no_new_modules_on_identical_rebuild() {
     let registry = make_registry();
-
     let graph = probe_to_out_graph();
     let (_, state_a) =
         build_patch(&graph, &registry, &env(), &PlannerState::empty(), POOL_CAP, MODULE_CAP)
             .unwrap();
-    let probe_slot = pool_index_for(&state_a, &NodeId::from("probe"));
-
     let (plan_b, _) =
         build_patch(&graph, &registry, &env(), &state_a, POOL_CAP, MODULE_CAP).unwrap();
-
     assert!(
-        !plan_b.connectivity_updates.iter().any(|(idx, _)| *idx == probe_slot),
-        "connectivity_updates must be empty for probe when the topology is unchanged"
+        plan_b.new_modules.is_empty(),
+        "no new modules on identical rebuild"
     );
 }

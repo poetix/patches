@@ -3,7 +3,7 @@ use std::time::Instant;
 use cpal::traits::DeviceTrait;
 use cpal::{Stream, StreamConfig};
 
-use patches_core::Module;
+use patches_core::{CableValue, Module};
 
 use crate::builder::ExecutionPlan;
 use crate::engine::EngineError;
@@ -22,7 +22,7 @@ pub(crate) const SUB_BLOCK_SIZE: u64 = 64;
 pub(crate) struct AudioCallback {
     plan_rx: rtrb::Consumer<ExecutionPlan>,
     current_plan: ExecutionPlan,
-    buffer_pool: Box<[[f64; 2]]>,
+    buffer_pool: Box<[[CableValue; 2]]>,
     module_pool: ModulePool,
     channels: usize,
     /// `channels.trailing_zeros()` — the right-shift to convert a sample count to a frame count.
@@ -61,7 +61,7 @@ impl AudioCallback {
     pub(crate) fn new(
         plan_rx: rtrb::Consumer<ExecutionPlan>,
         current_plan: ExecutionPlan,
-        buffer_pool: Box<[[f64; 2]]>,
+        buffer_pool: Box<[[CableValue; 2]]>,
         module_pool: ModulePool,
         channels: usize,
         event_queue: Option<EventQueueConsumer>,
@@ -134,13 +134,13 @@ impl AudioCallback {
             for (idx, params) in &new_plan.parameter_updates {
                 self.module_pool.update_parameters(*idx, params);
             }
-            // Apply connectivity updates to surviving modules.
-            for (idx, conn) in new_plan.connectivity_updates.drain(..) {
-                self.module_pool.set_connectivity(idx, conn);
+            // Apply port updates to surviving modules.
+            for (idx, inputs, outputs) in &new_plan.port_updates {
+                self.module_pool.set_ports(*idx, inputs, outputs);
             }
             // Zero freed/new cable buffer slots.
             for &i in &new_plan.to_zero {
-                self.buffer_pool[i] = [0.0; 2];
+                self.buffer_pool[i] = [CableValue::Mono(0.0), CableValue::Mono(0.0)];
             }
             self.current_plan = new_plan;
         }

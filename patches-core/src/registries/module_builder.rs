@@ -39,6 +39,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cables::CableValue;
     use crate::modules::InstanceId;
 
     struct TestModule {
@@ -80,7 +81,7 @@ mod tests {
             self.instance_id
         }
 
-        fn process(&mut self, _inputs: &[f64], _outputs: &mut [f64]) {}
+        fn process(&mut self, _pool: &mut [[CableValue; 2]], _wi: usize) {}
 
         fn as_any(&self) -> &dyn std::any::Any {
             self

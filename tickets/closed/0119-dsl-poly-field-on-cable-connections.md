@@ -5,7 +5,18 @@ priority: medium
 epic: "E022"
 depends_on: ["0114"]
 created: 2026-03-11
+status: superseded
 ---
+
+> **Superseded.** Cable arity is a property of the port, not the connection.
+> `PortDescriptor::kind` (a `CableKind`) is already declared per-port in the
+> `ModuleDescriptor`, which is a compile-time constant per module type. The
+> planner has both endpoints' descriptors at plan-build time and should infer
+> pool slot kind from the source port's `CableKind` directly. Adding a `poly: N`
+> annotation to the DSL cable list would duplicate information already present in
+> the module definitions and could produce contradictions. No DSL change is
+> needed; the planner's pool-allocation logic (T-0116) should read `kind` from
+> the source `PortDescriptor`.
 
 ## Summary
 

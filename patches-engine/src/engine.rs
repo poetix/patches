@@ -6,7 +6,7 @@ use std::time::Duration;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, SampleFormat, Stream, StreamConfig};
 
-use patches_core::{AudioEnvironment, Module};
+use patches_core::{AudioEnvironment, CableValue, Module};
 
 use crate::builder::ExecutionPlan;
 use crate::callback::{build_stream, AudioCallback};
@@ -23,7 +23,7 @@ pub const DEFAULT_MODULE_POOL_CAPACITY: usize = 1024;
 /// moves them into the audio closure.
 struct PendingState {
     plan_rx: rtrb::Consumer<ExecutionPlan>,
-    buffer_pool: Box<[[f64; 2]]>,
+    buffer_pool: Box<[[CableValue; 2]]>,
     module_pool: ModulePool,
 }
 
@@ -96,7 +96,7 @@ mod tests {
     use std::any::Any;
     use std::sync::{Arc, Mutex};
 
-    use patches_core::{AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleShape};
+    use patches_core::{AudioEnvironment, CableValue, InstanceId, Module, ModuleDescriptor, ModuleShape};
     use patches_core::parameter_map::ParameterMap;
 
     struct ThreadIdDropSpy {
@@ -159,7 +159,7 @@ mod tests {
             self.instance_id
         }
 
-        fn process(&mut self, _inputs: &[f64], _outputs: &mut [f64]) {}
+        fn process(&mut self, _pool: &mut [[CableValue; 2]], _wi: usize) {}
 
         fn as_any(&self) -> &dyn Any {
             self
@@ -274,7 +274,10 @@ impl SoundEngine {
         buffer_pool_capacity: usize,
         module_pool_capacity: usize,
     ) -> Result<Self, EngineError> {
-        let buffer_pool = vec![[0.0_f64; 2]; buffer_pool_capacity].into_boxed_slice();
+        let buffer_pool = (0..buffer_pool_capacity)
+            .map(|_| [CableValue::Mono(0.0), CableValue::Mono(0.0)])
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
         let module_pool = ModulePool::new(module_pool_capacity);
         let (plan_tx, plan_rx) = rtrb::RingBuffer::new(1);
         let clock = Arc::new(AudioClock::new());

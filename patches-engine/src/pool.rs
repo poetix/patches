@@ -1,4 +1,4 @@
-use patches_core::{MidiEvent, Module, PortConnectivity};
+use patches_core::{CableValue, InputPort, MidiEvent, Module, OutputPort};
 use patches_core::parameter_map::ParameterMap;
 
 /// Audio-thread-owned pool of module instances.
@@ -73,7 +73,7 @@ impl ModulePool {
         self.modules[idx] = Some(module);
     }
 
-    /// Call [`Module::process`] on the module at `idx` with the given scratch buffers.
+    /// Call [`Module::process`] on the module at `idx` with the ping-pong cable pool.
     ///
     /// If `idx` is the sink slot, the sink's `last_left` and `last_right` values
     /// are captured into the pool's cache immediately after processing.
@@ -81,9 +81,9 @@ impl ModulePool {
     /// # Panics
     /// Panics if slot `idx` is empty. Callers must ensure the plan and pool are
     /// consistent (all slots referenced by the active plan are populated).
-    pub fn process(&mut self, idx: usize, inputs: &[f64], outputs: &mut [f64]) {
+    pub fn process(&mut self, idx: usize, buffer_pool: &mut [[CableValue; 2]], wi: usize) {
         let m = self.modules[idx].as_mut().unwrap();
-        m.process(inputs, outputs);
+        m.process(buffer_pool, wi);
         if self.sink_slot == Some(idx) {
             if let Some(s) = m.as_sink() {
                 self.last_sink_left = s.last_left();
@@ -104,6 +104,17 @@ impl ModulePool {
         }
     }
 
+    /// Deliver pre-resolved port objects to the module at `idx`.
+    ///
+    /// Calls [`Module::set_ports`] on the slot if it is occupied. Does nothing
+    /// if the slot is empty (the module may have been tombstoned between plan
+    /// build and adoption).
+    pub fn set_ports(&mut self, idx: usize, inputs: &[InputPort], outputs: &[OutputPort]) {
+        if let Some(m) = self.modules[idx].as_mut() {
+            m.set_ports(inputs, outputs);
+        }
+    }
+
     /// Deliver a MIDI event to the module at `idx`.
     ///
     /// Calls [`Module::as_midi_receiver`] on the slot; if it returns `Some`,
@@ -115,18 +126,6 @@ impl ModulePool {
             if let Some(recv) = m.as_midi_receiver() {
                 recv.receive_midi(event);
             }
-        }
-    }
-
-    /// Deliver a connectivity update to the module at `idx`.
-    ///
-    /// Calls [`Module::set_connectivity`] on the module at `idx`.
-    /// This is infallible — no `Result` is returned. Does nothing if the slot
-    /// is empty (the module may have been tombstoned between the plan being built
-    /// and adopted).
-    pub fn set_connectivity(&mut self, idx: usize, conn: PortConnectivity) {
-        if let Some(m) = self.modules[idx].as_mut() {
-            m.set_connectivity(conn);
         }
     }
 
@@ -157,7 +156,7 @@ mod tests {
     use std::any::Any;
 
     use patches_core::{
-        AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleShape,
+        AudioEnvironment, CableKind, InstanceId, Module, ModuleDescriptor, ModuleShape,
         PortDescriptor, Sink,
     };
     use patches_core::parameter_map::ParameterMap;
@@ -166,7 +165,7 @@ mod tests {
 
     // ── Test-only modules ─────────────────────────────────────────────────────
 
-    /// Outputs a constant value on its single output port.
+    /// Writes a constant value to cable slot 0 on each process call.
     struct ConstSource {
         id: InstanceId,
         value: f64,
@@ -205,23 +204,16 @@ mod tests {
             Self { id: instance_id, value: 0.0, desc: descriptor }
         }
         fn update_validated_parameters(&mut self, _params: &ParameterMap) {}
-        fn descriptor(&self) -> &ModuleDescriptor {
-            &self.desc
+        fn descriptor(&self) -> &ModuleDescriptor { &self.desc }
+        fn instance_id(&self) -> InstanceId { self.id }
+        fn process(&mut self, pool: &mut [[CableValue; 2]], wi: usize) {
+            pool[0][wi] = CableValue::Mono(self.value);
         }
-        fn instance_id(&self) -> InstanceId {
-            self.id
-        }
-        fn process(&mut self, _inputs: &[f64], outputs: &mut [f64]) {
-            outputs[0] = self.value;
-        }
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
+        fn as_any(&self) -> &dyn Any { self }
     }
 
-    /// Records the last value it received on its single input port.
-    /// Implements [`Sink`] so tests can verify output via
-    /// [`ModulePool::read_sink_left`] and [`ModulePool::read_sink_right`].
+    /// Reads cable slot 0 on each process call and caches it.
+    /// Implements [`Sink`] so the pool cache can be exercised.
     struct RecordingSink {
         id: InstanceId,
         last: f64,
@@ -260,30 +252,25 @@ mod tests {
             Self { id: instance_id, last: 0.0, desc: descriptor }
         }
         fn update_validated_parameters(&mut self, _params: &ParameterMap) {}
-        fn descriptor(&self) -> &ModuleDescriptor {
-            &self.desc
+        fn descriptor(&self) -> &ModuleDescriptor { &self.desc }
+        fn instance_id(&self) -> InstanceId { self.id }
+        fn process(&mut self, pool: &mut [[CableValue; 2]], wi: usize) {
+            let ri = 1 - wi;
+            if let CableValue::Mono(v) = pool[0][ri] {
+                self.last = v;
+            }
         }
-        fn instance_id(&self) -> InstanceId {
-            self.id
-        }
-        fn process(&mut self, inputs: &[f64], _outputs: &mut [f64]) {
-            self.last = inputs[0];
-        }
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
-        fn as_sink(&self) -> Option<&dyn Sink> {
-            Some(self)
-        }
+        fn as_any(&self) -> &dyn Any { self }
+        fn as_sink(&self) -> Option<&dyn Sink> { Some(self) }
     }
 
     impl Sink for RecordingSink {
-        fn last_left(&self) -> f64 {
-            self.last
-        }
-        fn last_right(&self) -> f64 {
-            self.last
-        }
+        fn last_left(&self) -> f64 { self.last }
+        fn last_right(&self) -> f64 { self.last }
+    }
+
+    fn make_buf_pool(size: usize) -> Vec<[CableValue; 2]> {
+        vec![[CableValue::Mono(0.0); 2]; size]
     }
 
     // ── Tests ─────────────────────────────────────────────────────────────────
@@ -297,20 +284,22 @@ mod tests {
     }
 
     #[test]
-    fn process_writes_module_output_to_slice() {
+    fn process_writes_to_cable_pool() {
         let mut pool = ModulePool::new(4);
         pool.install(2, Box::new(ConstSource::new(0.75)));
-        let mut out = [0.0_f64];
-        pool.process(2, &[], &mut out);
-        assert_eq!(out[0], 0.75);
+        let mut bufs = make_buf_pool(1);
+        pool.process(2, &mut bufs, 0);
+        assert!(matches!(bufs[0][0], CableValue::Mono(v) if (v - 0.75).abs() < 1e-12));
     }
 
     #[test]
-    fn process_forwards_inputs_to_module() {
+    fn process_dispatches_and_updates_sink_cache() {
         let mut pool = ModulePool::new(4);
         pool.install(0, Box::new(RecordingSink::new()));
-        let mut no_out: [f64; 0] = [];
-        pool.process(0, &[0.42], &mut no_out);
+        // wi=0 → ri=1; write the value to read slot (index 1) so the sink can read it.
+        let mut bufs = make_buf_pool(1);
+        bufs[0][1] = CableValue::Mono(0.42);
+        pool.process(0, &mut bufs, 0);
         assert!((pool.read_sink_left() - 0.42).abs() < 1e-9);
     }
 
@@ -319,9 +308,10 @@ mod tests {
         let mut pool = ModulePool::new(4);
         pool.install(0, Box::new(ConstSource::new(1.0)));
         pool.install(0, Box::new(ConstSource::new(2.0)));
-        let mut out = [0.0_f64];
-        pool.process(0, &[], &mut out);
-        assert_eq!(out[0], 2.0, "slot should hold the most recently installed module");
+        let mut bufs = make_buf_pool(1);
+        pool.process(0, &mut bufs, 0);
+        assert!(matches!(bufs[0][0], CableValue::Mono(v) if (v - 2.0).abs() < 1e-12),
+            "slot should hold the most recently installed module");
     }
 
     #[test]
@@ -338,8 +328,8 @@ mod tests {
     #[should_panic]
     fn process_on_empty_slot_panics() {
         let mut pool = ModulePool::new(4);
-        let mut out = [0.0_f64];
-        pool.process(0, &[], &mut out);
+        let mut bufs = make_buf_pool(1);
+        pool.process(0, &mut bufs, 0);
     }
 
     #[test]
@@ -360,8 +350,9 @@ mod tests {
     fn read_sink_reflects_last_processed_value() {
         let mut pool = ModulePool::new(4);
         pool.install(0, Box::new(RecordingSink::new()));
-        let mut no_out: [f64; 0] = [];
-        pool.process(0, &[0.7], &mut no_out);
+        let mut bufs = make_buf_pool(1);
+        bufs[0][1] = CableValue::Mono(0.7);
+        pool.process(0, &mut bufs, 0);
         assert!((pool.read_sink_left() - 0.7).abs() < 1e-9);
         assert!((pool.read_sink_right() - 0.7).abs() < 1e-9);
     }

@@ -1,7 +1,6 @@
 use patches_core::{
-    AudioEnvironment, InstanceId, Module, ModuleDescriptor,
-    ModuleShape, ParameterDescriptor, ParameterKind, PortDescriptor,
-    PortConnectivity,
+    AudioEnvironment, CableValue, InputPort, InstanceId, Module, ModuleDescriptor,
+    MonoInput, MonoOutput, ModuleShape, OutputPort, ParameterDescriptor, ParameterKind, PortDescriptor,
 };
 use patches_core::CableKind;
 use patches_core::parameter_map::{ParameterMap, ParameterValue};
@@ -25,16 +24,16 @@ pub struct Lfo {
     prng_state: u64,
     random_value: f64,
     prev_sync: f64,
-    // Input connectivity
-    in_sync: bool,
-    in_rate_cv: bool,
-    // Output connectivity
-    out_sine: bool,
-    out_triangle: bool,
-    out_saw_up: bool,
-    out_saw_down: bool,
-    out_square: bool,
-    out_random: bool,
+    // Input port fields
+    in_sync: MonoInput,
+    in_rate_cv: MonoInput,
+    // Output port fields
+    out_sine: MonoOutput,
+    out_triangle: MonoOutput,
+    out_saw_up: MonoOutput,
+    out_saw_down: MonoOutput,
+    out_square: MonoOutput,
+    out_random: MonoOutput,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -114,14 +113,14 @@ impl Module for Lfo {
             prng_state,
             random_value: 0.0,
             prev_sync: 0.0,
-            in_sync: false,
-            in_rate_cv: false,
-            out_sine: false,
-            out_triangle: false,
-            out_saw_up: false,
-            out_saw_down: false,
-            out_square: false,
-            out_random: false,
+            in_sync: MonoInput::default(),
+            in_rate_cv: MonoInput::default(),
+            out_sine: MonoOutput::default(),
+            out_triangle: MonoOutput::default(),
+            out_saw_up: MonoOutput::default(),
+            out_saw_down: MonoOutput::default(),
+            out_square: MonoOutput::default(),
+            out_random: MonoOutput::default(),
         }
     }
 
@@ -143,17 +142,6 @@ impl Module for Lfo {
         }
     }
 
-    fn set_connectivity(&mut self, connectivity: PortConnectivity) {
-        self.in_sync      = connectivity.inputs[0];
-        self.in_rate_cv   = connectivity.inputs[1];
-        self.out_sine     = connectivity.outputs[0];
-        self.out_triangle = connectivity.outputs[1];
-        self.out_saw_up   = connectivity.outputs[2];
-        self.out_saw_down = connectivity.outputs[3];
-        self.out_square   = connectivity.outputs[4];
-        self.out_random   = connectivity.outputs[5];
-    }
-
     fn descriptor(&self) -> &ModuleDescriptor {
         &self.descriptor
     }
@@ -162,10 +150,23 @@ impl Module for Lfo {
         self.instance_id
     }
 
-    fn process(&mut self, inputs: &[f64], outputs: &mut [f64]) {
+    fn set_ports(&mut self, inputs: &[InputPort], outputs: &[OutputPort]) {
+        self.in_sync = MonoInput::from_ports(inputs, 0);
+        self.in_rate_cv = MonoInput::from_ports(inputs, 1);
+        self.out_sine = MonoOutput::from_ports(outputs, 0);
+        self.out_triangle = MonoOutput::from_ports(outputs, 1);
+        self.out_saw_up = MonoOutput::from_ports(outputs, 2);
+        self.out_saw_down = MonoOutput::from_ports(outputs, 3);
+        self.out_square = MonoOutput::from_ports(outputs, 4);
+        self.out_random = MonoOutput::from_ports(outputs, 5);
+    }
+
+    fn process(&mut self, pool: &mut [[CableValue; 2]], wi: usize) {
+        let ri = 1 - wi;
+
         // Sync: rising edge (prev <= 0, current > 0) resets phase before advance.
-        if self.in_sync {
-            let sync_val = inputs[0];
+        if self.in_sync.is_connected() {
+            let sync_val = self.in_sync.read_from(pool, ri);
             if self.prev_sync <= 0.0 && sync_val > 0.0 {
                 self.phase = 0.0;
             }
@@ -173,8 +174,8 @@ impl Module for Lfo {
         }
 
         // Rate CV: recompute increment per-sample when connected.
-        let increment = if self.in_rate_cv {
-            (self.rate + inputs[1]).clamp(0.001, 40.0) / self.sample_rate
+        let increment = if self.in_rate_cv.is_connected() {
+            (self.rate + self.in_rate_cv.read_from(pool, ri)).clamp(0.001, 40.0) / self.sample_rate
         } else {
             self.phase_increment
         };
@@ -190,24 +191,24 @@ impl Module for Lfo {
         let read_phase = (self.phase + self.phase_offset).fract();
         let mode = self.mode;
 
-        if self.out_sine {
-            outputs[0] = apply_mode(lookup_sine(read_phase), mode);
+        if self.out_sine.is_connected() {
+            self.out_sine.write_to(pool, wi, apply_mode(lookup_sine(read_phase), mode));
         }
-        if self.out_triangle {
-            outputs[1] = apply_mode(1.0 - 4.0 * (read_phase - 0.5).abs(), mode);
+        if self.out_triangle.is_connected() {
+            self.out_triangle.write_to(pool, wi, apply_mode(1.0 - 4.0 * (read_phase - 0.5).abs(), mode));
         }
-        if self.out_saw_up {
-            outputs[2] = apply_mode(2.0 * read_phase - 1.0, mode);
+        if self.out_saw_up.is_connected() {
+            self.out_saw_up.write_to(pool, wi, apply_mode(2.0 * read_phase - 1.0, mode));
         }
-        if self.out_saw_down {
-            outputs[3] = apply_mode(1.0 - 2.0 * read_phase, mode);
+        if self.out_saw_down.is_connected() {
+            self.out_saw_down.write_to(pool, wi, apply_mode(1.0 - 2.0 * read_phase, mode));
         }
-        if self.out_square {
+        if self.out_square.is_connected() {
             let v = if read_phase < 0.5 { 1.0 } else { -1.0 };
-            outputs[4] = apply_mode(v, mode);
+            self.out_square.write_to(pool, wi, apply_mode(v, mode));
         }
-        if self.out_random {
-            outputs[5] = apply_mode(self.random_value, mode);
+        if self.out_random.is_connected() {
+            self.out_random.write_to(pool, wi, apply_mode(self.random_value, mode));
         }
     }
 
@@ -219,7 +220,7 @@ impl Module for Lfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use patches_core::{AudioEnvironment, Module, ModuleShape, PortConnectivity, Registry};
+    use patches_core::{AudioEnvironment, Module, ModuleShape, Registry};
     use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
     fn make_lfo(rate: f64) -> Box<dyn Module> {
@@ -240,18 +241,57 @@ mod tests {
         ).unwrap()
     }
 
-    fn no_inputs_connected() -> PortConnectivity {
-        PortConnectivity {
-            inputs: vec![false, false].into_boxed_slice(),
-            outputs: vec![false, false, false, false, false, false].into_boxed_slice(),
-        }
+    fn make_pool(n: usize) -> Vec<[CableValue; 2]> {
+        vec![[CableValue::Mono(0.0); 2]; n]
     }
 
-    fn all_outputs_connected() -> PortConnectivity {
-        PortConnectivity {
-            inputs: vec![false, false].into_boxed_slice(),
-            outputs: vec![true, true, true, true, true, true].into_boxed_slice(),
-        }
+    // Inputs: 0=sync, 1=rate_cv; Outputs: 2=sine, 3=triangle, 4=saw_up, 5=saw_down, 6=square, 7=random
+    fn set_all_outputs_connected(module: &mut Box<dyn Module>) {
+        let inputs = vec![
+            InputPort::Mono(MonoInput { cable_idx: 0, scale: 1.0, connected: false }),
+            InputPort::Mono(MonoInput { cable_idx: 1, scale: 1.0, connected: false }),
+        ];
+        let outputs = vec![
+            OutputPort::Mono(MonoOutput { cable_idx: 2, connected: true }),
+            OutputPort::Mono(MonoOutput { cable_idx: 3, connected: true }),
+            OutputPort::Mono(MonoOutput { cable_idx: 4, connected: true }),
+            OutputPort::Mono(MonoOutput { cable_idx: 5, connected: true }),
+            OutputPort::Mono(MonoOutput { cable_idx: 6, connected: true }),
+            OutputPort::Mono(MonoOutput { cable_idx: 7, connected: true }),
+        ];
+        module.set_ports(&inputs, &outputs);
+    }
+
+    fn set_no_outputs_connected(module: &mut Box<dyn Module>) {
+        let inputs = vec![
+            InputPort::Mono(MonoInput { cable_idx: 0, scale: 1.0, connected: false }),
+            InputPort::Mono(MonoInput { cable_idx: 1, scale: 1.0, connected: false }),
+        ];
+        let outputs = vec![
+            OutputPort::Mono(MonoOutput { cable_idx: 2, connected: false }),
+            OutputPort::Mono(MonoOutput { cable_idx: 3, connected: false }),
+            OutputPort::Mono(MonoOutput { cable_idx: 4, connected: false }),
+            OutputPort::Mono(MonoOutput { cable_idx: 5, connected: false }),
+            OutputPort::Mono(MonoOutput { cable_idx: 6, connected: false }),
+            OutputPort::Mono(MonoOutput { cable_idx: 7, connected: false }),
+        ];
+        module.set_ports(&inputs, &outputs);
+    }
+
+    fn set_sync_and_rate_cv_connected(module: &mut Box<dyn Module>) {
+        let inputs = vec![
+            InputPort::Mono(MonoInput { cable_idx: 0, scale: 1.0, connected: true }),
+            InputPort::Mono(MonoInput { cable_idx: 1, scale: 1.0, connected: true }),
+        ];
+        let outputs = vec![
+            OutputPort::Mono(MonoOutput { cable_idx: 2, connected: true }),
+            OutputPort::Mono(MonoOutput { cable_idx: 3, connected: false }),
+            OutputPort::Mono(MonoOutput { cable_idx: 4, connected: true }),
+            OutputPort::Mono(MonoOutput { cable_idx: 5, connected: false }),
+            OutputPort::Mono(MonoOutput { cable_idx: 6, connected: false }),
+            OutputPort::Mono(MonoOutput { cable_idx: 7, connected: false }),
+        ];
+        module.set_ports(&inputs, &outputs);
     }
 
     #[test]
@@ -284,18 +324,18 @@ mod tests {
         let sample_rate = rate * period as f64;
 
         let mut lfo = make_lfo_sr(rate, sample_rate);
-        lfo.set_connectivity(all_outputs_connected());
-        let mut outputs = [0.0_f64; 6];
+        set_all_outputs_connected(&mut lfo);
+        let mut pool = make_pool(8);
 
         let mut cycle1 = Vec::with_capacity(period);
-        for _ in 0..period {
-            lfo.process(&[], &mut outputs);
-            cycle1.push(outputs[0]);
+        for i in 0..period {
+            lfo.process(&mut pool, i % 2);
+            if let CableValue::Mono(v) = pool[2][i % 2] { cycle1.push(v); }
         }
         let mut cycle2 = Vec::with_capacity(period);
-        for _ in 0..period {
-            lfo.process(&[], &mut outputs);
-            cycle2.push(outputs[0]);
+        for i in 0..period {
+            lfo.process(&mut pool, (period + i) % 2);
+            if let CableValue::Mono(v) = pool[2][(period + i) % 2] { cycle2.push(v); }
         }
         for (a, b) in cycle1.iter().zip(cycle2.iter()) {
             assert!((a - b).abs() < 1e-10, "sine cycle mismatch: {a} vs {b}");
@@ -308,17 +348,15 @@ mod tests {
         let period = 100_usize;
         let sample_rate = rate * period as f64;
 
-        // LFO without offset: record first cycle.
         let mut lfo_base = make_lfo_sr(rate, sample_rate);
-        lfo_base.set_connectivity(all_outputs_connected());
-        let mut out = [0.0_f64; 6];
+        set_all_outputs_connected(&mut lfo_base);
+        let mut pool_base = make_pool(8);
         let mut base_cycle = Vec::with_capacity(period);
-        for _ in 0..period {
-            lfo_base.process(&[], &mut out);
-            base_cycle.push(out[0]);
+        for i in 0..period {
+            lfo_base.process(&mut pool_base, i % 2);
+            if let CableValue::Mono(v) = pool_base[2][i % 2] { base_cycle.push(v); }
         }
 
-        // LFO with phase_offset = 0.25: record first cycle.
         let mut params = ParameterMap::new();
         params.insert("rate".into(), ParameterValue::Float(rate));
         params.insert("phase_offset".into(), ParameterValue::Float(0.25));
@@ -331,16 +369,15 @@ mod tests {
             &params,
             InstanceId::next(),
         ).unwrap();
-        lfo_shifted.set_connectivity(all_outputs_connected());
+        set_all_outputs_connected(&mut lfo_shifted);
 
+        let mut pool_shifted = make_pool(8);
         let mut shifted_cycle = Vec::with_capacity(period);
-        for _ in 0..period {
-            lfo_shifted.process(&[], &mut out);
-            shifted_cycle.push(out[0]);
+        for i in 0..period {
+            lfo_shifted.process(&mut pool_shifted, i % 2);
+            if let CableValue::Mono(v) = pool_shifted[2][i % 2] { shifted_cycle.push(v); }
         }
 
-        // Shifted by 0.25 means each sample i of the shifted LFO matches
-        // sample (i + period/4) % period of the base LFO.
         let quarter = period / 4;
         for i in 0..period {
             let base_val = base_cycle[(i + quarter) % period];
@@ -371,18 +408,17 @@ mod tests {
             &params,
             InstanceId::next(),
         ).unwrap();
-        lfo.set_connectivity(PortConnectivity {
-            inputs: vec![false, false].into_boxed_slice(),
-            outputs: vec![false, false, true, false, false, false].into_boxed_slice(),
-        });
+        set_all_outputs_connected(&mut lfo);
 
-        let mut outputs = [0.0_f64; 6];
-        for _ in 0..period {
-            lfo.process(&[], &mut outputs);
-            assert!(
-                outputs[2] >= 0.0 && outputs[2] <= 1.0,
-                "unipolar_positive saw_up must be in [0, 1]; got {}", outputs[2]
-            );
+        let mut pool = make_pool(8);
+        for i in 0..period {
+            lfo.process(&mut pool, i % 2);
+            if let CableValue::Mono(v) = pool[4][i % 2] {
+                assert!(
+                    v >= 0.0 && v <= 1.0,
+                    "unipolar_positive saw_up must be in [0, 1]; got {}", v
+                );
+            }
         }
     }
 
@@ -404,79 +440,75 @@ mod tests {
             &params,
             InstanceId::next(),
         ).unwrap();
-        lfo.set_connectivity(PortConnectivity {
-            inputs: vec![false, false].into_boxed_slice(),
-            outputs: vec![false, false, false, false, false, true].into_boxed_slice(),
-        });
+        set_all_outputs_connected(&mut lfo);
 
-        let mut outputs = [0.0_f64; 6];
+        let mut pool = make_pool(8);
+        let mut tick_count = 0usize;
 
-        // Run three full periods; within each period the random value must be constant,
-        // and it must stay in [0, 1] (unipolar_positive mode).
-        // Check period-2 samples per cycle (avoids the wrap-boundary sample where
-        // floating-point accumulation may trigger the wrap one sample early or late).
         for _cycle in 0..3 {
-            lfo.process(&[], &mut outputs);
-            let cycle_value = outputs[5];
+            lfo.process(&mut pool, tick_count % 2);
+            let cycle_value = if let CableValue::Mono(v) = pool[7][tick_count % 2] { v } else { panic!("Mono"); };
+            tick_count += 1;
             assert!(
                 cycle_value >= 0.0 && cycle_value <= 1.0,
                 "random output must be in [0, 1] in unipolar_positive mode; got {cycle_value}"
             );
             for _ in 1..(period - 1) {
-                lfo.process(&[], &mut outputs);
-                assert!(
-                    (outputs[5] - cycle_value).abs() < 1e-15,
-                    "random output must hold within a period; changed from {cycle_value} to {}",
-                    outputs[5]
-                );
+                lfo.process(&mut pool, tick_count % 2);
+                if let CableValue::Mono(v) = pool[7][tick_count % 2] {
+                    assert!(
+                        (v - cycle_value).abs() < 1e-15,
+                        "random output must hold within a period; changed from {cycle_value} to {}", v
+                    );
+                }
+                tick_count += 1;
             }
-            // Consume the remaining sample(s) to advance to the next cycle boundary.
-            lfo.process(&[], &mut outputs);
+            lfo.process(&mut pool, tick_count % 2);
+            tick_count += 1;
         }
     }
 
     #[test]
     fn disconnected_outputs_are_not_written() {
         let mut lfo = make_lfo(1.0);
-        lfo.set_connectivity(no_inputs_connected());
-        let mut outputs = [99.0_f64; 6];
-        lfo.process(&[0.0, 0.0], &mut outputs);
-        for (i, &v) in outputs.iter().enumerate() {
-            assert_eq!(v, 99.0, "output[{i}] was written despite being disconnected");
+        set_no_outputs_connected(&mut lfo);
+        let mut pool: Vec<[CableValue; 2]> = (0..8).map(|_| [CableValue::Mono(99.0); 2]).collect();
+        lfo.process(&mut pool, 0);
+        for i in 2..8 {
+            if let CableValue::Mono(v) = pool[i][0] {
+                assert_eq!(v, 99.0, "output[{i}] was written despite being disconnected");
+            }
         }
     }
 
     #[test]
     fn sync_rising_edge_resets_phase_mid_cycle() {
-        // Use a slow LFO (1 Hz at 100 Hz sample rate = 100-sample period).
         let rate = 1.0_f64;
         let period = 100_usize;
         let sample_rate = rate * period as f64;
         let mut lfo = make_lfo_sr(rate, sample_rate);
-        lfo.set_connectivity(PortConnectivity {
-            inputs: vec![true, false].into_boxed_slice(),
-            outputs: vec![true, false, false, false, false, false].into_boxed_slice(),
-        });
-
-        let mut outputs = [0.0_f64; 6];
+        set_sync_and_rate_cv_connected(&mut lfo);
+        let mut pool = make_pool(8);
 
         // Advance 25 samples (quarter-cycle) with sync low.
-        for _ in 0..25 {
-            lfo.process(&[0.0, 0.0], &mut outputs);
+        for i in 0..25 {
+            pool[0][1 - (i % 2)] = CableValue::Mono(0.0);
+            pool[1][1 - (i % 2)] = CableValue::Mono(0.0);
+            lfo.process(&mut pool, i % 2);
         }
 
-        // Rising edge: sync goes from 0 → 1. Phase resets to 0 before this advance.
-        lfo.process(&[1.0, 0.0], &mut outputs);
-        let after_reset = outputs[0];
+        // Rising edge: sync goes from 0 → 1.
+        pool[0][1 - (25 % 2)] = CableValue::Mono(1.0);
+        pool[1][1 - (25 % 2)] = CableValue::Mono(0.0);
+        lfo.process(&mut pool, 25 % 2);
+        let after_reset = if let CableValue::Mono(v) = pool[2][25 % 2] { v } else { panic!(); };
 
-        // A fresh LFO at sample 1 (phase = 1/100) should match.
+        // A fresh LFO at sample 1 should match.
         let mut lfo_fresh = make_lfo_sr(rate, sample_rate);
-        lfo_fresh.set_connectivity(PortConnectivity {
-            inputs: vec![false, false].into_boxed_slice(),
-            outputs: vec![true, false, false, false, false, false].into_boxed_slice(),
-        });
-        lfo_fresh.process(&[], &mut outputs);
-        let expected = outputs[0];
+        set_all_outputs_connected(&mut lfo_fresh);
+        let mut pool_fresh = make_pool(8);
+        lfo_fresh.process(&mut pool_fresh, 0);
+        let expected = if let CableValue::Mono(v) = pool_fresh[2][0] { v } else { panic!(); };
 
         assert!(
             (after_reset - expected).abs() < 1e-10,
@@ -486,42 +518,45 @@ mod tests {
 
     #[test]
     fn sync_level_does_not_retrigger() {
-        // A flat positive sync signal (no edge) must not reset the phase.
         let rate = 1.0_f64;
         let period = 100_usize;
         let sample_rate = rate * period as f64;
         let mut lfo = make_lfo_sr(rate, sample_rate);
-        lfo.set_connectivity(PortConnectivity {
-            inputs: vec![true, false].into_boxed_slice(),
-            outputs: vec![true, false, false, false, false, false].into_boxed_slice(),
-        });
-
-        let mut outputs = [0.0_f64; 6];
+        set_sync_and_rate_cv_connected(&mut lfo);
+        let mut pool = make_pool(8);
 
         // Trigger a rising edge first (prev=0 → 1), then hold high.
-        lfo.process(&[1.0, 0.0], &mut outputs);
+        pool[0][1] = CableValue::Mono(1.0);
+        pool[1][1] = CableValue::Mono(0.0);
+        lfo.process(&mut pool, 0);
 
-        // Advance 25 more samples with sync held high — no retrigger.
         let mut values = Vec::new();
-        for _ in 0..25 {
-            lfo.process(&[1.0, 0.0], &mut outputs);
-            values.push(outputs[0]);
+        for i in 0..25 {
+            let wi = (1 + i) % 2;
+            let ri = 1 - wi;
+            pool[0][ri] = CableValue::Mono(1.0);
+            pool[1][ri] = CableValue::Mono(0.0);
+            lfo.process(&mut pool, wi);
+            if let CableValue::Mono(v) = pool[2][wi] { values.push(v); }
         }
 
-        // Compare against an identical fresh LFO that had one edge trigger then held.
+        // Compare against an identical fresh LFO.
         let mut lfo_ref = make_lfo_sr(rate, sample_rate);
-        lfo_ref.set_connectivity(PortConnectivity {
-            inputs: vec![true, false].into_boxed_slice(),
-            outputs: vec![true, false, false, false, false, false].into_boxed_slice(),
-        });
-        lfo_ref.process(&[1.0, 0.0], &mut outputs);
+        set_sync_and_rate_cv_connected(&mut lfo_ref);
+        let mut pool_ref = make_pool(8);
+        pool_ref[0][1] = CableValue::Mono(1.0);
+        pool_ref[1][1] = CableValue::Mono(0.0);
+        lfo_ref.process(&mut pool_ref, 0);
         let mut ref_values = Vec::new();
-        for _ in 0..25 {
-            lfo_ref.process(&[1.0, 0.0], &mut outputs);
-            ref_values.push(outputs[0]);
+        for i in 0..25 {
+            let wi = (1 + i) % 2;
+            let ri = 1 - wi;
+            pool_ref[0][ri] = CableValue::Mono(1.0);
+            pool_ref[1][ri] = CableValue::Mono(0.0);
+            lfo_ref.process(&mut pool_ref, wi);
+            if let CableValue::Mono(v) = pool_ref[2][wi] { ref_values.push(v); }
         }
 
-        // Values must advance monotonically (not reset back to near-zero repeatedly).
         for (i, (&v, &r)) in values.iter().zip(ref_values.iter()).enumerate() {
             assert!((v - r).abs() < 1e-10, "sample {i}: sync level caused retrigger; got {v} vs ref {r}");
         }
@@ -529,27 +564,29 @@ mod tests {
 
     #[test]
     fn rate_cv_doubles_rate_halves_period() {
-        // With rate=1 Hz and rate_cv=+1 Hz, effective rate = 2 Hz → period = 50 samples.
         let base_rate = 1.0_f64;
         let period = 100_usize;
         let sample_rate = base_rate * period as f64;
 
         let mut lfo = make_lfo_sr(base_rate, sample_rate);
-        lfo.set_connectivity(PortConnectivity {
-            inputs: vec![false, true].into_boxed_slice(),
-            outputs: vec![true, false, false, false, false, false].into_boxed_slice(),
-        });
-
-        let mut outputs = [0.0_f64; 6];
+        set_sync_and_rate_cv_connected(&mut lfo);
+        let mut pool = make_pool(8);
         let mut cycle1 = Vec::with_capacity(50);
-        for _ in 0..50 {
-            lfo.process(&[0.0, 1.0], &mut outputs); // rate_cv = +1 → effective 2 Hz
-            cycle1.push(outputs[0]);
+        for i in 0..50 {
+            let ri = 1 - (i % 2);
+            pool[0][ri] = CableValue::Mono(0.0);
+            pool[1][ri] = CableValue::Mono(1.0); // rate_cv = +1 → effective 2 Hz
+            lfo.process(&mut pool, i % 2);
+            if let CableValue::Mono(v) = pool[2][i % 2] { cycle1.push(v); }
         }
         let mut cycle2 = Vec::with_capacity(50);
-        for _ in 0..50 {
-            lfo.process(&[0.0, 1.0], &mut outputs);
-            cycle2.push(outputs[0]);
+        for i in 0..50 {
+            let tick = 50 + i;
+            let ri = 1 - (tick % 2);
+            pool[0][ri] = CableValue::Mono(0.0);
+            pool[1][ri] = CableValue::Mono(1.0);
+            lfo.process(&mut pool, tick % 2);
+            if let CableValue::Mono(v) = pool[2][tick % 2] { cycle2.push(v); }
         }
 
         for (i, (a, b)) in cycle1.iter().zip(cycle2.iter()).enumerate() {
@@ -562,27 +599,24 @@ mod tests {
 
     #[test]
     fn rate_cv_large_negative_is_clamped() {
-        // A very negative rate_cv must not produce a zero or negative increment.
         let rate = 1.0_f64;
         let period = 100_usize;
         let sample_rate = rate * period as f64;
 
         let mut lfo = make_lfo_sr(rate, sample_rate);
-        lfo.set_connectivity(PortConnectivity {
-            inputs: vec![false, true].into_boxed_slice(),
-            outputs: vec![true, false, false, false, false, false].into_boxed_slice(),
-        });
+        set_sync_and_rate_cv_connected(&mut lfo);
+        let mut pool = make_pool(8);
 
-        let mut outputs = [0.0_f64; 6];
+        pool[0][1] = CableValue::Mono(0.0);
+        pool[1][1] = CableValue::Mono(-1000.0);
+        lfo.process(&mut pool, 0);
+        let first = if let CableValue::Mono(v) = pool[2][0] { v } else { panic!(); };
 
-        // Run two samples; if phase advances, the second sine value differs from the first
-        // (assuming minimum increment > 0).
-        lfo.process(&[0.0, -1000.0], &mut outputs);
-        let first = outputs[0];
-        lfo.process(&[0.0, -1000.0], &mut outputs);
-        let second = outputs[0];
+        pool[0][0] = CableValue::Mono(0.0);
+        pool[1][0] = CableValue::Mono(-1000.0);
+        lfo.process(&mut pool, 1);
+        let second = if let CableValue::Mono(v) = pool[2][1] { v } else { panic!(); };
 
-        // Phase must have advanced (not stuck or gone backwards).
         assert!(
             (second - first).abs() > 1e-10,
             "rate_cv=-1000 clamped to minimum should still advance phase; got first={first}, second={second}"

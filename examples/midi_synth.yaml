@@ -37,7 +37,7 @@
 
 nodes:
   kbd:
-    module: MonophonicMidiKeyboard
+    module: MidiIn
 
   glide:
     module: Glide
@@ -53,10 +53,10 @@ nodes:
       cent: 0
 
   osc_main:
-    module: Oscillator
+    module: Osc
 
   osc_sub:
-    module: Oscillator
+    module: Osc
 
   # Three voices: saw body + PWM square + sub square
   mix:
@@ -71,7 +71,7 @@ nodes:
 
   # Amp envelope: punchy but fluid
   amp_env:
-    module: AdsrEnvelope
+    module: Adsr
     params:
       attack: 0.003
       decay: 0.10
@@ -80,7 +80,7 @@ nodes:
 
   # Filter envelope: slightly slower decay for a plucked bloom
   filter_env:
-    module: AdsrEnvelope
+    module: Adsr
     params:
       attack: 0.003
       decay: 0.22
@@ -94,7 +94,7 @@ nodes:
 
   # Low resonance keeps it punchy without screaming; saturation adds grit
   filter:
-    module: ResonantLowpass
+    module: Filter
     params:
       cutoff: 700.0
       resonance: 0.02

@@ -37,14 +37,14 @@
 
 nodes:
   clock:
-    module: ClockSequencer
+    module: Clock
     params:
       bpm: 80.0
       beats_per_bar: 4
       quavers_per_beat: 2
 
   seq:
-    module: StepSequencer
+    module: Seq
     length: 16
     params:
       steps:
@@ -90,13 +90,13 @@ nodes:
       cent: 0
 
   saw:
-    module: Oscillator
+    module: Osc
 
   sq:
-    module: Oscillator
+    module: Osc
 
   sub:
-    module: Oscillator
+    module: Osc
 
   mix:
     module: Sum
@@ -107,7 +107,7 @@ nodes:
     channels: 2
 
   env:
-    module: AdsrEnvelope
+    module: Adsr
     params:
       attack: 0.01
       decay: 0.06
@@ -115,7 +115,7 @@ nodes:
       release: 0.18
 
   filter:
-    module: ResonantLowpass
+    module: Filter
     params:
       cutoff: 800.0
       resonance: 0.0
@@ -125,12 +125,12 @@ nodes:
     module: Vca
 
   kick_osc:
-    module: Oscillator
+    module: Osc
     params:
       frequency: 80.0
 
   kick_env:
-    module: AdsrEnvelope
+    module: Adsr
     params:
       attack: 0.002
       decay: 0.12

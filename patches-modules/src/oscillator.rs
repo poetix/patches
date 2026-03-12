@@ -132,6 +132,7 @@ impl Module for Oscillator {
         self.out_triangle = MonoOutput::from_ports(outputs, 1);
         self.out_sawtooth = MonoOutput::from_ports(outputs, 2);
         self.out_square = MonoOutput::from_ports(outputs, 3);
+        self.phase_accumulator.set_modulation(self.in_voct.is_connected(), self.in_fm.is_connected());
     }
 
     fn process(&mut self, pool: &mut [[CableValue; 2]], wi: usize) {

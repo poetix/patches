@@ -11,13 +11,13 @@
 nodes:
   
   sine1:
-    module: Oscillator
+    module: Osc
     params:
       frequency: 117.0
       fm_type: logarithmic
 
   sine2:
-    module: Oscillator
+    module: Osc
     params:
       frequency: 118.0
       fm_type: logarithmic

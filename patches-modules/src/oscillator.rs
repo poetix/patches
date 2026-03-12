@@ -124,14 +124,15 @@ impl Module for Oscillator {
     }
 
     fn set_ports(&mut self, inputs: &[InputPort], outputs: &[OutputPort]) {
-        self.in_voct = MonoInput::from_ports(inputs, 0);
-        self.in_fm = MonoInput::from_ports(inputs, 1);
-        self.in_pulse_width = MonoInput::from_ports(inputs, 2);
-        self.in_phase_mod = MonoInput::from_ports(inputs, 3);
-        self.out_sine = MonoOutput::from_ports(outputs, 0);
-        self.out_triangle = MonoOutput::from_ports(outputs, 1);
-        self.out_sawtooth = MonoOutput::from_ports(outputs, 2);
-        self.out_square = MonoOutput::from_ports(outputs, 3);
+        self.in_voct = inputs[0].expect_mono();
+        self.in_fm = inputs[1].expect_mono();
+        self.in_pulse_width = inputs[2].expect_mono();
+        self.in_phase_mod = inputs[3].expect_mono();
+        self.out_sine = outputs[0].expect_mono();
+        self.out_triangle = outputs[1].expect_mono();
+        self.out_sawtooth = outputs[2].expect_mono();
+        self.out_square = outputs[3].expect_mono();
+        
         self.phase_accumulator.set_modulation(self.in_voct.is_connected(), self.in_fm.is_connected());
     }
 

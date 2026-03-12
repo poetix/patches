@@ -31,6 +31,10 @@ impl Default for MonoInput {
 }
 
 impl MonoInput {
+    pub fn from_port(port: &InputPort) -> Self {
+        port.expect_mono()
+    }
+
     /// Extract the `MonoInput` at position `idx` from a port slice.
     ///
     /// # Panics
@@ -38,10 +42,7 @@ impl MonoInput {
     /// `InputPort::Mono`.  The planner guarantees correct port types, so a
     /// panic here indicates a module descriptor / `set_ports` mismatch.
     pub fn from_ports(ports: &[InputPort], idx: usize) -> Self {
-        match &ports[idx] {
-            InputPort::Mono(p) => p.clone(),
-            InputPort::Poly(_) => panic!("MonoInput::from_ports: port {idx} is Poly, expected Mono"),
-        }
+        ports[idx].expect_mono()
     }
 
     pub fn is_connected(&self) -> bool {
@@ -98,10 +99,7 @@ impl PolyInput {
     /// Panics if `idx` is out of bounds or the port at that position is not
     /// `InputPort::Poly`.
     pub fn from_ports(ports: &[InputPort], idx: usize) -> Self {
-        match &ports[idx] {
-            InputPort::Poly(p) => p.clone(),
-            InputPort::Mono(_) => panic!("PolyInput::from_ports: port {idx} is Mono, expected Poly"),
-        }
+        ports[idx].expect_poly()
     }
 
     pub fn is_connected(&self) -> bool {
@@ -150,10 +148,7 @@ impl MonoOutput {
     /// Panics if `idx` is out of bounds or the port at that position is not
     /// `OutputPort::Mono`.
     pub fn from_ports(ports: &[OutputPort], idx: usize) -> Self {
-        match &ports[idx] {
-            OutputPort::Mono(p) => p.clone(),
-            OutputPort::Poly(_) => panic!("MonoOutput::from_ports: port {idx} is Poly, expected Mono"),
-        }
+        ports[idx].expect_mono()
     }
 
     pub fn is_connected(&self) -> bool {
@@ -185,10 +180,7 @@ impl PolyOutput {
     /// Panics if `idx` is out of bounds or the port at that position is not
     /// `OutputPort::Poly`.
     pub fn from_ports(ports: &[OutputPort], idx: usize) -> Self {
-        match &ports[idx] {
-            OutputPort::Poly(p) => p.clone(),
-            OutputPort::Mono(_) => panic!("PolyOutput::from_ports: port {idx} is Mono, expected Poly"),
-        }
+        ports[idx].expect_poly()
     }
 
     pub fn is_connected(&self) -> bool {
@@ -216,12 +208,60 @@ pub enum InputPort {
     Poly(PolyInput),
 }
 
+impl InputPort {
+    pub fn as_mono(&self) -> Option<MonoInput> {
+        match self {
+            InputPort::Mono(p) => Some(p.clone()),
+            InputPort::Poly(_) => None,
+        }
+    }
+
+    pub fn expect_mono(&self) -> MonoInput {
+        self.as_mono().expect("expected mono input port")
+    }
+
+    pub fn as_poly(&self) -> Option<PolyInput> {
+        match self {
+            InputPort::Mono(_) => None,
+            InputPort::Poly(p) => Some(p.clone()),
+        }
+    }
+
+    pub fn expect_poly(&self) -> PolyInput {
+        self.as_poly().expect("expected poly input port")
+    }
+}
+
 /// Heterogeneous output-port wrapper used by the planner to deliver ports to
 /// `Module::set_ports` without boxing.
 #[derive(Clone, Debug, PartialEq)]
 pub enum OutputPort {
     Mono(MonoOutput),
     Poly(PolyOutput),
+}
+
+impl OutputPort {
+    pub fn as_mono(&self) -> Option<MonoOutput> {
+        match self {
+            OutputPort::Mono(p) => Some(p.clone()),
+            OutputPort::Poly(_) => None,
+        }
+    }
+
+    pub fn expect_mono(&self) -> MonoOutput {
+        self.as_mono().expect("expected mono output port")
+    }
+
+    pub fn as_poly(&self) -> Option<PolyOutput> {
+        match self {
+            OutputPort::Mono(_) => None,
+            OutputPort::Poly(p) => Some(p.clone()),
+        }
+    }
+
+    pub fn expect_poly(&self) -> PolyOutput {
+        self.as_poly().expect("expected poly output port")
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────

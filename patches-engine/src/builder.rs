@@ -3,7 +3,7 @@ use std::fmt;
 
 use patches_core::{
     make_decisions, PlanDecisions,
-    AudioEnvironment, BufferAllocState, CableKind, CablePool, CableValue, InputPort, InstanceId,
+    AudioEnvironment, BufferAllocState, CableKind, CablePool, InputPort, InstanceId,
     MonoInput, MonoOutput, Module, ModuleAllocState, ModuleGraph, NodeDecision, NodeId,
     NodeState, OutputPort, PlanError, PlannerState, PolyInput, PolyOutput, Registry,
     ResolvedGraph,

@@ -1,4 +1,4 @@
-use patches_core::{CablePool, CableValue, InputPort, MidiEvent, Module, OutputPort};
+use patches_core::{CablePool, InputPort, MidiEvent, Module, OutputPort};
 use patches_core::parameter_map::ParameterMap;
 
 /// Audio-thread-owned pool of module instances.

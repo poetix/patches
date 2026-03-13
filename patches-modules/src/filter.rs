@@ -2,7 +2,7 @@ use std::f64::consts::{FRAC_1_SQRT_2, TAU};
 use crate::common::approximate::fast_tanh;
 
 use patches_core::{
-    AudioEnvironment, CablePool, CableValue, InputPort, InstanceId, Module, ModuleDescriptor,
+    AudioEnvironment, CablePool, InputPort, InstanceId, Module, ModuleDescriptor,
     MonoInput, MonoOutput, ModuleShape, OutputPort, ParameterDescriptor, ParameterKind, PortDescriptor,
 };
 use patches_core::CableKind;

@@ -1,5 +1,5 @@
 use patches_core::{
-    AudioEnvironment, CablePool, CableValue, InputPort, InstanceId, Module, ModuleDescriptor,
+    AudioEnvironment, CablePool, InputPort, InstanceId, Module, ModuleDescriptor,
     MonoInput, MonoOutput, ModuleShape, OutputPort, CableKind, PortDescriptor,
 };
 use patches_core::parameter_map::ParameterMap;

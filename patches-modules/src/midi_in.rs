@@ -1,5 +1,5 @@
 use patches_core::{
-    AudioEnvironment, CablePool, CableValue, InputPort, InstanceId, MidiEvent, Module, ModuleDescriptor,
+    AudioEnvironment, CablePool, InputPort, InstanceId, MidiEvent, Module, ModuleDescriptor,
     ModuleShape, MonoOutput, OutputPort, PortDescriptor, ReceivesMidi,
 };
 use patches_core::CableKind;

@@ -204,7 +204,7 @@ impl Module for Adsr {
 mod tests {
 
     use super::*;
-    use patches_core::{AudioEnvironment, CablePool, Module, ModuleShape, Registry};
+    use patches_core::{AudioEnvironment, CablePool, CableValue, Module, ModuleShape, Registry};
     use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
     fn make_envelope(attack: f64, decay: f64, sustain: f64, release: f64) -> Box<dyn Module> {
@@ -217,7 +217,7 @@ mod tests {
         r.register::<Adsr>();
         r.create(
             "Adsr",
-            &AudioEnvironment { sample_rate: 10.0 },
+            &AudioEnvironment { sample_rate: 10.0, poly_voices: 16 },
             &ModuleShape { channels: 0, length: 0 },
             &params,
             InstanceId::next(),

@@ -1,0 +1,119 @@
+# poly_synth.yaml — 8-voice polyphonic sawtooth synth with ADSR amplitude shaping
+#
+# Voice architecture:
+#   kbd        — PolyMidiIn with LIFO voice stealing (8 voices from poly_voices)
+#   osc        — PolyOsc: one sawtooth per voice, driven by poly V/oct
+#   env        — PolyAdsr: per-voice amplitude envelope
+#   vca        — PolyVca: shapes each voice's audio with its envelope
+#   mix        — PolyMix (2 inputs): blends sawtooth + square from osc
+#   collapse   — PolyToMono: sums all voices to a single mono signal
+#   out        — AudioOut: stereo output
+#
+# Signal flow:
+#
+#   kbd ──v_oct (poly)──→ osc ──sawtooth (poly)──→ mix.in/0
+#                         └──→ osc ──square (poly)──→ mix.in/1
+#
+#   mix ──out (poly)──→ vca.in
+#
+#   kbd ──trigger (poly)──→ env
+#   kbd ──gate (poly)────→ env
+#   env ──out (poly)────→ vca.cv
+#
+#   vca ──out (poly)──→ collapse ──out (mono)──→ out.left / out.right
+#
+# Hot-reload tips:
+#   - Adjust env.attack (try 0.002–0.05) for a harder or softer onset.
+#   - Lower env.sustain (try 0.3–0.5) for a more percussive character.
+#   - Increase env.release (try 0.5–1.5) for longer note tails.
+#   - Change the sawtooth scale to 0.3 and square to 0.7 for a harder timbre.
+#   - Swap PolyOsc output to sine for a clean, pad-like sound.
+
+nodes:
+  kbd:
+    module: PolyMidiIn
+
+  osc:
+    module: PolyOsc
+
+  mix:
+    module: PolyMix
+    channels: 2
+
+  env:
+    module: PolyAdsr
+    params:
+      attack:  0.005
+      decay:   0.12
+      sustain: 0.65
+      release: 0.4
+
+  vca:
+    module: PolyVca
+
+  collapse:
+    module: PolyToMono
+
+  out:
+    module: AudioOut
+
+cables:
+  # V/oct: keyboard → oscillator (all voices)
+  - from: kbd
+    output: v_oct
+    to: osc
+    input: voct
+
+  # Oscillator mix: sawtooth (body) + square (edge)
+  - from: osc
+    output: sawtooth
+    to: mix
+    input: in
+    scale: 0.6
+
+  - from: osc
+    output: square
+    to: mix
+    input: in/1
+    scale: 0.4
+
+  # Amplitude envelope: triggered and gated per voice
+  - from: kbd
+    output: trigger
+    to: env
+    input: trigger
+
+  - from: kbd
+    output: gate
+    to: env
+    input: gate
+
+  # VCA: shaped audio per voice
+  - from: mix
+    output: out
+    to: vca
+    input: in
+
+  - from: env
+    output: out
+    to: vca
+    input: cv
+
+  # Collapse all voices to mono
+  - from: vca
+    output: out
+    to: collapse
+    input: in
+
+  # Stereo output — scale down to avoid clipping with many voices
+  - from: collapse
+    output: out
+    to: out
+    input: left
+    scale: 0.12
+
+  - from: collapse
+    output: out
+    to: out
+    input: right
+    scale: 0.12

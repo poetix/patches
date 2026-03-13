@@ -218,7 +218,7 @@ impl Module for Lfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use patches_core::{AudioEnvironment, CablePool, Module, ModuleShape, Registry};
+    use patches_core::{AudioEnvironment, CablePool, CableValue, Module, ModuleShape, Registry};
     use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
     fn make_lfo(rate: f64) -> Box<dyn Module> {
@@ -232,7 +232,7 @@ mod tests {
         r.register::<Lfo>();
         r.create(
             "Lfo",
-            &AudioEnvironment { sample_rate },
+            &AudioEnvironment { sample_rate, poly_voices: 16 },
             &ModuleShape { channels: 0, length: 0 },
             &params,
             InstanceId::next(),
@@ -342,7 +342,7 @@ mod tests {
         r.register::<Lfo>();
         let mut lfo_shifted = r.create(
             "Lfo",
-            &AudioEnvironment { sample_rate },
+            &AudioEnvironment { sample_rate, poly_voices: 16 },
             &ModuleShape { channels: 0, length: 0 },
             &params,
             InstanceId::next(),
@@ -382,7 +382,7 @@ mod tests {
         r.register::<Lfo>();
         let mut lfo = r.create(
             "Lfo",
-            &AudioEnvironment { sample_rate },
+            &AudioEnvironment { sample_rate, poly_voices: 16 },
             &ModuleShape { channels: 0, length: 0 },
             &params,
             InstanceId::next(),
@@ -415,7 +415,7 @@ mod tests {
         r.register::<Lfo>();
         let mut lfo = r.create(
             "Lfo",
-            &AudioEnvironment { sample_rate },
+            &AudioEnvironment { sample_rate, poly_voices: 16 },
             &ModuleShape { channels: 0, length: 0 },
             &params,
             InstanceId::next(),

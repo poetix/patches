@@ -83,7 +83,7 @@ impl Module for Sum {
 mod tests {
 
     use super::*;
-    use patches_core::{AudioEnvironment, CablePool, Module, ModuleShape, Registry};
+    use patches_core::{AudioEnvironment, CablePool, CableValue, Module, ModuleShape, Registry};
     use patches_core::parameter_map::ParameterMap;
 
     fn make_sum(channels: usize) -> Box<dyn Module> {
@@ -91,7 +91,7 @@ mod tests {
         r.register::<Sum>();
         r.create(
             "Sum",
-            &AudioEnvironment { sample_rate: 44100.0 },
+            &AudioEnvironment { sample_rate: 44100.0, poly_voices: 16 },
             &ModuleShape { channels, length: 0 },
             &ParameterMap::new(),
             InstanceId::next(),

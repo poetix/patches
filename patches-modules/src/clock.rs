@@ -163,7 +163,7 @@ impl Module for Clock {
 mod tests {
 
     use super::*;
-    use patches_core::{AudioEnvironment, CablePool, Module, ModuleShape, Registry};
+    use patches_core::{AudioEnvironment, CablePool, CableValue, Module, ModuleShape, Registry};
     use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
     fn make_clock(bpm: f64, beats_per_bar: i64, quavers_per_beat: i64) -> Box<dyn Module> {
@@ -179,7 +179,7 @@ mod tests {
         r.register::<Clock>();
         r.create(
             "Clock",
-            &AudioEnvironment { sample_rate: sample_rate },
+            &AudioEnvironment { sample_rate: sample_rate, poly_voices: 16 },
             &ModuleShape { channels: 0, length: 0 },
             &params,
             InstanceId::next(),

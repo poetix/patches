@@ -231,14 +231,14 @@ impl ReceivesMidi for MonoMidiIn {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use patches_core::{AudioEnvironment, CablePool, InstanceId, MidiEvent, Module, ModuleShape, Registry};
+    use patches_core::{AudioEnvironment, CablePool, CableValue, InstanceId, MidiEvent, Module, ModuleShape, Registry};
 
     fn make_keyboard() -> Box<dyn Module> {
         let mut r = Registry::new();
         r.register::<MonoMidiIn>();
         r.create(
             "MidiIn",
-            &AudioEnvironment { sample_rate: 44100.0 },
+            &AudioEnvironment { sample_rate: 44100.0, poly_voices: 16 },
             &ModuleShape { channels: 0, length: 0 },
             &patches_core::parameter_map::ParameterMap::new(),
             InstanceId::next(),

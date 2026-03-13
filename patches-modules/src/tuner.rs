@@ -109,7 +109,7 @@ impl Module for Tuner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use patches_core::{AudioEnvironment, CablePool, Module, ModuleShape, Registry};
+    use patches_core::{AudioEnvironment, CablePool, CableValue, Module, ModuleShape, Registry};
     use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
     fn make_tuner(octave: i64, semi: i64, cent: i64) -> Box<dyn Module> {
@@ -121,7 +121,7 @@ mod tests {
         r.register::<Tuner>();
         r.create(
             "Tuner",
-            &AudioEnvironment { sample_rate: 44100.0 },
+            &AudioEnvironment { sample_rate: 44100.0, poly_voices: 16 },
             &ModuleShape { channels: 0, length: 0 },
             &params,
             InstanceId::next(),

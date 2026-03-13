@@ -143,6 +143,9 @@ impl AudioCallback {
             for &i in &new_plan.to_zero {
                 self.buffer_pool[i] = [CableValue::Mono(0.0), CableValue::Mono(0.0)];
             }
+            for &i in &new_plan.to_zero_poly {
+                self.buffer_pool[i] = [CableValue::Poly([0.0; 16]), CableValue::Poly([0.0; 16])];
+            }
             self.current_plan = new_plan;
         }
     }

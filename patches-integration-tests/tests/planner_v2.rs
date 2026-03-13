@@ -1,4 +1,4 @@
-use patches_core::{AudioEnvironment, CableValue, Module, ModuleGraph, ModuleShape, NodeId, PortRef};
+use patches_core::{AudioEnvironment, CablePool, CableValue, Module, ModuleGraph, ModuleShape, NodeId, PortRef};
 use patches_core::parameter_map::{ParameterMap, ParameterValue};
 use patches_core::PlannerState;
 use patches_engine::{build_patch, ExecutionPlan, ModulePool};
@@ -13,7 +13,7 @@ const SAMPLE_RATE: f64 = 44100.0;
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 fn env() -> AudioEnvironment {
-    AudioEnvironment { sample_rate: SAMPLE_RATE }
+    AudioEnvironment { sample_rate: SAMPLE_RATE, poly_voices: 16 }
 }
 
 fn p(name: &'static str) -> PortRef {
@@ -294,7 +294,8 @@ fn state_preserved_across_parameter_update() {
     // Tick 100 times at 440 Hz.
     const TICKS: usize = 100;
     for i in 0..TICKS {
-        plan_a.tick(&mut pool, &mut bufs, i % 2);
+        let mut cable_pool = CablePool::new(&mut bufs, i % 2);
+        plan_a.tick(&mut pool, &mut cable_pool);
     }
 
     // Replan with freq=880 Hz — parameter-only change, osc survives.
@@ -315,7 +316,8 @@ fn state_preserved_across_parameter_update() {
     );
 
     for i in TICKS..(TICKS + 2) {
-        plan_b.tick(&mut pool, &mut bufs, i % 2);
+        let mut cable_pool = CablePool::new(&mut bufs, i % 2);
+        plan_b.tick(&mut pool, &mut cable_pool);
     }
 }
 
@@ -340,7 +342,8 @@ fn initial_plan_uses_provided_sample_rate() {
     // process_alias is currently a no-op stub (T-0118 will wire modules).
     // Verify only that tick() runs without panic and output is bounded.
     for i in 0..3 {
-        plan.tick(&mut pool, &mut bufs, i % 2);
+        let mut cable_pool = CablePool::new(&mut bufs, i % 2);
+        plan.tick(&mut pool, &mut cable_pool);
     }
 
     let sink_val = pool.read_sink_left();

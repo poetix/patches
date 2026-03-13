@@ -1,7 +1,7 @@
 use std::any::Any;
 
 use patches_core::{
-    AudioEnvironment, CableKind, CableValue, InstanceId, Module, ModuleDescriptor, ModuleGraph,
+    AudioEnvironment, CableKind, CablePool, InstanceId, Module, ModuleDescriptor, ModuleGraph,
     ModuleShape, NodeId, PortDescriptor, PortRef, Registry,
 };
 use patches_core::parameter_map::{ParameterMap, ParameterValue};
@@ -49,7 +49,7 @@ impl Module for Probe {
         self.instance_id
     }
 
-    fn process(&mut self, _pool: &mut [[CableValue; 2]], _wi: usize) {}
+    fn process(&mut self, _pool: &mut CablePool<'_>) {}
 
     fn as_any(&self) -> &dyn Any {
         self
@@ -59,7 +59,7 @@ impl Module for Probe {
 // ── helpers ───────────────────────────────────────────────────────────────────
 
 fn env() -> AudioEnvironment {
-    AudioEnvironment { sample_rate: 44100.0 }
+    AudioEnvironment { sample_rate: 44100.0, poly_voices: 16 }
 }
 
 fn p(name: &'static str) -> PortRef {

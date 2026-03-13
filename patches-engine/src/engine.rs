@@ -96,7 +96,7 @@ mod tests {
     use std::any::Any;
     use std::sync::{Arc, Mutex};
 
-    use patches_core::{AudioEnvironment, CableValue, InstanceId, Module, ModuleDescriptor, ModuleShape};
+    use patches_core::{AudioEnvironment, InstanceId, Module, ModuleDescriptor, ModuleShape};
     use patches_core::parameter_map::ParameterMap;
 
     struct ThreadIdDropSpy {
@@ -159,7 +159,7 @@ mod tests {
             self.instance_id
         }
 
-        fn process(&mut self, _pool: &mut [[CableValue; 2]], _wi: usize) {}
+        fn process(&mut self, _pool: &mut patches_core::CablePool<'_>) {}
 
         fn as_any(&self) -> &dyn Any {
             self
@@ -325,7 +325,7 @@ impl SoundEngine {
             channels,
         });
 
-        Ok(AudioEnvironment { sample_rate })
+        Ok(AudioEnvironment { sample_rate, poly_voices: 16 })
     }
 
     /// Begin audio processing with the given [`ExecutionPlan`].
@@ -343,7 +343,7 @@ impl SoundEngine {
             return Ok(());
         }
 
-        let PendingState { plan_rx, buffer_pool, mut module_pool } =
+        let PendingState { plan_rx, mut buffer_pool, mut module_pool } =
             self.pending.take().ok_or(EngineError::AlreadyConsumed)?;
 
         let OpenedDevice { device, config, sample_format, channels } =
@@ -352,6 +352,14 @@ impl SoundEngine {
         // Install the plan's new modules into the pool (already initialised).
         for (idx, module) in plan.new_modules.drain(..) {
             module_pool.install(idx, module);
+        }
+
+        // Zero cable buffer slots for the initial plan (mirrors receive_plan in callback.rs).
+        for &i in &plan.to_zero {
+            buffer_pool[i] = [CableValue::Mono(0.0), CableValue::Mono(0.0)];
+        }
+        for &i in &plan.to_zero_poly {
+            buffer_pool[i] = [CableValue::Poly([0.0; 16]), CableValue::Poly([0.0; 16])];
         }
 
         let (cleanup_tx, mut cleanup_rx) =

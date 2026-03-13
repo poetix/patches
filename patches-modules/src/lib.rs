@@ -4,6 +4,12 @@ pub mod clock;
 pub mod filter;
 pub mod midi_in;
 pub mod oscillator;
+pub mod poly_adsr;
+pub mod poly_midi_in;
+pub mod poly_mix;
+pub mod poly_osc;
+pub mod poly_to_mono;
+pub mod poly_vca;
 pub mod seq;
 pub mod sum;
 pub mod vca;
@@ -18,6 +24,12 @@ pub use clock::Clock;
 pub use filter::ResonantLowpass;
 pub use midi_in::MonoMidiIn;
 pub use oscillator::Oscillator;
+pub use poly_adsr::PolyAdsr;
+pub use poly_midi_in::PolyMidiIn;
+pub use poly_mix::PolyMix;
+pub use poly_osc::PolyOsc;
+pub use poly_to_mono::PolyToMono;
+pub use poly_vca::PolyVca;
 pub use seq::Seq;
 pub use sum::Sum;
 pub use vca::Vca;
@@ -39,6 +51,12 @@ pub fn default_registry() -> patches_core::Registry {
     r.register::<ResonantLowpass>();
     r.register::<Tuner>();
     r.register::<MonoMidiIn>();
+    r.register::<PolyMidiIn>();
+    r.register::<PolyOsc>();
+    r.register::<PolyAdsr>();
+    r.register::<PolyVca>();
+    r.register::<PolyMix>();
+    r.register::<PolyToMono>();
     r
 }
 
@@ -50,7 +68,7 @@ mod tests {
     #[test]
     fn default_registry_contains_all_modules() {
         let r = super::default_registry();
-        let env = AudioEnvironment { sample_rate: 44100.0 };
+        let env = AudioEnvironment { sample_rate: 44100.0, poly_voices: 16 };
         let shape = ModuleShape { channels: 2, length: 0 };
         let params = ParameterMap::new();
 
@@ -67,6 +85,12 @@ mod tests {
             "Filter",
             "Tuner",
             "MidiIn",
+            "PolyMidiIn",
+            "PolyOsc",
+            "PolyAdsr",
+            "PolyVca",
+            "PolyMix",
+            "PolyToMono",
         ] {
             assert!(
                 r.create(name, &env, &shape, &params, InstanceId::next()).is_ok(),

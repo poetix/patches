@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use patches_core::{CableValue, Module};
+use patches_core::{CablePool, CableValue, Module};
 use patches_engine::{ExecutionPlan, ModulePool};
 
 /// Synchronous, device-free engine fixture that mirrors the audio callback's
@@ -49,6 +49,9 @@ impl HeadlessEngine {
         }
         for &i in &plan.to_zero {
             buffer_pool[i] = [CableValue::Mono(0.0), CableValue::Mono(0.0)];
+        }
+        for &i in &plan.to_zero_poly {
+            buffer_pool[i] = [CableValue::Poly([0.0; 16]), CableValue::Poly([0.0; 16])];
         }
 
         let (cleanup_tx, mut cleanup_rx) =
@@ -106,12 +109,16 @@ impl HeadlessEngine {
         for &i in &plan.to_zero {
             self.buffer_pool[i] = [CableValue::Mono(0.0), CableValue::Mono(0.0)];
         }
+        for &i in &plan.to_zero_poly {
+            self.buffer_pool[i] = [CableValue::Poly([0.0; 16]), CableValue::Poly([0.0; 16])];
+        }
         self.plan = plan;
     }
 
     /// Advance the plan by one sample.
     pub fn tick(&mut self) {
-        self.plan.tick(&mut self.module_pool, &mut self.buffer_pool, self.wi);
+        let mut cable_pool = CablePool::new(&mut self.buffer_pool, self.wi);
+        self.plan.tick(&mut self.module_pool, &mut cable_pool);
         self.wi = 1 - self.wi;
     }
 

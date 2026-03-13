@@ -318,7 +318,7 @@ impl Module for Seq {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use patches_core::{AudioEnvironment, CablePool, Module, ModuleShape, Registry};
+    use patches_core::{AudioEnvironment, CablePool, CableValue, Module, ModuleShape, Registry};
     use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
     fn make_sequencer(steps: &[&str]) -> Box<dyn Module> {
@@ -331,7 +331,7 @@ mod tests {
         r.register::<Seq>();
         r.create(
             "Seq",
-            &AudioEnvironment { sample_rate: 44100.0 },
+            &AudioEnvironment { sample_rate: 44100.0, poly_voices: 16 },
             &ModuleShape { channels: 0, length: 32 },
             &params,
             InstanceId::next(),
@@ -466,7 +466,7 @@ mod tests {
         r.register::<Seq>();
         let result = r.create(
             "StepSequencer",
-            &AudioEnvironment { sample_rate: 44100.0 },
+            &AudioEnvironment { sample_rate: 44100.0, poly_voices: 16 },
             &ModuleShape { channels: 0, length: 32 },
             &params,
             InstanceId::next(),

@@ -87,13 +87,20 @@ pub struct ModuleSlot {
 /// and [`last_right`](ExecutionPlan::last_right).
 pub struct ExecutionPlan {
     pub slots: Vec<ModuleSlot>,
-    /// Buffer pool indices that the audio thread must zero when this plan is
-    /// first adopted (before the first `tick`).
+    /// Buffer pool indices that the audio thread must zero with `Mono(0.0)` when
+    /// this plan is first adopted (before the first `tick`).
     ///
-    /// Contains only newly allocated and freed (recycled) indices. Stable
-    /// connections whose buffer index is unchanged across a re-plan are absent,
-    /// so the audio thread does not disturb their in-flight values.
+    /// Contains newly allocated mono cable slots and freed (recycled) slots.
+    /// Stable connections whose buffer index is unchanged across a re-plan are
+    /// absent, so the audio thread does not disturb their in-flight values.
     pub to_zero: Vec<usize>,
+    /// Buffer pool indices that the audio thread must zero with `Poly([0.0; 16])`
+    /// when this plan is first adopted.
+    ///
+    /// Subset of all newly allocated slots that correspond to poly output ports.
+    /// Must be zeroed as `Poly` so that any reading module does not hit the
+    /// `Mono`/`Poly` variant mismatch in `CablePool::read_poly`.
+    pub to_zero_poly: Vec<usize>,
     pub audio_out_index: usize,
     /// New modules to install into the audio-thread module pool when this plan
     /// is adopted. Each entry is `(pool_index, Box<dyn Module>)`.
@@ -242,11 +249,15 @@ impl PatchBuilder {
         let resolved = ResolvedGraph::build(&index, &buf_alloc.output_buf)?;
 
         // Step C – assemble ModuleSlots, NodeStates, and collect diff vectors.
+        // Build a set of newly-allocated/recycled buffer slots for fast lookup.
+        let to_zero_set: HashSet<usize> = buf_alloc.to_zero.iter().copied().collect();
+
         let mut slots: Vec<ModuleSlot> = Vec::with_capacity(order.len());
         let mut new_modules: Vec<(usize, Box<dyn Module>)> = Vec::new();
         let mut parameter_updates: Vec<(usize, ParameterMap)> = Vec::new();
         let mut port_updates: Vec<(usize, Vec<InputPort>, Vec<OutputPort>)> = Vec::new();
         let mut node_states: HashMap<NodeId, NodeState> = HashMap::with_capacity(order.len());
+        let mut to_zero_poly: Vec<usize> = Vec::new();
 
         for (id, decision) in decisions {
             let node = index.get_node(&id).ok_or_else(|| {
@@ -306,7 +317,12 @@ impl PatchBuilder {
                     let connected = connectivity.outputs[j];
                     match port_desc.kind {
                         CableKind::Mono => OutputPort::Mono(MonoOutput { cable_idx: buf_idx, connected }),
-                        CableKind::Poly => OutputPort::Poly(PolyOutput { cable_idx: buf_idx, connected }),
+                        CableKind::Poly => {
+                            if to_zero_set.contains(&buf_idx) {
+                                to_zero_poly.push(buf_idx);
+                            }
+                            OutputPort::Poly(PolyOutput { cable_idx: buf_idx, connected })
+                        }
                     }
                 })
                 .collect();
@@ -361,6 +377,7 @@ impl PatchBuilder {
             ExecutionPlan {
                 slots,
                 to_zero: buf_alloc.to_zero,
+                to_zero_poly,
                 audio_out_index,
                 new_modules,
                 tombstones,
@@ -406,7 +423,7 @@ pub fn build_patch(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use patches_core::{AudioEnvironment, InstanceId, Module, ModuleShape, NodeId, PortRef};
+    use patches_core::{AudioEnvironment, CablePool, CableValue, InstanceId, Module, ModuleShape, NodeId, PortRef};
     use patches_core::parameter_map::{ParameterMap, ParameterValue};
     use patches_modules::{AudioOut, Oscillator, Sum};
 
@@ -445,7 +462,7 @@ mod tests {
     }
 
     fn default_env() -> AudioEnvironment {
-        AudioEnvironment { sample_rate: 44100.0 }
+        AudioEnvironment { sample_rate: 44100.0, poly_voices: 16 }
     }
 
     fn default_builder() -> PatchBuilder {

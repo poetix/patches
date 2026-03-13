@@ -348,7 +348,7 @@ impl Module for ResonantLowpass {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use patches_core::{AudioEnvironment, CablePool, Module, ModuleShape, Registry};
+    use patches_core::{AudioEnvironment, CablePool, CableValue, Module, ModuleShape, Registry};
     use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
     fn make_filter(cutoff: f64, resonance: f64) -> Box<dyn Module> {
@@ -363,7 +363,7 @@ mod tests {
         r.register::<ResonantLowpass>();
         r.create(
             "Filter",
-            &AudioEnvironment { sample_rate },
+            &AudioEnvironment { sample_rate, poly_voices: 16 },
             &ModuleShape { channels: 0, length: 0 },
             &params,
             InstanceId::next(),

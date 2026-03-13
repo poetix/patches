@@ -349,7 +349,7 @@ mod tests {
             self.instance_id
         }
 
-        fn process(&mut self, _pool: &mut [[CableValue; 2]], _wi: usize) {
+        fn process(&mut self, _pool: &mut patches_core::CablePool<'_>) {
             self.count += 1;
         }
 
@@ -390,7 +390,7 @@ mod tests {
     fn planner_reuses_module_instance_across_rebuild() {
         let mut registry = patches_modules::default_registry();
         registry.register::<Counter>();
-        let env = AudioEnvironment { sample_rate: 44100.0 };
+        let env = AudioEnvironment { sample_rate: 44100.0, poly_voices: 16 };
         let mut planner = Planner::new();
         let mut pool = ModulePool::new(64);
 
@@ -400,7 +400,8 @@ mod tests {
 
         let mut buffer_pool = make_buffer_pool(256);
         for i in 0..5 {
-            plan_a.tick(&mut pool, &mut buffer_pool, i % 2);
+            let mut cp = patches_core::CablePool::new(&mut buffer_pool, i % 2);
+            plan_a.tick(&mut pool, &mut cp);
         }
         // After 5 ticks (wi sequence 0,1,0,1,0), Counter wrote 5.0 into wi=0 slot.
 
@@ -418,7 +419,8 @@ mod tests {
         // Continue from wi=1 (plan_a last wi=0, so plan_b ticks at wi=1).
         // process_alias is currently a no-op stub (T-0118 will wire the buffer).
         // Verify tick() runs without panic and no tombstones were issued.
-        plan_b.tick(&mut pool, &mut buffer_pool, 1);
+        let mut cp = patches_core::CablePool::new(&mut buffer_pool, 1);
+        plan_b.tick(&mut pool, &mut cp);
         assert!(
             plan_b.tombstones.is_empty(),
             "no module should be tombstoned on an identical rebuild"
@@ -429,7 +431,7 @@ mod tests {
     fn planner_uses_fresh_modules_when_no_prev_plan() {
         let mut registry = patches_modules::default_registry();
         registry.register::<Counter>();
-        let env = AudioEnvironment { sample_rate: 44100.0 };
+        let env = AudioEnvironment { sample_rate: 44100.0, poly_voices: 16 };
         let mut planner = Planner::new();
         let mut pool = ModulePool::new(64);
 
@@ -440,7 +442,8 @@ mod tests {
         let mut buffer_pool = make_buffer_pool(256);
         // process_alias is currently a no-op stub (T-0118 will wire the buffer).
         // Verify tick() runs without panic.
-        plan.tick(&mut pool, &mut buffer_pool, 0);
+        let mut cp = patches_core::CablePool::new(&mut buffer_pool, 0);
+        plan.tick(&mut pool, &mut cp);
         assert!(
             !plan.new_modules.is_empty() || plan.tombstones.is_empty(),
             "fresh build must install at least one module"
@@ -450,7 +453,7 @@ mod tests {
     #[test]
     fn planner_build_succeeds_for_valid_graph() {
         let registry = patches_modules::default_registry();
-        let env = AudioEnvironment { sample_rate: 44100.0 };
+        let env = AudioEnvironment { sample_rate: 44100.0, poly_voices: 16 };
         let mut planner = Planner::new();
         assert!(planner.build(&simple_graph(440.0), &registry, &env).is_ok());
     }
@@ -458,7 +461,7 @@ mod tests {
     #[test]
     fn planner_build_fails_for_empty_graph() {
         let registry = patches_modules::default_registry();
-        let env = AudioEnvironment { sample_rate: 44100.0 };
+        let env = AudioEnvironment { sample_rate: 44100.0, poly_voices: 16 };
         let mut planner = Planner::new();
         assert!(planner.build(&ModuleGraph::new(), &registry, &env).is_err());
     }
@@ -497,7 +500,7 @@ mod tests {
             self.instance_id
         }
 
-        fn process(&mut self, _pool: &mut [[CableValue; 2]], _wi: usize) {}
+        fn process(&mut self, _pool: &mut patches_core::CablePool<'_>) {}
 
         fn as_any(&self) -> &dyn std::any::Any {
             self
@@ -533,7 +536,7 @@ mod tests {
         let mut registry = patches_modules::default_registry();
         registry.register::<MidiReceiver>();
         registry.register::<Counter>();
-        let env = AudioEnvironment { sample_rate: 44100.0 };
+        let env = AudioEnvironment { sample_rate: 44100.0, poly_voices: 16 };
         let mut planner = Planner::new();
 
         let graph = mixed_midi_graph();
@@ -566,7 +569,7 @@ mod tests {
         let mut registry = patches_modules::default_registry();
         registry.register::<MidiReceiver>();
         registry.register::<Counter>();
-        let env = AudioEnvironment { sample_rate: 44100.0 };
+        let env = AudioEnvironment { sample_rate: 44100.0, poly_voices: 16 };
         let mut planner = Planner::new();
 
         let graph = mixed_midi_graph();

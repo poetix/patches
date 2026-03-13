@@ -11,7 +11,7 @@ use crate::common::frequency::{C0_FREQ, UnitPhaseAccumulator, FMMode};
 ///
 /// Returns a correction value that smooths the discontinuity near `t = 0` (rising)
 /// and `t = 1` (falling) transitions. Only effective when `dt < 0.5`.
-fn polyblep(t: f64, dt: f64) -> f64 {
+pub(crate) fn polyblep(t: f64, dt: f64) -> f64 {
     if t < dt {
         let t = t / dt;
         2.0 * t - t * t - 1.0
@@ -186,7 +186,7 @@ mod tests {
 
     use super::*;
     use crate::common::frequency::C0_FREQ;
-    use patches_core::{AudioEnvironment, CablePool, Module, ModuleShape, Registry};
+    use patches_core::{AudioEnvironment, CablePool, CableValue, Module, ModuleShape, Registry};
     use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
     fn make_osc(frequency: f64) -> Box<dyn Module> {
@@ -200,7 +200,7 @@ mod tests {
         r.register::<Oscillator>();
         r.create(
             "Osc",
-            &AudioEnvironment { sample_rate },
+            &AudioEnvironment { sample_rate, poly_voices: 16 },
             &ModuleShape { channels: 0, length: 0 },
             &params,
             InstanceId::next(),

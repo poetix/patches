@@ -2,7 +2,7 @@ use std::f64::consts::{FRAC_1_SQRT_2, TAU};
 use crate::common::approximate::fast_tanh;
 
 use patches_core::{
-    AudioEnvironment, CableValue, InputPort, InstanceId, Module, ModuleDescriptor,
+    AudioEnvironment, CablePool, CableValue, InputPort, InstanceId, Module, ModuleDescriptor,
     MonoInput, MonoOutput, ModuleShape, OutputPort, ParameterDescriptor, ParameterKind, PortDescriptor,
 };
 use patches_core::CableKind;
@@ -265,17 +265,15 @@ impl Module for ResonantLowpass {
         }
     }
 
-    fn process(&mut self, pool: &mut [[CableValue; 2]], wi: usize) {
-        let ri = 1 - wi;
-
+    fn process(&mut self, pool: &mut CablePool<'_>) {
         if !self.any_cv_connected() {
             // ── Static path: coefficients do not change ───────────────────
-            let x = self.in_audio.read_from(pool, ri);
+            let x = pool.read_mono(&self.in_audio);
             let y = self.b0 * x + self.s1;
             let fb = if self.saturate { fast_tanh(y) } else { y };
             self.s1 = self.b1 * x - self.a1 * fb + self.s2;
             self.s2 = self.b2 * x - self.a2 * fb;
-            self.out_audio.write_to(pool, wi, y);
+            pool.write_mono(&self.out_audio, y);
             return;
         }
 
@@ -292,12 +290,12 @@ impl Module for ResonantLowpass {
             // Effective parameters: base values offset by CV.
             // cutoff_cv is V/oct: +1 V doubles the frequency.
             let cutoff_cv = if self.in_cutoff_cv.is_connected() {
-                self.in_cutoff_cv.read_from(pool, ri)
+                pool.read_mono(&self.in_cutoff_cv)
             } else {
                 0.0
             };
             let resonance_cv = if self.in_resonance_cv.is_connected() {
-                self.in_resonance_cv.read_from(pool, ri)
+                pool.read_mono(&self.in_resonance_cv)
             } else {
                 0.0
             };
@@ -322,12 +320,12 @@ impl Module for ResonantLowpass {
         }
 
         // Apply filter (Transposed Direct Form II).
-        let x = self.in_audio.read_from(pool, ri);
+        let x = pool.read_mono(&self.in_audio);
         let y = self.b0 * x + self.s1;
         let fb = if self.saturate { fast_tanh(y) } else { y };
         self.s1 = self.b1 * x - self.a1 * fb + self.s2;
         self.s2 = self.b2 * x - self.a2 * fb;
-        self.out_audio.write_to(pool, wi, y);
+        pool.write_mono(&self.out_audio, y);
 
         // Advance interpolation toward the target.
         self.b0 += self.db0;
@@ -350,7 +348,7 @@ impl Module for ResonantLowpass {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use patches_core::{AudioEnvironment, Module, ModuleShape, Registry};
+    use patches_core::{AudioEnvironment, CablePool, Module, ModuleShape, Registry};
     use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
     fn make_filter(cutoff: f64, resonance: f64) -> Box<dyn Module> {
@@ -406,8 +404,9 @@ mod tests {
     fn settle(m: &mut Box<dyn Module>, n: usize) {
         let mut pool = make_pool(4);
         for i in 0..n {
-            pool[0][1 - (i % 2)] = CableValue::Mono(0.0);
-            m.process(&mut pool, i % 2);
+            let wi = i % 2;
+            pool[0][1 - wi] = CableValue::Mono(0.0);
+            m.process(&mut CablePool::new(&mut pool, wi));
         }
     }
 
@@ -417,10 +416,11 @@ mod tests {
         let mut pool = make_pool(4);
         let mut peak = 0.0f64;
         for i in 0..n {
+            let wi = i % 2;
             let x = (TAU * freq_hz * i as f64 / sample_rate).sin();
-            pool[0][1 - (i % 2)] = CableValue::Mono(x);
-            m.process(&mut pool, i % 2);
-            if let CableValue::Mono(v) = pool[3][i % 2] {
+            pool[0][1 - wi] = CableValue::Mono(x);
+            m.process(&mut CablePool::new(&mut pool, wi));
+            if let CableValue::Mono(v) = pool[3][wi] {
                 peak = peak.max(v.abs());
             }
         }
@@ -433,8 +433,9 @@ mod tests {
         set_static_ports(&mut f);
         let mut pool = make_pool(4);
         for i in 0..4096 {
-            pool[0][1 - (i % 2)] = CableValue::Mono(1.0);
-            f.process(&mut pool, i % 2);
+            let wi = i % 2;
+            pool[0][1 - wi] = CableValue::Mono(1.0);
+            f.process(&mut CablePool::new(&mut pool, wi));
         }
         if let CableValue::Mono(v) = pool[3][4095 % 2] {
             assert!(
@@ -493,28 +494,30 @@ mod tests {
 
         // Settle both filters; with_cv receives +1 V during settling.
         for i in 0..4096 {
-            pool_no_cv[0][1 - (i % 2)] = CableValue::Mono(0.0);
-            no_cv.process(&mut pool_no_cv, i % 2);
-            pool_with_cv[0][1 - (i % 2)] = CableValue::Mono(0.0);
-            pool_with_cv[1][1 - (i % 2)] = CableValue::Mono(1.0);
-            pool_with_cv[2][1 - (i % 2)] = CableValue::Mono(0.0);
-            with_cv.process(&mut pool_with_cv, i % 2);
+            let wi = i % 2;
+            pool_no_cv[0][1 - wi] = CableValue::Mono(0.0);
+            no_cv.process(&mut CablePool::new(&mut pool_no_cv, wi));
+            pool_with_cv[0][1 - wi] = CableValue::Mono(0.0);
+            pool_with_cv[1][1 - wi] = CableValue::Mono(1.0);
+            pool_with_cv[2][1 - wi] = CableValue::Mono(0.0);
+            with_cv.process(&mut CablePool::new(&mut pool_with_cv, wi));
         }
 
         let mut no_cv_peak = 0.0f64;
         let mut with_cv_peak = 0.0f64;
         for i in 0..4096usize {
+            let wi = i % 2;
             let x = (TAU * test_freq * i as f64 / sr).sin();
-            pool_no_cv[0][1 - (i % 2)] = CableValue::Mono(x);
-            no_cv.process(&mut pool_no_cv, i % 2);
-            if let CableValue::Mono(v) = pool_no_cv[3][i % 2] {
+            pool_no_cv[0][1 - wi] = CableValue::Mono(x);
+            no_cv.process(&mut CablePool::new(&mut pool_no_cv, wi));
+            if let CableValue::Mono(v) = pool_no_cv[3][wi] {
                 no_cv_peak = no_cv_peak.max(v.abs());
             }
-            pool_with_cv[0][1 - (i % 2)] = CableValue::Mono(x);
-            pool_with_cv[1][1 - (i % 2)] = CableValue::Mono(1.0);
-            pool_with_cv[2][1 - (i % 2)] = CableValue::Mono(0.0);
-            with_cv.process(&mut pool_with_cv, i % 2);
-            if let CableValue::Mono(v) = pool_with_cv[3][i % 2] {
+            pool_with_cv[0][1 - wi] = CableValue::Mono(x);
+            pool_with_cv[1][1 - wi] = CableValue::Mono(1.0);
+            pool_with_cv[2][1 - wi] = CableValue::Mono(0.0);
+            with_cv.process(&mut CablePool::new(&mut pool_with_cv, wi));
+            if let CableValue::Mono(v) = pool_with_cv[3][wi] {
                 with_cv_peak = with_cv_peak.max(v.abs());
             }
         }
@@ -532,8 +535,9 @@ mod tests {
         set_static_ports(&mut f);
         let mut pool = make_pool(4);
         for i in 0..4096 {
-            pool[0][1 - (i % 2)] = CableValue::Mono(1.0);
-            f.process(&mut pool, i % 2);
+            let wi = i % 2;
+            pool[0][1 - wi] = CableValue::Mono(1.0);
+            f.process(&mut CablePool::new(&mut pool, wi));
         }
         if let CableValue::Mono(v) = pool[3][4095 % 2] {
             assert!(

@@ -3,7 +3,7 @@ use std::fmt;
 
 use patches_core::{
     make_decisions, PlanDecisions,
-    AudioEnvironment, BufferAllocState, CableKind, CableValue, InputPort, InstanceId,
+    AudioEnvironment, BufferAllocState, CableKind, CablePool, CableValue, InputPort, InstanceId,
     MonoInput, MonoOutput, Module, ModuleAllocState, ModuleGraph, NodeDecision, NodeId,
     NodeState, OutputPort, PlanError, PlannerState, PolyInput, PolyOutput, Registry,
     ResolvedGraph,
@@ -139,9 +139,9 @@ impl ExecutionPlan {
     /// Callers must alternate between `wi = 0` and `wi = 1` on successive calls.
     ///
     /// Does not allocate.
-    pub fn tick(&mut self, pool: &mut ModulePool, buffer_pool: &mut [[CableValue; 2]], wi: usize) {
+    pub fn tick(&mut self, pool: &mut ModulePool, cable_pool: &mut CablePool<'_>) {
         for slot in &self.slots {
-            pool.process(slot.pool_index, buffer_pool, wi);
+            pool.process(slot.pool_index, cable_pool);
         }
     }
 
@@ -512,7 +512,8 @@ mod tests {
         let mut buffer_pool = make_buffer_pool(256);
 
         for i in 0..1000 {
-            plan.tick(&mut module_pool, &mut buffer_pool, i % 2);
+            let mut cp = CablePool::new(&mut buffer_pool, i % 2);
+            plan.tick(&mut module_pool, &mut cp);
         }
 
         assert!(module_pool.read_sink_left().abs() <= 1.0);
@@ -580,8 +581,12 @@ mod tests {
         let mut buf_full = make_buffer_pool(256);
 
         for i in 0..100 {
-            plan_half.tick(&mut pool_half, &mut buf_half, i % 2);
-            plan_full.tick(&mut pool_full, &mut buf_full, i % 2);
+            let wi = i % 2;
+            let mut cp_half = CablePool::new(&mut buf_half, wi);
+            plan_half.tick(&mut pool_half, &mut cp_half);
+            drop(cp_half);
+            let mut cp_full = CablePool::new(&mut buf_full, wi);
+            plan_full.tick(&mut pool_full, &mut cp_full);
         }
 
         let half = pool_half.read_sink_left();

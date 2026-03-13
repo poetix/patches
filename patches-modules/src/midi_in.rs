@@ -1,5 +1,5 @@
 use patches_core::{
-    AudioEnvironment, CableValue, InputPort, InstanceId, MidiEvent, Module, ModuleDescriptor,
+    AudioEnvironment, CablePool, CableValue, InputPort, InstanceId, MidiEvent, Module, ModuleDescriptor,
     ModuleShape, MonoOutput, OutputPort, PortDescriptor, ReceivesMidi,
 };
 use patches_core::CableKind;
@@ -158,8 +158,8 @@ impl Module for MonoMidiIn {
         self.out_pitch = MonoOutput::from_ports(outputs, 4);
     }
 
-    fn process(&mut self, pool: &mut [[CableValue; 2]], wi: usize) {
-        self.out_v_oct.write_to(pool, wi, self.current_note as f64 * VOCT_SCALING);
+    fn process(&mut self, pool: &mut CablePool<'_>) {
+        pool.write_mono(&self.out_v_oct, self.current_note as f64 * VOCT_SCALING);
 
         let trigger_val = if self.trigger_armed {
             self.trigger_armed = false;
@@ -167,12 +167,12 @@ impl Module for MonoMidiIn {
         } else {
             0.0
         };
-        self.out_trigger.write_to(pool, wi, trigger_val);
+        pool.write_mono(&self.out_trigger, trigger_val);
 
         let gate_val = if !self.stack.is_empty() || self.sustain { 1.0 } else { 0.0 };
-        self.out_gate.write_to(pool, wi, gate_val);
-        self.out_mod.write_to(pool, wi, self.mod_value);
-        self.out_pitch.write_to(pool, wi, self.pitch_value);
+        pool.write_mono(&self.out_gate, gate_val);
+        pool.write_mono(&self.out_mod, self.mod_value);
+        pool.write_mono(&self.out_pitch, self.pitch_value);
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -231,7 +231,7 @@ impl ReceivesMidi for MonoMidiIn {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use patches_core::{AudioEnvironment, InstanceId, MidiEvent, Module, ModuleShape, Registry};
+    use patches_core::{AudioEnvironment, CablePool, InstanceId, MidiEvent, Module, ModuleShape, Registry};
 
     fn make_keyboard() -> Box<dyn Module> {
         let mut r = Registry::new();
@@ -281,7 +281,7 @@ mod tests {
 
     fn tick(m: &mut Box<dyn Module>, pool: &mut Vec<[CableValue; 2]>, tick_count: usize) -> [f64; 5] {
         let wi = tick_count % 2;
-        m.process(pool, wi);
+        m.process(&mut CablePool::new(pool, wi));
         let mut out = [0.0f64; 5];
         for (i, v) in out.iter_mut().enumerate() {
             if let CableValue::Mono(val) = pool[i][wi] { *v = val; }

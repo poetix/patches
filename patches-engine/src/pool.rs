@@ -1,4 +1,4 @@
-use patches_core::{CableValue, InputPort, MidiEvent, Module, OutputPort};
+use patches_core::{CablePool, CableValue, InputPort, MidiEvent, Module, OutputPort};
 use patches_core::parameter_map::ParameterMap;
 
 /// Audio-thread-owned pool of module instances.
@@ -81,9 +81,9 @@ impl ModulePool {
     /// # Panics
     /// Panics if slot `idx` is empty. Callers must ensure the plan and pool are
     /// consistent (all slots referenced by the active plan are populated).
-    pub fn process(&mut self, idx: usize, buffer_pool: &mut [[CableValue; 2]], wi: usize) {
+    pub fn process(&mut self, idx: usize, cable_pool: &mut CablePool<'_>) {
         let m = self.modules[idx].as_mut().unwrap();
-        m.process(buffer_pool, wi);
+        m.process(cable_pool);
         if self.sink_slot == Some(idx) {
             if let Some(s) = m.as_sink() {
                 self.last_sink_left = s.last_left();
@@ -156,8 +156,8 @@ mod tests {
     use std::any::Any;
 
     use patches_core::{
-        AudioEnvironment, CableKind, InstanceId, Module, ModuleDescriptor, ModuleShape,
-        PortDescriptor, Sink,
+        AudioEnvironment, CableKind, CablePool, CableValue, InstanceId, Module, ModuleDescriptor,
+        ModuleShape, MonoInput, MonoOutput, PortDescriptor, Sink,
     };
     use patches_core::parameter_map::ParameterMap;
 
@@ -170,6 +170,7 @@ mod tests {
         id: InstanceId,
         value: f64,
         desc: ModuleDescriptor,
+        out: MonoOutput,
     }
 
     impl ConstSource {
@@ -185,6 +186,7 @@ mod tests {
                     parameters: vec![],
                     is_sink: false,
                 },
+                out: MonoOutput { cable_idx: 0, connected: true },
             }
         }
     }
@@ -201,13 +203,13 @@ mod tests {
             }
         }
         fn prepare(_env: &AudioEnvironment, descriptor: ModuleDescriptor, instance_id: InstanceId) -> Self {
-            Self { id: instance_id, value: 0.0, desc: descriptor }
+            Self { id: instance_id, value: 0.0, desc: descriptor, out: MonoOutput { cable_idx: 0, connected: true } }
         }
         fn update_validated_parameters(&mut self, _params: &ParameterMap) {}
         fn descriptor(&self) -> &ModuleDescriptor { &self.desc }
         fn instance_id(&self) -> InstanceId { self.id }
-        fn process(&mut self, pool: &mut [[CableValue; 2]], wi: usize) {
-            pool[0][wi] = CableValue::Mono(self.value);
+        fn process(&mut self, pool: &mut CablePool<'_>) {
+            pool.write_mono(&self.out, self.value);
         }
         fn as_any(&self) -> &dyn Any { self }
     }
@@ -218,6 +220,7 @@ mod tests {
         id: InstanceId,
         last: f64,
         desc: ModuleDescriptor,
+        input: MonoInput,
     }
 
     impl RecordingSink {
@@ -233,6 +236,7 @@ mod tests {
                     parameters: vec![],
                     is_sink: true,
                 },
+                input: MonoInput { cable_idx: 0, scale: 1.0, connected: true },
             }
         }
     }
@@ -249,16 +253,13 @@ mod tests {
             }
         }
         fn prepare(_env: &AudioEnvironment, descriptor: ModuleDescriptor, instance_id: InstanceId) -> Self {
-            Self { id: instance_id, last: 0.0, desc: descriptor }
+            Self { id: instance_id, last: 0.0, desc: descriptor, input: MonoInput { cable_idx: 0, scale: 1.0, connected: true } }
         }
         fn update_validated_parameters(&mut self, _params: &ParameterMap) {}
         fn descriptor(&self) -> &ModuleDescriptor { &self.desc }
         fn instance_id(&self) -> InstanceId { self.id }
-        fn process(&mut self, pool: &mut [[CableValue; 2]], wi: usize) {
-            let ri = 1 - wi;
-            if let CableValue::Mono(v) = pool[0][ri] {
-                self.last = v;
-            }
+        fn process(&mut self, pool: &mut CablePool<'_>) {
+            self.last = pool.read_mono(&self.input);
         }
         fn as_any(&self) -> &dyn Any { self }
         fn as_sink(&self) -> Option<&dyn Sink> { Some(self) }
@@ -288,7 +289,9 @@ mod tests {
         let mut pool = ModulePool::new(4);
         pool.install(2, Box::new(ConstSource::new(0.75)));
         let mut bufs = make_buf_pool(1);
-        pool.process(2, &mut bufs, 0);
+        let mut cp = CablePool::new(&mut bufs, 0);
+        pool.process(2, &mut cp);
+        drop(cp);
         assert!(matches!(bufs[0][0], CableValue::Mono(v) if (v - 0.75).abs() < 1e-12));
     }
 
@@ -299,7 +302,9 @@ mod tests {
         // wi=0 → ri=1; write the value to read slot (index 1) so the sink can read it.
         let mut bufs = make_buf_pool(1);
         bufs[0][1] = CableValue::Mono(0.42);
-        pool.process(0, &mut bufs, 0);
+        let mut cp = CablePool::new(&mut bufs, 0);
+        pool.process(0, &mut cp);
+        drop(cp);
         assert!((pool.read_sink_left() - 0.42).abs() < 1e-9);
     }
 
@@ -309,7 +314,9 @@ mod tests {
         pool.install(0, Box::new(ConstSource::new(1.0)));
         pool.install(0, Box::new(ConstSource::new(2.0)));
         let mut bufs = make_buf_pool(1);
-        pool.process(0, &mut bufs, 0);
+        let mut cp = CablePool::new(&mut bufs, 0);
+        pool.process(0, &mut cp);
+        drop(cp);
         assert!(matches!(bufs[0][0], CableValue::Mono(v) if (v - 2.0).abs() < 1e-12),
             "slot should hold the most recently installed module");
     }
@@ -329,7 +336,8 @@ mod tests {
     fn process_on_empty_slot_panics() {
         let mut pool = ModulePool::new(4);
         let mut bufs = make_buf_pool(1);
-        pool.process(0, &mut bufs, 0);
+        let mut cp = CablePool::new(&mut bufs, 0);
+        pool.process(0, &mut cp);
     }
 
     #[test]
@@ -352,7 +360,9 @@ mod tests {
         pool.install(0, Box::new(RecordingSink::new()));
         let mut bufs = make_buf_pool(1);
         bufs[0][1] = CableValue::Mono(0.7);
-        pool.process(0, &mut bufs, 0);
+        let mut cp = CablePool::new(&mut bufs, 0);
+        pool.process(0, &mut cp);
+        drop(cp);
         assert!((pool.read_sink_left() - 0.7).abs() < 1e-9);
         assert!((pool.read_sink_right() - 0.7).abs() < 1e-9);
     }

@@ -1,5 +1,5 @@
 use patches_core::{
-    AudioEnvironment, CableValue, InputPort, InstanceId, Module, ModuleDescriptor,
+    AudioEnvironment, CablePool, CableValue, InputPort, InstanceId, Module, ModuleDescriptor,
     MonoInput, MonoOutput, ModuleShape, OutputPort, ParameterDescriptor, ParameterKind, PortDescriptor,
 };
 use patches_core::CableKind;
@@ -141,10 +141,9 @@ impl Module for Adsr {
         self.out_env = MonoOutput::from_ports(outputs, 0);
     }
 
-    fn process(&mut self, pool: &mut [[CableValue; 2]], wi: usize) {
-        let ri = 1 - wi;
-        let trigger = self.in_trigger.read_from(pool, ri);
-        let gate = self.in_gate.read_from(pool, ri);
+    fn process(&mut self, pool: &mut CablePool<'_>) {
+        let trigger = pool.read_mono(&self.in_trigger);
+        let gate = pool.read_mono(&self.in_gate);
 
         let trigger_rose = trigger >= 0.5 && self.prev_trigger < 0.5;
         self.prev_trigger = trigger;
@@ -193,7 +192,7 @@ impl Module for Adsr {
             }
         }
 
-        self.out_env.write_to(pool, wi, self.level.clamp(0.0, 1.0));
+        pool.write_mono(&self.out_env, self.level.clamp(0.0, 1.0));
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -205,7 +204,7 @@ impl Module for Adsr {
 mod tests {
 
     use super::*;
-    use patches_core::{AudioEnvironment, Module, ModuleShape, Registry};
+    use patches_core::{AudioEnvironment, CablePool, Module, ModuleShape, Registry};
     use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
     fn make_envelope(attack: f64, decay: f64, sustain: f64, release: f64) -> Box<dyn Module> {
@@ -246,7 +245,7 @@ mod tests {
         let ri = 1 - wi;
         pool[0][ri] = CableValue::Mono(trigger);
         pool[1][ri] = CableValue::Mono(gate);
-        env.process(pool, wi);
+        env.process(&mut CablePool::new(pool, wi));
         if let CableValue::Mono(v) = pool[2][wi] { v } else { panic!("expected Mono"); }
     }
 

@@ -1,5 +1,5 @@
 use patches_core::{
-    AudioEnvironment, CableValue, InputPort, InstanceId, Module, ModuleDescriptor,
+    AudioEnvironment, CablePool, CableValue, InputPort, InstanceId, Module, ModuleDescriptor,
     MonoInput, MonoOutput, ModuleShape, OutputPort, ParameterDescriptor, ParameterKind, PortDescriptor,
 };
 use patches_core::CableKind;
@@ -96,9 +96,9 @@ impl Module for Tuner {
         self.out_port = MonoOutput::from_ports(outputs, 0);
     }
 
-    fn process(&mut self, pool: &mut [[CableValue; 2]], wi: usize) {
-        let input = self.in_port.read_from(pool, 1 - wi);
-        self.out_port.write_to(pool, wi, input + self.offset);
+    fn process(&mut self, pool: &mut CablePool<'_>) {
+        let input = pool.read_mono(&self.in_port);
+        pool.write_mono(&self.out_port, input + self.offset);
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -109,7 +109,7 @@ impl Module for Tuner {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use patches_core::{AudioEnvironment, Module, ModuleShape, Registry};
+    use patches_core::{AudioEnvironment, CablePool, Module, ModuleShape, Registry};
     use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
     fn make_tuner(octave: i64, semi: i64, cent: i64) -> Box<dyn Module> {
@@ -144,7 +144,7 @@ mod tests {
         set_ports_for_test(&mut t);
         let mut pool = make_pool(2);
         pool[0][1] = CableValue::Mono(3.0);
-        t.process(&mut pool, 0);
+        t.process(&mut CablePool::new(&mut pool, 0));
         if let CableValue::Mono(v) = pool[1][0] {
             assert!((v - 3.0).abs() < 1e-12, "zero offset must pass through; got {}", v);
         } else { panic!("expected Mono"); }
@@ -156,7 +156,7 @@ mod tests {
         set_ports_for_test(&mut t);
         let mut pool = make_pool(2);
         pool[0][1] = CableValue::Mono(4.0);
-        t.process(&mut pool, 0);
+        t.process(&mut CablePool::new(&mut pool, 0));
         if let CableValue::Mono(v) = pool[1][0] {
             assert!((v - 5.0).abs() < 1e-12, "octave=1 should add 1.0; got {}", v);
         } else { panic!("expected Mono"); }
@@ -168,7 +168,7 @@ mod tests {
         set_ports_for_test(&mut t);
         let mut pool = make_pool(2);
         pool[0][1] = CableValue::Mono(4.0);
-        t.process(&mut pool, 0);
+        t.process(&mut CablePool::new(&mut pool, 0));
         let expected = 4.0 + 1.0 / 12.0;
         if let CableValue::Mono(v) = pool[1][0] {
             assert!((v - expected).abs() < 1e-12, "semi=1 should add 1/12; got {}", v);
@@ -181,7 +181,7 @@ mod tests {
         set_ports_for_test(&mut t);
         let mut pool = make_pool(2);
         pool[0][1] = CableValue::Mono(4.0);
-        t.process(&mut pool, 0);
+        t.process(&mut CablePool::new(&mut pool, 0));
         let expected = 4.0 + 100.0 / 1200.0;
         if let CableValue::Mono(v) = pool[1][0] {
             assert!((v - expected).abs() < 1e-12, "cent=100 should add 1/12; got {}", v);
@@ -194,7 +194,7 @@ mod tests {
         set_ports_for_test(&mut t);
         let mut pool = make_pool(2);
         pool[0][1] = CableValue::Mono(4.0);
-        t.process(&mut pool, 0);
+        t.process(&mut CablePool::new(&mut pool, 0));
         let expected = 4.0 - 1.0 + 3.0 / 12.0 - 50.0 / 1200.0;
         if let CableValue::Mono(v) = pool[1][0] {
             assert!((v - expected).abs() < 1e-12, "combined offset mismatch; got {}", v);
@@ -212,7 +212,7 @@ mod tests {
         t.update_validated_parameters(&partial);
         let mut pool = make_pool(2);
         pool[0][1] = CableValue::Mono(4.0);
-        t.process(&mut pool, 0);
+        t.process(&mut CablePool::new(&mut pool, 0));
         // octave=1, semi=7, cent=0 — octave and semi must be retained from initial build.
         let expected = 4.0 + 1.0 + 7.0 / 12.0;
         if let CableValue::Mono(v) = pool[1][0] {

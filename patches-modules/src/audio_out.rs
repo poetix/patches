@@ -1,5 +1,5 @@
 use patches_core::{
-    AudioEnvironment, CableValue, InputPort, InstanceId, Module, ModuleDescriptor,
+    AudioEnvironment, CablePool, CableValue, InputPort, InstanceId, Module, ModuleDescriptor,
     MonoInput, ModuleShape, OutputPort, CableKind, PortDescriptor, Sink,
 };
 use patches_core::parameter_map::ParameterMap;
@@ -62,10 +62,9 @@ impl Module for AudioOut {
         self.in_right = MonoInput::from_ports(inputs, 1);
     }
 
-    fn process(&mut self, pool: &mut [[CableValue; 2]], wi: usize) {
-        let ri = 1 - wi;
-        self.last_left = self.in_left.read_from(pool, ri);
-        self.last_right = self.in_right.read_from(pool, ri);
+    fn process(&mut self, pool: &mut CablePool<'_>) {
+        self.last_left = pool.read_mono(&self.in_left);
+        self.last_right = pool.read_mono(&self.in_right);
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -91,7 +90,7 @@ impl Sink for AudioOut {
 mod tests {
 
     use super::*;
-    use patches_core::{AudioEnvironment, Module, ModuleShape, Registry};
+    use patches_core::{AudioEnvironment, CablePool, Module, ModuleShape, Registry};
     use patches_core::parameter_map::ParameterMap;
 
     fn make_audio_out() -> Box<dyn Module> {
@@ -129,14 +128,14 @@ mod tests {
         let mut pool = make_pool(2);
         pool[0][1] = CableValue::Mono(0.5);
         pool[1][1] = CableValue::Mono(-0.3);
-        module.process(&mut pool, 0);
+        module.process(&mut CablePool::new(&mut pool, 0));
         let sink = module.as_sink().unwrap();
         assert_eq!(sink.last_left(), 0.5);
         assert_eq!(sink.last_right(), -0.3);
 
         pool[0][0] = CableValue::Mono(1.0);
         pool[1][0] = CableValue::Mono(0.0);
-        module.process(&mut pool, 1);
+        module.process(&mut CablePool::new(&mut pool, 1));
         let sink = module.as_sink().unwrap();
         assert_eq!(sink.last_left(), 1.0);
         assert_eq!(sink.last_right(), 0.0);

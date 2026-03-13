@@ -1,5 +1,5 @@
 use patches_core::{
-    AudioEnvironment, CableValue, InputPort, InstanceId, Module, ModuleDescriptor,
+    AudioEnvironment, CablePool, CableValue, InputPort, InstanceId, Module, ModuleDescriptor,
     MonoInput, MonoOutput, ModuleShape, OutputPort, ParameterDescriptor, ParameterKind, PortDescriptor,
 };
 use patches_core::CableKind;
@@ -136,41 +136,40 @@ impl Module for Oscillator {
         self.phase_accumulator.set_modulation(self.in_voct.is_connected(), self.in_fm.is_connected());
     }
 
-    fn process(&mut self, pool: &mut [[CableValue; 2]], wi: usize) {
-        let ri = 1 - wi;
+    fn process(&mut self, pool: &mut CablePool<'_>) {
         let phase = self.phase_accumulator.phase;
         let read_phase = if self.in_phase_mod.is_connected() {
-            (phase + self.in_phase_mod.read_from(pool, ri)).rem_euclid(1.0)
+            (phase + pool.read_mono(&self.in_phase_mod)).rem_euclid(1.0)
         } else {
             phase
         };
 
         if self.out_sine.is_connected() {
-            self.out_sine.write_to(pool, wi, lookup_sine(read_phase));
+            pool.write_mono(&self.out_sine, lookup_sine(read_phase));
         }
         if self.out_triangle.is_connected() {
-            self.out_triangle.write_to(pool, wi, 1.0 - 4.0 * (read_phase - 0.5).abs());
+            pool.write_mono(&self.out_triangle, 1.0 - 4.0 * (read_phase - 0.5).abs());
         }
         if self.out_sawtooth.is_connected() {
             let dt = self.phase_accumulator.phase_increment;
-            self.out_sawtooth.write_to(pool, wi, (2.0 * read_phase - 1.0) - polyblep(read_phase, dt));
+            pool.write_mono(&self.out_sawtooth, (2.0 * read_phase - 1.0) - polyblep(read_phase, dt));
         }
         if self.out_square.is_connected() {
             let dt = self.phase_accumulator.phase_increment;
             let duty = if self.in_pulse_width.is_connected() {
-                (0.5 + 0.5 * self.in_pulse_width.read_from(pool, ri)).clamp(0.01, 0.99)
+                (0.5 + 0.5 * pool.read_mono(&self.in_pulse_width)).clamp(0.01, 0.99)
             } else {
                 0.5
             };
             let raw = if read_phase < duty { 1.0 } else { -1.0 };
             let blep = polyblep(read_phase, dt)
                 - polyblep((read_phase - duty).rem_euclid(1.0), dt);
-            self.out_square.write_to(pool, wi, raw + blep);
+            pool.write_mono(&self.out_square, raw + blep);
         }
 
         if self.phase_accumulator.is_modulating {
-            let voct = self.in_voct.read_from(pool, ri);
-            let fm = self.in_fm.read_from(pool, ri);
+            let voct = pool.read_mono(&self.in_voct);
+            let fm = pool.read_mono(&self.in_fm);
             self.phase_accumulator.advance_modulating(voct, fm);
         } else {
             self.phase_accumulator.advance();
@@ -187,7 +186,7 @@ mod tests {
 
     use super::*;
     use crate::common::frequency::C0_FREQ;
-    use patches_core::{AudioEnvironment, Module, ModuleShape, Registry};
+    use patches_core::{AudioEnvironment, CablePool, Module, ModuleShape, Registry};
     use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
     fn make_osc(frequency: f64) -> Box<dyn Module> {
@@ -258,15 +257,15 @@ mod tests {
 
         let mut first_cycle = Vec::with_capacity(period);
         for i in 0..period {
-            osc.process(&mut pool, i % 2);
             let wi = i % 2;
+            osc.process(&mut CablePool::new(&mut pool, wi));
             if let CableValue::Mono(v) = pool[4][wi] { first_cycle.push(v); }
         }
 
         let mut second_cycle = Vec::with_capacity(period);
         for i in 0..period {
-            osc.process(&mut pool, (period + i) % 2);
             let wi = (period + i) % 2;
+            osc.process(&mut CablePool::new(&mut pool, wi));
             if let CableValue::Mono(v) = pool[4][wi] { second_cycle.push(v); }
         }
 
@@ -287,15 +286,15 @@ mod tests {
 
         let mut first_cycle = Vec::with_capacity(period);
         for i in 0..period {
-            osc.process(&mut pool, i % 2);
             let wi = i % 2;
+            osc.process(&mut CablePool::new(&mut pool, wi));
             if let CableValue::Mono(v) = pool[5][wi] { first_cycle.push(v); }
         }
 
         let mut second_cycle = Vec::with_capacity(period);
         for i in 0..period {
-            osc.process(&mut pool, (period + i) % 2);
             let wi = (period + i) % 2;
+            osc.process(&mut CablePool::new(&mut pool, wi));
             if let CableValue::Mono(v) = pool[5][wi] { second_cycle.push(v); }
         }
 
@@ -314,7 +313,7 @@ mod tests {
         set_ports_outputs_only(&mut osc);
         let mut pool = make_pool(8);
 
-        osc.process(&mut pool, 0);
+        osc.process(&mut CablePool::new(&mut pool, 0));
         if let CableValue::Mono(v) = pool[6][0] {
             assert!(
                 v > -1.0,
@@ -333,10 +332,10 @@ mod tests {
         set_ports_outputs_only(&mut osc);
         let mut pool = make_pool(8);
 
-        osc.process(&mut pool, 0); // i=0 is the transition; skip
+        osc.process(&mut CablePool::new(&mut pool, 0)); // i=0 is the transition; skip
         for i in 1..period {
-            osc.process(&mut pool, i % 2);
             let wi = i % 2;
+            osc.process(&mut CablePool::new(&mut pool, wi));
             if let CableValue::Mono(v) = pool[6][wi] {
                 let phase = i as f64 / period as f64;
                 let expected = 2.0 * phase - 1.0;
@@ -358,7 +357,7 @@ mod tests {
         set_ports_outputs_only(&mut osc);
         let mut pool = make_pool(8);
 
-        osc.process(&mut pool, 0);
+        osc.process(&mut CablePool::new(&mut pool, 0));
         if let CableValue::Mono(v) = pool[7][0] {
             assert!(
                 v > -1.0 && v < 1.0,
@@ -367,9 +366,9 @@ mod tests {
         } else { panic!("expected Mono"); }
 
         for i in 0..49 {
-            osc.process(&mut pool, (1 + i) % 2);
+            osc.process(&mut CablePool::new(&mut pool, (1 + i) % 2));
         }
-        osc.process(&mut pool, 50 % 2);
+        osc.process(&mut CablePool::new(&mut pool, 50 % 2));
         if let CableValue::Mono(v) = pool[7][50 % 2] {
             assert!(
                 v > -1.0 && v < 1.0,
@@ -406,9 +405,10 @@ mod tests {
 
         let mut positive_count = 0usize;
         for i in 0..period {
-            pool[2][1 - (i % 2)] = CableValue::Mono(1.0);
-            osc.process(&mut pool, i % 2);
-            if let CableValue::Mono(v) = pool[7][i % 2] {
+            let wi = i % 2;
+            pool[2][1 - wi] = CableValue::Mono(1.0);
+            osc.process(&mut CablePool::new(&mut pool, wi));
+            if let CableValue::Mono(v) = pool[7][wi] {
                 if v > 0.0 { positive_count += 1; }
             }
         }
@@ -424,7 +424,7 @@ mod tests {
         set_ports_none_connected(&mut osc);
         // Pool slots 4..8 start at 99.0 sentinel
         let mut pool: Vec<[CableValue; 2]> = (0..8).map(|_| [CableValue::Mono(99.0); 2]).collect();
-        osc.process(&mut pool, 0);
+        osc.process(&mut CablePool::new(&mut pool, 0));
         for i in 4..8 {
             if let CableValue::Mono(v) = pool[i][0] {
                 assert_eq!(v, 99.0, "output cable {i} was written despite being disconnected");
@@ -453,7 +453,7 @@ mod tests {
         let mut pool = make_pool(8);
         // phase_mod input = 0.5 in read slot (ri=1 when wi=0)
         pool[3][1] = CableValue::Mono(0.5);
-        osc.process(&mut pool, 0);
+        osc.process(&mut CablePool::new(&mut pool, 0));
         let expected = crate::common::approximate::lookup_sine(0.5);
         if let CableValue::Mono(v) = pool[4][0] {
             assert!(
@@ -483,7 +483,7 @@ mod tests {
         osc.set_ports(&inputs, &outputs);
 
         let mut pool = make_pool(8);
-        osc.process(&mut pool, 0);
+        osc.process(&mut CablePool::new(&mut pool, 0));
         let expected = crate::common::approximate::lookup_sine(0.0);
         if let CableValue::Mono(v) = pool[4][0] {
             assert!(

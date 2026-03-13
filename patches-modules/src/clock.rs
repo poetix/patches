@@ -1,5 +1,5 @@
 use patches_core::{
-    AudioEnvironment, CableValue, InstanceId, Module, ModuleDescriptor, ModuleShape,
+    AudioEnvironment, CablePool, CableValue, InstanceId, Module, ModuleDescriptor, ModuleShape,
     MonoOutput, OutputPort, ParameterDescriptor, ParameterKind, PortDescriptor,
 };
 use patches_core::CableKind;
@@ -113,7 +113,7 @@ impl Module for Clock {
         self.out_semiquaver = MonoOutput::from_ports(outputs, 3);
     }
 
-    fn process(&mut self, pool: &mut [[CableValue; 2]], wi: usize) {
+    fn process(&mut self, pool: &mut CablePool<'_>) {
         // Record old phase before increment
         let old_phase = self.beat_phase;
 
@@ -148,10 +148,10 @@ impl Module for Clock {
         let new_semiquaver_bucket = (new_phase * semiquaver_buckets as f64) as u64;
         let semiquaver_fired = new_semiquaver_bucket > old_semiquaver_bucket || beat_fired;
 
-        self.out_bar.write_to(pool, wi, if bar_fired { 1.0 } else { 0.0 });
-        self.out_beat.write_to(pool, wi, if beat_fired { 1.0 } else { 0.0 });
-        self.out_quaver.write_to(pool, wi, if quaver_fired { 1.0 } else { 0.0 });
-        self.out_semiquaver.write_to(pool, wi, if semiquaver_fired { 1.0 } else { 0.0 });
+        pool.write_mono(&self.out_bar, if bar_fired { 1.0 } else { 0.0 });
+        pool.write_mono(&self.out_beat, if beat_fired { 1.0 } else { 0.0 });
+        pool.write_mono(&self.out_quaver, if quaver_fired { 1.0 } else { 0.0 });
+        pool.write_mono(&self.out_semiquaver, if semiquaver_fired { 1.0 } else { 0.0 });
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -163,7 +163,7 @@ impl Module for Clock {
 mod tests {
 
     use super::*;
-    use patches_core::{AudioEnvironment, Module, ModuleShape, Registry};
+    use patches_core::{AudioEnvironment, CablePool, Module, ModuleShape, Registry};
     use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
     fn make_clock(bpm: f64, beats_per_bar: i64, quavers_per_beat: i64) -> Box<dyn Module> {
@@ -220,7 +220,7 @@ mod tests {
         // Process 64 samples and count pulses
         for i in 0..64 {
             let wi = i % 2;
-            clock.process(&mut pool, wi);
+            clock.process(&mut CablePool::new(&mut pool, wi));
             if read_output(&pool, 1, wi) > 0.5 { beat_count += 1; }
             if read_output(&pool, 0, wi) > 0.5 { bar_count += 1; }
         }
@@ -253,7 +253,7 @@ mod tests {
         // Process 150000 samples
         for i in 0..150000usize {
             let wi = i % 2;
-            clock.process(&mut pool, wi);
+            clock.process(&mut CablePool::new(&mut pool, wi));
             if read_output(&pool, 0, wi) > 0.5 { bar_count += 1; }
             if read_output(&pool, 1, wi) > 0.5 { beat_count += 1; }
             if read_output(&pool, 2, wi) > 0.5 { quaver_count += 1; }
@@ -280,7 +280,7 @@ mod tests {
         // First few samples should not fire anything unless we're at a boundary
         for i in 0..5usize {
             let wi = i % 2;
-            clock.process(&mut pool, wi);
+            clock.process(&mut CablePool::new(&mut pool, wi));
             if i > 0 {
                 // Only the first sample can fire a beat if we start at phase 0
                 assert_eq!(read_output(&pool, 0, wi), 0.0, "bar should be 0 at sample {}", i);

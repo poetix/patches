@@ -1,5 +1,5 @@
 use patches_core::{
-    AudioEnvironment, CableValue, InputPort, InstanceId, Module, ModuleDescriptor,
+    AudioEnvironment, CablePool, CableValue, InputPort, InstanceId, Module, ModuleDescriptor,
     MonoInput, MonoOutput, ModuleShape, OutputPort, ParameterDescriptor, ParameterKind, PortDescriptor,
 };
 use patches_core::CableKind;
@@ -97,12 +97,12 @@ impl Module for Glide {
         self.out_port = MonoOutput::from_ports(outputs, 0);
     }
 
-    fn process(&mut self, pool: &mut [[CableValue; 2]], wi: usize) {
+    fn process(&mut self, pool: &mut CablePool<'_>) {
         // Input is V/OCT (C2 = 0.0). Interpolate directly in V/OCT space —
         // no ln/exp needed since V/OCT is already a log-frequency scale.
-        let input = self.in_port.read_from(pool, 1 - wi);
+        let input = pool.read_mono(&self.in_port);
         self.voct += self.beta * (input - self.voct);
-        self.out_port.write_to(pool, wi, self.voct);
+        pool.write_mono(&self.out_port, self.voct);
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -114,7 +114,7 @@ impl Module for Glide {
 mod tests {
 
     use super::*;
-    use patches_core::{AudioEnvironment, Module, ModuleShape, Registry};
+    use patches_core::{AudioEnvironment, CablePool, Module, ModuleShape, Registry};
     use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
     fn make_glide(glide_ms: f64) -> Box<dyn Module> {
@@ -154,11 +154,11 @@ mod tests {
 
         let mut pool = make_pool(2);
         pool[0][1] = CableValue::Mono(start_voct);
-        g.process(&mut pool, 0);
+        g.process(&mut CablePool::new(&mut pool, 0));
         let after_start = if let CableValue::Mono(v) = pool[1][0] { v } else { panic!(); };
 
         pool[0][0] = CableValue::Mono(target_voct);
-        g.process(&mut pool, 1);
+        g.process(&mut CablePool::new(&mut pool, 1));
         let after_step = if let CableValue::Mono(v) = pool[1][1] { v } else { panic!(); };
 
         assert!(
@@ -178,7 +178,7 @@ mod tests {
         let target_voct = 2.0_f64;
         let mut pool = make_pool(2);
         pool[0][1] = CableValue::Mono(target_voct);
-        g.process(&mut pool, 0);
+        g.process(&mut CablePool::new(&mut pool, 0));
         if let CableValue::Mono(v) = pool[1][0] {
             assert!(
                 (v - target_voct).abs() < 1e-9,
@@ -194,13 +194,13 @@ mod tests {
         let mut pool = make_pool(2);
         // Prime at C3 = 1.0 V/OCT.
         pool[0][1] = CableValue::Mono(1.0);
-        g.process(&mut pool, 0);
+        g.process(&mut CablePool::new(&mut pool, 0));
         if let CableValue::Mono(v) = pool[1][0] {
             assert!((v - 1.0).abs() < 1e-9);
         }
         // Now target C2 = 0.0 V/OCT.
         pool[0][0] = CableValue::Mono(0.0);
-        g.process(&mut pool, 1);
+        g.process(&mut CablePool::new(&mut pool, 1));
         if let CableValue::Mono(v) = pool[1][1] {
             assert!(
                 v.abs() < 1e-9,

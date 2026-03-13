@@ -1,5 +1,5 @@
 use patches_core::{
-    AudioEnvironment, CableValue, InputPort, InstanceId, Module, ModuleDescriptor,
+    AudioEnvironment, CablePool, CableValue, InputPort, InstanceId, Module, ModuleDescriptor,
     MonoInput, MonoOutput, ModuleShape, OutputPort, PortDescriptor,
 };
 use patches_core::CableKind;
@@ -66,13 +66,12 @@ impl Module for Sum {
         self.out_port = MonoOutput::from_ports(outputs, 0);
     }
 
-    fn process(&mut self, pool: &mut [[CableValue; 2]], wi: usize) {
-        let ri = 1 - wi;
+    fn process(&mut self, pool: &mut CablePool<'_>) {
         let total: f64 = self.in_ports[..self.size]
             .iter()
-            .map(|p| p.read_from(pool, ri))
+            .map(|p| pool.read_mono(p))
             .sum();
-        self.out_port.write_to(pool, wi, total);
+        pool.write_mono(&self.out_port, total);
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -84,7 +83,7 @@ impl Module for Sum {
 mod tests {
 
     use super::*;
-    use patches_core::{AudioEnvironment, Module, ModuleShape, Registry};
+    use patches_core::{AudioEnvironment, CablePool, Module, ModuleShape, Registry};
     use patches_core::parameter_map::ParameterMap;
 
     fn make_sum(channels: usize) -> Box<dyn Module> {
@@ -133,7 +132,7 @@ mod tests {
         set_ports_for_test(&mut m, 1);
         let mut pool = make_pool(2);
         pool[0][1] = CableValue::Mono(0.75);
-        m.process(&mut pool, 0);
+        m.process(&mut CablePool::new(&mut pool, 0));
         if let CableValue::Mono(v) = pool[1][0] {
             assert_eq!(v, 0.75);
         } else { panic!("expected Mono"); }
@@ -147,7 +146,7 @@ mod tests {
         pool[0][1] = CableValue::Mono(0.2);
         pool[1][1] = CableValue::Mono(0.3);
         pool[2][1] = CableValue::Mono(0.5);
-        m.process(&mut pool, 0);
+        m.process(&mut CablePool::new(&mut pool, 0));
         if let CableValue::Mono(v) = pool[3][0] {
             assert!((v - 1.0).abs() < f64::EPSILON);
         } else { panic!("expected Mono"); }

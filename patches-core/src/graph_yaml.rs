@@ -374,7 +374,7 @@ fn mismatch(node: &str, param: &str, expected: &'static str) -> GraphYamlError {
 mod tests {
     use super::*;
     use crate::{
-        AudioEnvironment, CableKind, CableValue, InstanceId, ModuleDescriptor, ParameterDescriptor,
+        AudioEnvironment, CableKind, InstanceId, ModuleDescriptor, ParameterDescriptor,
         PortDescriptor,
     };
     use crate::modules::Module;
@@ -413,7 +413,7 @@ mod tests {
         fn update_validated_parameters(&mut self, _params: &ParameterMap) {}
         fn descriptor(&self) -> &ModuleDescriptor { &self.descriptor }
         fn instance_id(&self) -> InstanceId { self.instance_id }
-        fn process(&mut self, _pool: &mut [[CableValue; 2]], _wi: usize) {}
+        fn process(&mut self, _pool: &mut crate::cable_pool::CablePool<'_>) {}
         fn as_any(&self) -> &dyn std::any::Any { self }
     }
 
@@ -445,7 +445,7 @@ mod tests {
         fn update_validated_parameters(&mut self, _params: &ParameterMap) {}
         fn descriptor(&self) -> &ModuleDescriptor { &self.descriptor }
         fn instance_id(&self) -> InstanceId { self.instance_id }
-        fn process(&mut self, _pool: &mut [[CableValue; 2]], _wi: usize) {}
+        fn process(&mut self, _pool: &mut crate::cable_pool::CablePool<'_>) {}
         fn as_any(&self) -> &dyn std::any::Any { self }
     }
 
@@ -477,7 +477,7 @@ mod tests {
         fn update_validated_parameters(&mut self, _params: &ParameterMap) {}
         fn descriptor(&self) -> &ModuleDescriptor { &self.descriptor }
         fn instance_id(&self) -> InstanceId { self.instance_id }
-        fn process(&mut self, _pool: &mut [[CableValue; 2]], _wi: usize) {}
+        fn process(&mut self, _pool: &mut crate::cable_pool::CablePool<'_>) {}
         fn as_any(&self) -> &dyn std::any::Any { self }
     }
 

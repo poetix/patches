@@ -3,7 +3,7 @@ use std::time::Instant;
 use cpal::traits::DeviceTrait;
 use cpal::{Stream, StreamConfig};
 
-use patches_core::{CableValue, Module};
+use patches_core::{CablePool, CableValue, Module};
 
 use crate::builder::ExecutionPlan;
 use crate::engine::EngineError;
@@ -92,7 +92,8 @@ impl AudioCallback {
     ) {
         for _ in 0..chunk {
             let wi = self.wi_counter % 2;
-            self.current_plan.tick(&mut self.module_pool, &mut self.buffer_pool, wi);
+            let mut cable_pool = CablePool::new(&mut self.buffer_pool, wi);
+            self.current_plan.tick(&mut self.module_pool, &mut cable_pool);
             let left = self.module_pool.read_sink_left() as f32;
             let right = self.module_pool.read_sink_right() as f32;
 

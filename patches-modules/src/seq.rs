@@ -1,5 +1,5 @@
 use patches_core::{
-    AudioEnvironment, CableValue, InputPort, InstanceId, Module, ModuleDescriptor,
+    AudioEnvironment, CablePool, CableValue, InputPort, InstanceId, Module, ModuleDescriptor,
     MonoInput, MonoOutput, ModuleShape, OutputPort, ParameterDescriptor, ParameterKind, PortDescriptor,
 };
 use patches_core::CableKind;
@@ -245,21 +245,19 @@ impl Module for Seq {
         self.out_gate = MonoOutput::from_ports(outputs, 2);
     }
 
-    fn process(&mut self, pool: &mut [[CableValue; 2]], wi: usize) {
-        let ri = 1 - wi;
-
+    fn process(&mut self, pool: &mut CablePool<'_>) {
         // Guard: when the pattern is empty all outputs hold at rest values.
         if self.steps.is_empty() {
-            self.out_pitch.write_to(pool, wi, 0.0);
-            self.out_trigger.write_to(pool, wi, 0.0);
-            self.out_gate.write_to(pool, wi, 0.0);
+            pool.write_mono(&self.out_pitch, 0.0);
+            pool.write_mono(&self.out_trigger, 0.0);
+            pool.write_mono(&self.out_gate, 0.0);
             return;
         }
 
-        let clock = self.in_clock.read_from(pool, ri);
-        let start = self.in_start.read_from(pool, ri);
-        let stop  = self.in_stop.read_from(pool, ri);
-        let reset = self.in_reset.read_from(pool, ri);
+        let clock = pool.read_mono(&self.in_clock);
+        let start = pool.read_mono(&self.in_start);
+        let stop  = pool.read_mono(&self.in_stop);
+        let reset = pool.read_mono(&self.in_reset);
 
         let clock_rose = clock >= 0.5 && self.prev_clock < 0.5;
         let start_rose = start >= 0.5 && self.prev_start < 0.5;
@@ -304,9 +302,9 @@ impl Module for Seq {
             }
         };
 
-        self.out_pitch.write_to(pool, wi, self.current_pitch);
-        self.out_trigger.write_to(pool, wi, trigger);
-        self.out_gate.write_to(pool, wi, gate);
+        pool.write_mono(&self.out_pitch, self.current_pitch);
+        pool.write_mono(&self.out_trigger, trigger);
+        pool.write_mono(&self.out_gate, gate);
 
         // trigger is a one-sample pulse
         self.trigger_pending = false;
@@ -320,7 +318,7 @@ impl Module for Seq {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use patches_core::{AudioEnvironment, Module, ModuleShape, Registry};
+    use patches_core::{AudioEnvironment, CablePool, Module, ModuleShape, Registry};
     use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
     fn make_sequencer(steps: &[&str]) -> Box<dyn Module> {
@@ -367,7 +365,7 @@ mod tests {
         pool[1][ri] = CableValue::Mono(0.0);
         pool[2][ri] = CableValue::Mono(0.0);
         pool[3][ri] = CableValue::Mono(0.0);
-        seq.process(pool, wi);
+        seq.process(&mut CablePool::new(pool, wi));
         let pitch = if let CableValue::Mono(v) = pool[4][wi] { v } else { panic!(); };
         let trigger = if let CableValue::Mono(v) = pool[5][wi] { v } else { panic!(); };
         let gate = if let CableValue::Mono(v) = pool[6][wi] { v } else { panic!(); };
@@ -389,7 +387,7 @@ mod tests {
         pool[1][ri] = CableValue::Mono(start);
         pool[2][ri] = CableValue::Mono(stop);
         pool[3][ri] = CableValue::Mono(reset);
-        seq.process(pool, wi);
+        seq.process(&mut CablePool::new(pool, wi));
         let pitch = if let CableValue::Mono(v) = pool[4][wi] { v } else { panic!(); };
         let trigger = if let CableValue::Mono(v) = pool[5][wi] { v } else { panic!(); };
         let gate = if let CableValue::Mono(v) = pool[6][wi] { v } else { panic!(); };

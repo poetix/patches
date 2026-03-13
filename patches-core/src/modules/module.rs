@@ -1,6 +1,7 @@
 use crate::audio_environment::AudioEnvironment;
 use crate::build_error::BuildError;
-use crate::cables::{CableValue, InputPort, OutputPort};
+use crate::cable_pool::CablePool;
+use crate::cables::{InputPort, OutputPort};
 use crate::midi::ReceivesMidi;
 use super::instance_id::InstanceId;
 use super::module_descriptor::{ModuleDescriptor, ModuleShape, ParameterKind};
@@ -231,14 +232,14 @@ pub trait Module: Send {
 
     /// Process one sample using the shared ping-pong cable buffer pool.
     ///
-    /// `pool` is the full ping-pong buffer pool (`pool[cable_idx][wi]` is the write slot;
-    /// `pool[cable_idx][1 - wi]` is the read slot). `wi` is the current write index (0 or 1).
-    /// Modules index into the pool via the `cable_idx` fields on their stored port objects
-    /// (delivered by [`set_ports`](Module::set_ports)), using `read_from(pool, 1 - wi)` and
-    /// `write_to(pool, wi, value)`.
+    /// `pool` wraps the full ping-pong buffer and the current write index. Modules
+    /// read input values via [`CablePool::read_mono`] / [`CablePool::read_poly`] and
+    /// write output values via [`CablePool::write_mono`] / [`CablePool::write_poly`],
+    /// using the `cable_idx` fields on their stored port objects (delivered by
+    /// [`set_ports`](Module::set_ports)).
     ///
     /// **Must not allocate, block, or perform I/O.**
-    fn process(&mut self, pool: &mut [[CableValue; 2]], wi: usize);
+    fn process(&mut self, pool: &mut CablePool<'_>);
 
     /// Deliver pre-resolved port objects to the module.
     ///

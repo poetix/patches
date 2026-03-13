@@ -1,5 +1,5 @@
 use patches_core::{
-    AudioEnvironment, CableValue, InputPort, InstanceId, Module, ModuleDescriptor,
+    AudioEnvironment, CablePool, CableValue, InputPort, InstanceId, Module, ModuleDescriptor,
     MonoInput, MonoOutput, ModuleShape, OutputPort, CableKind, PortDescriptor,
 };
 use patches_core::parameter_map::ParameterMap;
@@ -61,11 +61,10 @@ impl Module for Vca {
         self.out_audio = MonoOutput::from_ports(outputs, 0);
     }
 
-    fn process(&mut self, pool: &mut [[CableValue; 2]], wi: usize) {
-        let ri = 1 - wi;
-        let signal = self.in_signal.read_from(pool, ri);
-        let cv = self.in_cv.read_from(pool, ri);
-        self.out_audio.write_to(pool, wi, signal * cv);
+    fn process(&mut self, pool: &mut CablePool<'_>) {
+        let signal = pool.read_mono(&self.in_signal);
+        let cv = pool.read_mono(&self.in_cv);
+        pool.write_mono(&self.out_audio, signal * cv);
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
@@ -77,7 +76,7 @@ impl Module for Vca {
 mod tests {
 
     use super::*;
-    use patches_core::{AudioEnvironment, Module, ModuleShape, Registry};
+    use patches_core::{AudioEnvironment, CablePool, Module, ModuleShape, Registry};
     use patches_core::parameter_map::ParameterMap;
 
     fn make_vca() -> Box<dyn Module> {
@@ -129,7 +128,7 @@ mod tests {
         let mut pool = make_pool(3);
         pool[0][1] = CableValue::Mono(0.5);
         pool[1][1] = CableValue::Mono(0.8);
-        m.process(&mut pool, 0);
+        m.process(&mut CablePool::new(&mut pool, 0));
         if let CableValue::Mono(v) = pool[2][0] {
             assert!((v - 0.4).abs() < f64::EPSILON);
         } else { panic!("expected Mono"); }
@@ -142,7 +141,7 @@ mod tests {
         let mut pool = make_pool(3);
         pool[0][1] = CableValue::Mono(1.0);
         pool[1][1] = CableValue::Mono(0.0);
-        m.process(&mut pool, 0);
+        m.process(&mut CablePool::new(&mut pool, 0));
         if let CableValue::Mono(v) = pool[2][0] {
             assert_eq!(v, 0.0);
         } else { panic!("expected Mono"); }
@@ -155,7 +154,7 @@ mod tests {
         let mut pool = make_pool(3);
         pool[0][1] = CableValue::Mono(0.5);
         pool[1][1] = CableValue::Mono(-1.0);
-        m.process(&mut pool, 0);
+        m.process(&mut CablePool::new(&mut pool, 0));
         if let CableValue::Mono(v) = pool[2][0] {
             assert!((v - (-0.5)).abs() < f64::EPSILON);
         } else { panic!("expected Mono"); }

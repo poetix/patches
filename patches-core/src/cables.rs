@@ -62,20 +62,6 @@ impl MonoInput {
             ),
         }
     }
-
-    /// Read the current value from the ping-pong `pool` at read-index `ri`,
-    /// applying `self.scale`.
-    ///
-    /// `ri` is `1 - wi` where `wi` is the current write index passed to
-    /// [`Module::process`](crate::Module::process).
-    pub fn read_from(&self, pool: &[[CableValue; 2]], ri: usize) -> f64 {
-        match pool[self.cable_idx][ri] {
-            CableValue::Mono(v) => v * self.scale,
-            CableValue::Poly(_) => unreachable!(
-                "MonoInput::read_from encountered a Poly cable — graph validation should prevent this"
-            ),
-        }
-    }
 }
 
 /// A poly input port (16-channel).
@@ -121,17 +107,6 @@ impl PolyInput {
             ),
         }
     }
-
-    /// Read all 16 channels from the ping-pong `pool` at read-index `ri`,
-    /// applying `self.scale` to each.
-    pub fn read_from(&self, pool: &[[CableValue; 2]], ri: usize) -> [f64; 16] {
-        match pool[self.cable_idx][ri] {
-            CableValue::Poly(channels) => channels.map(|v| v * self.scale),
-            CableValue::Mono(_) => unreachable!(
-                "PolyInput::read_from encountered a Mono cable — graph validation should prevent this"
-            ),
-        }
-    }
 }
 
 /// A mono output port.
@@ -159,11 +134,6 @@ impl MonoOutput {
     pub fn write(&self, pool: &mut [CableValue], value: f64) {
         pool[self.cable_idx] = CableValue::Mono(value);
     }
-
-    /// Write `value` into the ping-pong `pool` at write-index `wi`.
-    pub fn write_to(&self, pool: &mut [[CableValue; 2]], wi: usize, value: f64) {
-        pool[self.cable_idx][wi] = CableValue::Mono(value);
-    }
 }
 
 /// A poly output port (16-channel).
@@ -190,11 +160,6 @@ impl PolyOutput {
     /// Write a 16-channel `value` into `pool` at `self.cable_idx`.
     pub fn write(&self, pool: &mut [CableValue], value: [f64; 16]) {
         pool[self.cable_idx] = CableValue::Poly(value);
-    }
-
-    /// Write a 16-channel `value` into the ping-pong `pool` at write-index `wi`.
-    pub fn write_to(&self, pool: &mut [[CableValue; 2]], wi: usize, value: [f64; 16]) {
-        pool[self.cable_idx][wi] = CableValue::Poly(value);
     }
 }
 

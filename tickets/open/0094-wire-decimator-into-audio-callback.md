@@ -26,8 +26,8 @@ processing flow and wiring are the goal; audio quality is addressed in T-0095.
 - [ ] `process_chunk` inner loop (pseudocode):
 
   ```rust
-  let mut out_l = 0.0_f64;
-  let mut out_r = 0.0_f64;
+  let mut out_l = 0.0_f32;
+  let mut out_r = 0.0_f32;
   for _ in 0..self.oversampling_factor {
       self.current_plan.tick(&mut self.module_pool, &mut self.buffer_pool, wi);
       self.wi_counter += 1;

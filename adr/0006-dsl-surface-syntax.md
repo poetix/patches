@@ -88,7 +88,7 @@ that was part of the removed poly-duplication syntax.
 
 ```
 <port-ref> -> <port-ref>                   # mono, unit scale
-<port-ref> -> <port-ref> * <number>        # mono, explicit scale (any finite f64)
+<port-ref> -> <port-ref> * <number>        # mono, explicit scale (any finite f32)
 <port-ref> -> <port-ref> poly <N>          # poly cable, N channels, unit scale
 <port-ref> -> <port-ref> poly <N> * <num>  # poly cable, N channels, scaled
 ```
@@ -250,7 +250,7 @@ under review:
    first in a two-pass approach?
 
 4. **Numeric literals.** Should the grammar distinguish integers from floats
-   at the lexical level, or treat all numbers as `f64` and let the factory
+   at the lexical level, or treat all numbers as `f32` and let the factory
    schema coerce? An integer in a `steps` array is naturally a MIDI note
    number (i64), not a float.
 

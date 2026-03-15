@@ -16,9 +16,9 @@ value in `process`. Remove `sample_rate` from `process` entirely.
 
 ## Acceptance criteria
 
-- [ ] `AudioEnvironment { pub sample_rate: f64 }` added to `patches-core`
+- [ ] `AudioEnvironment { pub sample_rate: f32 }` added to `patches-core`
 - [ ] `Module::initialise(&mut self, _env: &AudioEnvironment) {}` default no-op added
-- [ ] `sample_rate: f64` removed from `Module::process` signature
+- [ ] `sample_rate: f32` removed from `Module::process` signature
 - [ ] `ExecutionPlan::tick()` takes no sample_rate parameter
 - [ ] `ExecutionPlan::initialise(&mut self, env: &AudioEnvironment)` added
 - [ ] `SoundEngine` stores sample_rate after `start()`, calls `initialise` on initial

@@ -67,7 +67,7 @@ impl Module for PolyVca {
     fn process(&mut self, pool: &mut CablePool<'_>) {
         let signal = pool.read_poly(&self.in_signal);
         let cv     = pool.read_poly(&self.in_cv);
-        let mut out = [0.0f64; 16];
+        let mut out = [0.0f32; 16];
         for i in 0..16 {
             out[i] = signal[i] * cv[i];
         }
@@ -110,8 +110,8 @@ mod tests {
     fn multiplies_per_voice() {
         let mut m = make_vca();
         set_ports_for_test(&mut m);
-        let mut sig = [0.0f64; 16];
-        let mut cv  = [0.0f64; 16];
+        let mut sig = [0.0f32; 16];
+        let mut cv  = [0.0f32; 16];
         sig[0] = 0.5;  cv[0] = 0.8;
         sig[1] = 1.0;  cv[1] = 0.0;
         sig[2] = -0.5; cv[2] = 1.0;
@@ -128,8 +128,8 @@ mod tests {
             CableValue::Poly(v) => v,
             _ => panic!("expected Poly"),
         };
-        assert!((out[0] - 0.4).abs()  < f64::EPSILON, "voice 0: 0.5×0.8=0.4, got {}", out[0]);
+        assert!((out[0] - 0.4).abs()  < f32::EPSILON, "voice 0: 0.5×0.8=0.4, got {}", out[0]);
         assert_eq!(out[1], 0.0,                         "voice 1: 1.0×0.0=0.0");
-        assert!((out[2] - (-0.5)).abs() < f64::EPSILON, "voice 2: -0.5×1.0=-0.5, got {}", out[2]);
+        assert!((out[2] - (-0.5)).abs() < f32::EPSILON, "voice 2: -0.5×1.0=-0.5, got {}", out[2]);
     }
 }

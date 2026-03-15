@@ -10,7 +10,7 @@ use patches_core::parameter_map::{ParameterMap, ParameterValue};
 #[derive(Debug, Clone, PartialEq)]
 enum Step {
     /// A named note with a V/OCT pitch value (relative to C0=0.0).
-    Note { voct: f64 },
+    Note { voct: f32 },
     /// A rest: gate=0, trigger=0; pitch holds previous value.
     Rest,
     /// A tie: gate=1, trigger=0; pitch holds the current tied note's value.
@@ -87,7 +87,7 @@ fn parse_step(s: &str) -> Result<Step, ParseStepError> {
     }
 
     let semitone_index = semitone_base + accidental;
-    let voct = octave as f64 + semitone_index as f64 / 12.0;
+    let voct = octave as f32 + semitone_index as f32 / 12.0;
     Ok(Step::Note { voct })
 }
 
@@ -110,14 +110,14 @@ pub struct Seq {
     step_index: usize,
     playing: bool,
     /// Pitch value held until next note step.
-    current_pitch: f64,
+    current_pitch: f32,
     /// Whether to emit trigger=1 on this sample.
     trigger_pending: bool,
     /// Previous sample values for rising-edge detection.
-    prev_clock: f64,
-    prev_start: f64,
-    prev_stop: f64,
-    prev_reset: f64,
+    prev_clock: f32,
+    prev_start: f32,
+    prev_stop: f32,
+    prev_reset: f32,
     // Port fields
     in_clock: MonoInput,
     in_start: MonoInput,
@@ -358,7 +358,7 @@ mod tests {
         module.set_ports(&inputs, &outputs);
     }
 
-    fn tick(seq: &mut dyn Module, pool: &mut Vec<[CableValue; 2]>, clock: f64, tick_count: usize) -> (f64, f64, f64) {
+    fn tick(seq: &mut dyn Module, pool: &mut Vec<[CableValue; 2]>, clock: f32, tick_count: usize) -> (f32, f32, f32) {
         let wi = tick_count % 2;
         let ri = 1 - wi;
         pool[0][ri] = CableValue::Mono(clock);
@@ -375,12 +375,12 @@ mod tests {
     fn tick_ctrl(
         seq: &mut dyn Module,
         pool: &mut Vec<[CableValue; 2]>,
-        clock: f64,
-        start: f64,
-        stop: f64,
-        reset: f64,
+        clock: f32,
+        start: f32,
+        stop: f32,
+        reset: f32,
         tick_count: usize,
-    ) -> (f64, f64, f64) {
+    ) -> (f32, f32, f32) {
         let wi = tick_count % 2;
         let ri = 1 - wi;
         pool[0][ri] = CableValue::Mono(clock);

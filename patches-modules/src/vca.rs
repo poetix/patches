@@ -130,7 +130,7 @@ mod tests {
         pool[1][1] = CableValue::Mono(0.8);
         m.process(&mut CablePool::new(&mut pool, 0));
         if let CableValue::Mono(v) = pool[2][0] {
-            assert!((v - 0.4).abs() < f64::EPSILON);
+            assert!((v - 0.4).abs() < f32::EPSILON);
         } else { panic!("expected Mono"); }
     }
 
@@ -156,7 +156,7 @@ mod tests {
         pool[1][1] = CableValue::Mono(-1.0);
         m.process(&mut CablePool::new(&mut pool, 0));
         if let CableValue::Mono(v) = pool[2][0] {
-            assert!((v - (-0.5)).abs() < f64::EPSILON);
+            assert!((v - (-0.5)).abs() < f32::EPSILON);
         } else { panic!("expected Mono"); }
     }
 }

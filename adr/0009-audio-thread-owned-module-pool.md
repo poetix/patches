@@ -77,10 +77,10 @@ next_hwm: usize                               // high-water mark
 pub struct ModuleSlot {
     pub pool_index: usize,         // was: pub module: Box<dyn Module>
     pub input_buffers: Vec<usize>,
-    pub input_scales: Vec<f64>,
+    pub input_scales: Vec<f32>,
     pub output_buffers: Vec<usize>,
-    pub input_scratch: Vec<f64>,
-    pub output_scratch: Vec<f64>,
+    pub input_scratch: Vec<f32>,
+    pub output_scratch: Vec<f32>,
 }
 
 pub struct ExecutionPlan {

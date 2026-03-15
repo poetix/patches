@@ -17,7 +17,7 @@ PolyBLEP correction to both waveforms.
 
 ## Acceptance criteria
 
-- [ ] A `polyblep(phase: f64, phase_increment: f64) -> f64` function is
+- [ ] A `polyblep(phase: f32, phase_increment: f32) -> f32` function is
       implemented in `patches-modules/src/common/` (new file `polyblep.rs` or
       inline in `oscillator.rs`).
 - [ ] The sawtooth output applies PolyBLEP correction at the phase wrap
@@ -48,7 +48,7 @@ Standard PolyBLEP formula for a normalised phase `t ∈ [0, 1)` and phase
 increment `dt`:
 
 ```
-fn polyblep(t: f64, dt: f64) -> f64 {
+fn polyblep(t: f32, dt: f32) -> f32 {
     if t < dt {
         let t = t / dt;
         2.0 * t - t * t - 1.0
@@ -67,7 +67,7 @@ For square: apply `+polyblep(phase, dt)` at the rising edge and
 `-polyblep((phase - duty).rem_euclid(1.0), dt)` at the falling edge.
 
 `phase_increment` is already available in `UnitPhaseAccumulator`; expose it as
-a `pub` field or a `pub fn phase_increment(&self) -> f64` getter — whichever
+a `pub` field or a `pub fn phase_increment(&self) -> f32` getter — whichever
 is more consistent with the existing style.
 
 PolyBLEP only corrects faithfully when `phase_increment < 0.5` (i.e. the

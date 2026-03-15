@@ -70,7 +70,7 @@ impl Module for PolyMix {
     }
 
     fn process(&mut self, pool: &mut CablePool<'_>) {
-        let mut out = [0.0f64; 16];
+        let mut out = [0.0f32; 16];
         for port in &self.in_ports[..self.size] {
             let channels = pool.read_poly(port);
             for i in 0..16 {
@@ -117,8 +117,8 @@ mod tests {
             &[OutputPort::Poly(PolyOutput { cable_idx: 2, connected: true })],
         );
 
-        let mut a = [0.0f64; 16];
-        let mut b = [0.0f64; 16];
+        let mut a = [0.0f32; 16];
+        let mut b = [0.0f32; 16];
         a[0] = 0.3; b[0] = 0.7;
         a[1] = 0.5; b[1] = 0.5;
 
@@ -131,7 +131,7 @@ mod tests {
             CableValue::Poly(v) => v,
             _ => panic!("expected Poly"),
         };
-        assert!((out[0] - 1.0).abs() < f64::EPSILON, "voice 0: 0.3+0.7=1.0, got {}", out[0]);
-        assert!((out[1] - 1.0).abs() < f64::EPSILON, "voice 1: 0.5+0.5=1.0, got {}", out[1]);
+        assert!((out[0] - 1.0).abs() < f32::EPSILON, "voice 0: 0.3+0.7=1.0, got {}", out[0]);
+        assert!((out[1] - 1.0).abs() < f32::EPSILON, "voice 1: 0.5+0.5=1.0, got {}", out[1]);
     }
 }

@@ -47,7 +47,7 @@ O(1), reducing its cost to O(P_in + P_out) per node.
 
 ```rust
 // Built after allocate_buffers.
-let mut input_buffer_map: HashMap<(NodeId, String, u32), (usize, f64)> =
+let mut input_buffer_map: HashMap<(NodeId, String, u32), (usize, f32)> =
     HashMap::new();
 for (from, out_name, out_idx, to, in_name, in_idx, scale) in &edges {
     // one position() lookup per edge (not per port):

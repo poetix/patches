@@ -26,7 +26,7 @@ behaves identically to T-0090 when neither is connected.
 - [ ] `set_connectivity` is updated to track both inputs.
 - [ ] `process` applies sync detection and/or rate CV only when the respective
       input is connected per connectivity state.
-- [ ] Sync detection uses a `prev_sync: f64` field (last sample's sync input
+- [ ] Sync detection uses a `prev_sync: f32` field (last sample's sync input
       value, initialised to 0.0). Phase reset is applied *before* the phase
       advance for that sample.
 - [ ] When `rate_cv` is connected, the phase increment is recomputed each sample

@@ -45,9 +45,9 @@ the control thread via `Drop`, which is sufficient. See
 
 ### Buffer pool in SoundEngine
 
-`SoundEngine` pre-allocates a fixed-capacity `pool: Box<[[f64; 2]]>` at
+`SoundEngine` pre-allocates a fixed-capacity `pool: Box<[[f32; 2]]>` at
 construction. `ExecutionPlan` no longer owns `buffers`; it holds only indices into
-the shared pool. `tick()` accepts `pool: &mut [[f64; 2]]` as a parameter.
+the shared pool. `tick()` accepts `pool: &mut [[f32; 2]]` as a parameter.
 
 Index 0 remains the permanent-zero slot (never written to).
 

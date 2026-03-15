@@ -1,12 +1,22 @@
 use crate::audio_environment::AudioEnvironment;
 use crate::build_error::BuildError;
-use crate::cable_pool::CablePool;
-use crate::cables::{InputPort, OutputPort};
-use crate::midi::ReceivesMidi;
-use super::instance_id::InstanceId;
-use super::module_descriptor::{ModuleDescriptor, ModuleShape, ParameterKind};
-use super::parameter_map::{ParameterMap, ParameterValue};
+use crate::instance_id::InstanceId;
+use crate::module_descriptor::{ModuleDescriptor, ModuleShape, ParameterKind};
+use crate::parameter_map::{ParameterMap, ParameterValue};
 
+/// A non-audio-rate control signal delivered to a module via [`Module::receive_signal`].
+///
+/// Signals are passed by value; modules that need to store the payload can do so directly.
+/// New variants may be added in future; module implementations should use a wildcard arm
+/// (`_ => {}`) to stay forward-compatible.
+///
+/// `ControlSignal` implements [`Send`] so it can be queued in the engine's ring buffer
+/// (see T-0038). All current variants use only `Send`-safe types (`&'static str`, `f32`).
+#[derive(Debug, Clone)]
+pub enum ControlSignal {
+    /// A single named float parameter update (e.g. frequency, gain).
+    Float { name: &'static str, value: f32 },
+}
 
 /// Validate `params` against `descriptor`.
 ///
@@ -105,9 +115,7 @@ pub fn validate_parameters(
 /// has at least one incoming cable; `outputs[i]` is `true` if the i-th output port has at
 /// least one outgoing cable.
 ///
-/// Used internally by the planner for connectivity change-detection across successive builds.
-/// Connectivity information is delivered to modules via port objects in
-/// [`Module::set_ports`] rather than via this struct directly.
+/// Construct with [`PortConnectivity::new`], which fills both slices with `false`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PortConnectivity {
     pub inputs: Box<[bool]>,
@@ -230,43 +238,28 @@ pub trait Module: Send {
     /// return the same value for the lifetime of the instance.
     fn instance_id(&self) -> InstanceId;
 
-    /// Process one sample using the shared ping-pong cable buffer pool.
-    ///
-    /// `pool` wraps the full ping-pong buffer and the current write index. Modules
-    /// read input values via [`CablePool::read_mono`] / [`CablePool::read_poly`] and
-    /// write output values via [`CablePool::write_mono`] / [`CablePool::write_poly`],
-    /// using the `cable_idx` fields on their stored port objects (delivered by
-    /// [`set_ports`](Module::set_ports)).
-    ///
-    /// **Must not allocate, block, or perform I/O.**
-    fn process(&mut self, pool: &mut CablePool<'_>);
+    fn process(&mut self, inputs: &[f32], outputs: &mut [f32]);
 
-    /// Deliver pre-resolved port objects to the module.
+    /// Deliver a non-audio-rate control signal to this module.
+    ///
+    /// The default implementation is a no-op; modules that respond to control signals
+    /// override this method. Unknown signal variants or parameter names should be
+    /// silently ignored.
+    fn receive_signal(&mut self, _signal: ControlSignal) {}
+
+    /// Inform the module which of its ports are connected in the current patch.
     ///
     /// Called by the engine whenever the patch topology changes (e.g. after a hot-reload).
-    /// Each entry in `inputs` / `outputs` corresponds positionally to the module's declared
-    /// [`ModuleDescriptor`] inputs / outputs. Connectivity information is carried by the
-    /// `connected` field on each concrete port type.
+    /// Implementations may use this to skip computation for unconnected ports, cache
+    /// derived coefficients, or mirror state across channels.
     ///
-    /// **Must not allocate, block, or perform I/O.** This method may be called on the
-    /// audio thread immediately before the next `process` call.
+    /// **Implementations must not allocate, block, or perform I/O.** This method may be
+    /// called on the audio thread immediately before the next `process` call.
     ///
     /// The default implementation is a no-op.
-    fn set_ports(&mut self, _inputs: &[InputPort], _outputs: &[OutputPort]) {}
+    fn set_connectivity(&mut self, _connectivity: PortConnectivity) {}
 
     fn as_any(&self) -> &dyn std::any::Any;
-
-    /// Returns `Some(self)` if this module implements [`ReceivesMidi`], `None` otherwise.
-    ///
-    /// Override this to return `Some(self)` in modules that implement [`ReceivesMidi`].
-    /// The planner uses this during plan construction to build the `midi_receiver_indices`
-    /// list; the audio callback uses that list to route events without per-tick dynamic
-    /// dispatch on modules that do not receive MIDI.
-    ///
-    /// The default implementation returns `None`.
-    fn as_midi_receiver(&mut self) -> Option<&mut dyn ReceivesMidi> {
-        None
-    }
 
     /// Returns `Some(self)` if this module is a [`Sink`], `None` otherwise.
     fn as_sink(&self) -> Option<&dyn Sink> {
@@ -290,7 +283,8 @@ pub trait Sink: Module {
 mod tests {
     use super::*;
     use crate::build_error::BuildError;
-    use crate::modules::{ModuleDescriptor, ModuleShape, ParameterDescriptor, ParameterKind, ParameterMap, ParameterValue};
+    use crate::module_descriptor::{ModuleDescriptor, ModuleShape, ParameterDescriptor, ParameterKind};
+    use crate::parameter_map::{ParameterMap, ParameterValue};
 
     fn array_descriptor() -> ModuleDescriptor {
         ModuleDescriptor {

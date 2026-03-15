@@ -61,14 +61,14 @@ const PATTERN: &[&str] = &[
 **Parameters**
 
 ```rust
-const BPM: f64 = 120.0;
+const BPM: f32 = 120.0;
 const BEATS_PER_BAR: u32 = 4;
 const QUAVERS_PER_BEAT: u32 = 2;
 
-const ATTACK_SECS: f64  = 0.005;
-const DECAY_SECS: f64   = 0.050;
-const SUSTAIN: f64      = 0.6;
-const RELEASE_SECS: f64 = 0.100;
+const ATTACK_SECS: f32  = 0.005;
+const DECAY_SECS: f32   = 0.050;
+const SUSTAIN: f32      = 0.6;
+const RELEASE_SECS: f32 = 0.100;
 
 const RUN_SECS: u64 = 8;   // ~4 bars at 120 BPM
 ```

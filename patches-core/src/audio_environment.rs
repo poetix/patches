@@ -5,10 +5,10 @@
 /// [`Module::process`] rather than receiving them per sample.
 ///
 /// `poly_voices` is the number of active polyphony voices. Poly cable buffers always
-/// hold 16 channels (`[f64; 16]`) regardless of this value; modules should use
+/// hold 16 channels (`[f32; 16]`) regardless of this value; modules should use
 /// `poly_voices` to know how many of those channels carry live data.
 #[derive(Debug, Clone, Copy)]
 pub struct AudioEnvironment {
-    pub sample_rate: f64,
+    pub sample_rate: f32,
     pub poly_voices: usize,
 }

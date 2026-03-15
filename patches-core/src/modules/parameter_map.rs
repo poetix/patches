@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParameterValue {
-    Float(f64),
+    Float(f32),
     Int(i64),
     Bool(bool),
     Enum(&'static str),

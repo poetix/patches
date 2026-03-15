@@ -262,7 +262,7 @@ impl SoundEngine {
     /// Create a new `SoundEngine` with pre-allocated pools but no plan and no
     /// audio device.
     ///
-    /// `buffer_pool_capacity` is the number of `[f64; 2]` cable buffer slots.
+    /// `buffer_pool_capacity` is the number of `[f32; 2]` cable buffer slots.
     /// Slot 0 is the permanent-zero slot; slots 1... are for cable buffers.
     ///
     /// `module_pool_capacity` is the number of `Option<Box<dyn Module>>` slots
@@ -315,7 +315,7 @@ impl SoundEngine {
 
         let sample_format = supported.sample_format();
         let config: StreamConfig = supported.into();
-        let sample_rate = f64::from(config.sample_rate.0);
+        let sample_rate = f64::from(config.sample_rate.0) as f32;
         let channels = usize::from(config.channels);
 
         self.opened_device = Some(OpenedDevice {

@@ -8,7 +8,7 @@ Accepted (epic E005, tickets 0024–0026)
 
 ### The re-plan discontinuity problem
 
-`ExecutionPlan` owns the flat cable buffer pool (`buffers: Vec<[f64; 2]>`). Each
+`ExecutionPlan` owns the flat cable buffer pool (`buffers: Vec<[f32; 2]>`). Each
 re-plan allocates a fresh, zero-initialised pool and assigns new buffer indices
 to all output ports. On plan acceptance, the audio thread begins reading from an
 all-zero pool, producing a discontinuity that propagates through the graph — one
@@ -89,7 +89,7 @@ that calls `destroy()` after the plan swap has propagated.
 ## Decision
 
 1. **Buffer pool in SoundEngine.** `SoundEngine` pre-allocates a fixed-capacity
-   `pool: Box<[[f64; 2]]>` at construction. `ExecutionPlan` holds only indices.
+   `pool: Box<[[f32; 2]]>` at construction. `ExecutionPlan` holds only indices.
    `tick()` accepts the pool by mutable reference.
 
 2. **Stable index allocation via `BufferAllocState`.** `build_patch` accepts a

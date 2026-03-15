@@ -120,7 +120,7 @@ this pair in place of a bare string.
 
 ### Signal scale factor
 
-The scale field on edges is relaxed from `[-1.0, 1.0]` to any finite `f64`.
+The scale field on edges is relaxed from `[-1.0, 1.0]` to any finite `f32`.
 Values outside `[-1.0, 1.0]` represent amplification; the caller is
 responsible for ensuring the signal remains in a meaningful range. The
 `ModuleGraph::connect` validation is updated accordingly.

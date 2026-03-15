@@ -23,7 +23,7 @@ work in T-0095.
 
   impl Decimator {
       pub(crate) fn new(factor: OversamplingFactor) -> Self
-      pub(crate) fn push(&mut self, x: f64) -> Option<f64>
+      pub(crate) fn push(&mut self, x: f32) -> Option<f32>
   }
   ```
 - [ ] `Decimator::push` returns `None` for the first `factor - 1` calls of each

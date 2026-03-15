@@ -14,8 +14,8 @@ use patches_core::parameter_map::ParameterMap;
 pub struct AudioOut {
     instance_id: InstanceId,
     descriptor: ModuleDescriptor,
-    last_left: f64,
-    last_right: f64,
+    last_left: f32,
+    last_right: f32,
     in_left: MonoInput,
     in_right: MonoInput,
 }
@@ -77,11 +77,11 @@ impl Module for AudioOut {
 }
 
 impl Sink for AudioOut {
-    fn last_left(&self) -> f64 {
+    fn last_left(&self) -> f32 {
         self.last_left
     }
 
-    fn last_right(&self) -> f64 {
+    fn last_right(&self) -> f32 {
         self.last_right
     }
 }

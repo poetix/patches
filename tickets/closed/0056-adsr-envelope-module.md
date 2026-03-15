@@ -15,7 +15,7 @@ in `initialise`; `process` contains only additions and comparisons.
 
 ## Acceptance criteria
 
-- [ ] `AdsrEnvelope::new(attack_secs: f64, decay_secs: f64, sustain: f64, release_secs: f64)` compiles.
+- [ ] `AdsrEnvelope::new(attack_secs: f32, decay_secs: f32, sustain: f32, release_secs: f32)` compiles.
 - [ ] Two input ports: `trigger/0`, `gate/1`.
 - [ ] One output port: `out/0`.
 - [ ] Rising edge on `trigger` transitions to Attack from any state and current level.

@@ -36,8 +36,8 @@ migration strategy.
 pub enum CableKind { Mono, Poly }
 
 pub enum CableValue {
-    Mono(f64),
-    Poly([f64; 16]),
+    Mono(f32),
+    Poly([f32; 16]),
 }
 ```
 
@@ -47,8 +47,8 @@ concerns and represented separately: the enum discriminant encodes arity; a
 `connected` field on the concrete type encodes connectedness.
 
 ```rust
-pub struct MonoInput  { pub cable_idx: usize, pub scale: f64, pub connected: bool }
-pub struct PolyInput  { pub cable_idx: usize, pub scale: f64, pub connected: bool }
+pub struct MonoInput  { pub cable_idx: usize, pub scale: f32, pub connected: bool }
+pub struct PolyInput  { pub cable_idx: usize, pub scale: f32, pub connected: bool }
 pub struct MonoOutput { pub cable_idx: usize, pub connected: bool }
 pub struct PolyOutput { pub cable_idx: usize, pub connected: bool }
 
@@ -56,7 +56,7 @@ pub enum InputPort  { Mono(MonoInput),  Poly(PolyInput)  }
 pub enum OutputPort { Mono(MonoOutput), Poly(PolyOutput) }
 ```
 
-`MonoInput::read(pool) -> f64` and `PolyInput::read(pool) -> [f64; 16]` have
+`MonoInput::read(pool) -> f32` and `PolyInput::read(pool) -> [f32; 16]` have
 no wrong-type arm: the type system guarantees the pool slot matches. Both
 provide `is_connected()`. `MonoOutput` and `PolyOutput` each provide
 `write(pool, value)` and `is_connected()`.

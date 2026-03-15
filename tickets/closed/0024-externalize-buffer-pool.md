@@ -8,7 +8,7 @@ created: 2026-03-01
 
 ## Summary
 
-`ExecutionPlan` currently owns the flat cable buffer pool (`buffers: Vec<[f64; 2]>`).
+`ExecutionPlan` currently owns the flat cable buffer pool (`buffers: Vec<[f32; 2]>`).
 Because each re-plan allocates a fresh pool with all indices zeroed, every hot-reload
 resets all cable values for at least one tick. Moving the pool into `SoundEngine`
 (pre-allocated at construction with a configurable fixed capacity) is the prerequisite
@@ -20,11 +20,11 @@ so changes can be merged independently.
 
 ## Acceptance criteria
 
-- [ ] `SoundEngine` pre-allocates `pool: Box<[[f64; 2]]>` with a capacity supplied
+- [ ] `SoundEngine` pre-allocates `pool: Box<[[f32; 2]]>` with a capacity supplied
       at construction (e.g. `SoundEngine::new(..., pool_capacity: usize)`)
 - [ ] `ExecutionPlan` no longer has a `buffers` field; it holds only slot index
       vectors (`input_buffers`, `output_buffers`) as before
-- [ ] `ExecutionPlan::tick()` accepts `pool: &mut [[f64; 2]]` as an additional
+- [ ] `ExecutionPlan::tick()` accepts `pool: &mut [[f32; 2]]` as an additional
       parameter and reads/writes through it instead of `self.buffers`
 - [ ] `ExecutionPlan` gains `to_zero: Vec<usize>` — indices to zero on plan
       acceptance; populated by the builder (initially all allocated indices, since

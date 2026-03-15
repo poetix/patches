@@ -51,7 +51,7 @@ that only care about one parameter can pass a single-entry `ParameterMap` and re
 defaults for the rest.
 
 ```rust
-fn make_envelope(attack: f64, decay: f64, sustain: f64, release: f64) -> Box<dyn Module> {
+fn make_envelope(attack: f32, decay: f32, sustain: f32, release: f32) -> Box<dyn Module> {
     let mut params = ParameterMap::new();
     params.insert("attack".into(),  ParameterValue::Float(attack));
     params.insert("decay".into(),   ParameterValue::Float(decay));

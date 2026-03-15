@@ -17,14 +17,14 @@ use patches_core::parameter_map::{ParameterMap, ParameterValue};
 pub struct Clock {
     instance_id: InstanceId,
     descriptor: ModuleDescriptor,
-    sample_rate: f64,
-    bpm: f64,
+    sample_rate: f32,
+    bpm: f32,
     beats_per_bar: u32,
     quavers_per_beat: u32,
     /// beat_phase increment per sample: bpm / (60.0 * sample_rate)
-    beat_phase_delta: f64,
+    beat_phase_delta: f32,
     /// Beat phase in [0.0, 1.0); incremented each sample
-    beat_phase: f64,
+    beat_phase: f32,
     /// Number of beats that have completed (for bar boundary detection)
     beat_count: u32,
     // Output port fields
@@ -138,14 +138,14 @@ impl Module for Clock {
 
         // Check for quaver boundary (1/quavers_per_beat of a beat)
         let quaver_buckets = self.quavers_per_beat;
-        let old_quaver_bucket = (old_phase * quaver_buckets as f64) as u64;
-        let new_quaver_bucket = (new_phase * quaver_buckets as f64) as u64;
+        let old_quaver_bucket = (old_phase * quaver_buckets as f32) as u64;
+        let new_quaver_bucket = (new_phase * quaver_buckets as f32) as u64;
         let quaver_fired = new_quaver_bucket > old_quaver_bucket || beat_fired;
 
         // Check for semiquaver boundary (half of a quaver)
         let semiquaver_buckets = self.quavers_per_beat * 2;
-        let old_semiquaver_bucket = (old_phase * semiquaver_buckets as f64) as u64;
-        let new_semiquaver_bucket = (new_phase * semiquaver_buckets as f64) as u64;
+        let old_semiquaver_bucket = (old_phase * semiquaver_buckets as f32) as u64;
+        let new_semiquaver_bucket = (new_phase * semiquaver_buckets as f32) as u64;
         let semiquaver_fired = new_semiquaver_bucket > old_semiquaver_bucket || beat_fired;
 
         pool.write_mono(&self.out_bar, if bar_fired { 1.0 } else { 0.0 });
@@ -166,11 +166,11 @@ mod tests {
     use patches_core::{AudioEnvironment, CablePool, CableValue, Module, ModuleShape, Registry};
     use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
-    fn make_clock(bpm: f64, beats_per_bar: i64, quavers_per_beat: i64) -> Box<dyn Module> {
+    fn make_clock(bpm: f32, beats_per_bar: i64, quavers_per_beat: i64) -> Box<dyn Module> {
         make_clock_sr(bpm, beats_per_bar, quavers_per_beat, 44100.0)
     }
 
-    fn make_clock_sr(bpm: f64, beats_per_bar: i64, quavers_per_beat: i64, sample_rate: f64) -> Box<dyn Module> {
+    fn make_clock_sr(bpm: f32, beats_per_bar: i64, quavers_per_beat: i64, sample_rate: f32) -> Box<dyn Module> {
         let mut params = ParameterMap::new();
         params.insert("bpm".into(),              ParameterValue::Float(bpm));
         params.insert("beats_per_bar".into(),    ParameterValue::Int(beats_per_bar));
@@ -200,7 +200,7 @@ mod tests {
         module.set_ports(&[], &outputs);
     }
 
-    fn read_output(pool: &Vec<[CableValue; 2]>, idx: usize, wi: usize) -> f64 {
+    fn read_output(pool: &Vec<[CableValue; 2]>, idx: usize, wi: usize) -> f32 {
         if let CableValue::Mono(v) = pool[idx][wi] { v } else { panic!("expected Mono") }
     }
 

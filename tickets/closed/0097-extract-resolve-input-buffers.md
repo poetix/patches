@@ -17,11 +17,11 @@ inlined with no named boundary.
 ## Acceptance criteria
 
 - [ ] `resolve_input_buffers(desc, node_id, edges, output_buf, graph)` extracted
-      as a private function returning `Result<Vec<(usize, f64)>, BuildError>` —
+      as a private function returning `Result<Vec<(usize, f32)>, BuildError>` —
       one entry per input port, defaulting to `(0, 1.0)` for unconnected ports.
-- [ ] `partition_inputs(resolved: Vec<(usize, f64)>)` extracted as a private
+- [ ] `partition_inputs(resolved: Vec<(usize, f32)>)` extracted as a private
       pure function returning
-      `(Vec<(usize, usize)>, Vec<(usize, usize, f64)>)` (unscaled, scaled).
+      `(Vec<(usize, usize)>, Vec<(usize, usize, f32)>)` (unscaled, scaled).
 - [ ] `build_slots` calls the two new functions in place of the inlined logic;
       behaviour is unchanged.
 - [ ] Unit tests for `resolve_input_buffers`:

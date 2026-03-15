@@ -59,7 +59,7 @@ crossed, the output is `1.0` for exactly that one sample.
 **Constructor**
 
 ```rust
-ClockSequencer::new(bpm: f64, beats_per_bar: u32, quavers_per_beat: u32) -> Self
+ClockSequencer::new(bpm: f32, beats_per_bar: u32, quavers_per_beat: u32) -> Self
 ```
 
 - `bpm` — tempo; "beat" means the denominator unit of the time signature.
@@ -95,7 +95,7 @@ Examples:
 
 **Internal design**
 
-A single beat-phase accumulator (`beat_phase: f64 ∈ [0.0, 1.0)`) advances by
+A single beat-phase accumulator (`beat_phase: f32 ∈ [0.0, 1.0)`) advances by
 `bpm / (60.0 * sample_rate)` each sample. All four outputs are derived from this one
 accumulator, so they stay perfectly phase-locked:
 
@@ -174,7 +174,7 @@ voct = (octave - 2) + semitone_index / 12.0
 Examples: `C2 → 0.0`, `A2 → 0.75`, `C3 → 1.0`, `G3 → 1.583…`, `C4 → 2.0`.
 
 Pattern parsing happens at construction time; the `process` path operates only on
-pre-computed `f64` pitch values and enum step types — no string work at audio time.
+pre-computed `f32` pitch values and enum step types — no string work at audio time.
 
 **Edge detection**
 
@@ -198,7 +198,7 @@ A standard four-stage envelope generator. Output is in `[0.0, 1.0]` at all times
 **Constructor**
 
 ```rust
-AdsrEnvelope::new(attack_secs: f64, decay_secs: f64, sustain: f64, release_secs: f64) -> Self
+AdsrEnvelope::new(attack_secs: f32, decay_secs: f32, sustain: f32, release_secs: f32) -> Self
 ```
 
 - `sustain` is a level in `[0.0, 1.0]`, not a time.
@@ -237,16 +237,16 @@ Two waveform generators sharing the same V/OCT pitch interface. Both live in
 **Constructors**
 
 ```rust
-SawtoothOscillator::new(base_voct: f64) -> Self
-SquareOscillator::new(base_voct: f64) -> Self
+SawtoothOscillator::new(base_voct: f32) -> Self
+SquareOscillator::new(base_voct: f32) -> Self
 ```
 
 `base_voct` is the pitch when the `voct` input is `0.0`. Total pitch =
 `base_voct + voct_input`. Frequency:
 
 ```
-C2_FREQ: f64 = 65.406_194;
-freq = C2_FREQ * 2_f64.powf(base_voct + voct_input)
+C2_FREQ: f32 = 65.406_194;
+freq = C2_FREQ * 2_f32.powf(base_voct + voct_input)
 ```
 
 The `voct` input is sampled every audio-rate call so V/OCT modulation works at full
@@ -357,7 +357,7 @@ API is sufficient. This epic validates that the engine architecture handles real
 workloads without modification.
 
 **Trigger signals on the audio bus.** Triggers (0.0/1.0 one-sample pulses) and gate
-signals (sustained 0.0/1.0) flow through the same `f64` audio buffers as pitched audio.
+signals (sustained 0.0/1.0) flow through the same `f32` audio buffers as pitched audio.
 This avoids a separate control-rate bus at this stage. All receiving modules detect
 triggers via rising-edge crossing of the 0.5 threshold.
 

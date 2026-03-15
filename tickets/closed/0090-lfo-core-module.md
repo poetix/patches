@@ -26,7 +26,7 @@ parameter, and a polarity mode. Sync and rate CV inputs are added in T-0091.
         - `phase_offset`: Float, min 0.0, max 1.0, default 0.0
         - `mode`: Enum, variants `["bipolar", "unipolar_positive",
           "unipolar_negative"]`, default `"bipolar"`
-- [ ] Phase accumulator is a simple `phase: f64` + `phase_increment: f64`
+- [ ] Phase accumulator is a simple `phase: f32` + `phase_increment: f32`
       maintained in the struct (no `UnitPhaseAccumulator` — the LFO has no
       V/OCT or FM and does not benefit from that abstraction).
       `phase_increment = rate / sample_rate`, recomputed on each
@@ -70,12 +70,12 @@ the `InstanceId` counter value. A minimal implementation in the struct:
 
 ```rust
 // state must never be 0; seed from instance id (which is always > 0)
-fn xorshift64(state: &mut u64) -> f64 {
+fn xorshift64(state: &mut u64) -> f32 {
     *state ^= *state << 13;
     *state ^= *state >> 7;
     *state ^= *state << 17;
     // map to [-1.0, 1.0]
-    (*state as i64 as f64) / (i64::MAX as f64)
+    (*state as i64 as f32) / (i64::MAX as f32)
 }
 ```
 

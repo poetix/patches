@@ -135,10 +135,10 @@ impl Module for PolyOsc {
             return;
         }
 
-        let mut sine_out = [0.0f64; 16];
-        let mut tri_out  = [0.0f64; 16];
-        let mut saw_out  = [0.0f64; 16];
-        let mut sq_out   = [0.0f64; 16];
+        let mut sine_out = [0.0f32; 16];
+        let mut tri_out  = [0.0f32; 16];
+        let mut saw_out  = [0.0f32; 16];
+        let mut sq_out   = [0.0f32; 16];
 
         for (i, acc) in self.accumulators[..self.voice_count].iter_mut().enumerate() {
             let phase = acc.phase;
@@ -181,7 +181,7 @@ mod tests {
     use super::*;
     use patches_core::{AudioEnvironment, CablePool, CableValue, Module, ModuleShape, Registry};
 
-    fn make_osc(sample_rate: f64, poly_voices: usize) -> Box<dyn Module> {
+    fn make_osc(sample_rate: f32, poly_voices: usize) -> Box<dyn Module> {
         let mut r = Registry::new();
         r.register::<PolyOsc>();
         r.create(
@@ -229,7 +229,7 @@ mod tests {
         // Voice 1 with voct=1 (one octave up) runs at 2× and completes a cycle in 50 samples.
         // After 25 samples: voice 0 is at phase 0.25 (sine ≈ +1), voice 1 at phase 0.50 (sine ≈ 0).
         let period = 100usize;
-        let sample_rate = C0_FREQ * period as f64;
+        let sample_rate = C0_FREQ * period as f32;
         let mut osc = make_osc(sample_rate, 2);
 
         let inputs = vec![InputPort::Poly(PolyInput { cable_idx: 0, scale: 1.0, connected: true })];
@@ -242,7 +242,7 @@ mod tests {
         osc.set_ports(&inputs, &outputs);
 
         let mut pool = make_pool(5, true);
-        let mut voct = [0.0f64; 16];
+        let mut voct = [0.0f32; 16];
         voct[1] = 1.0; // voice 1: one octave up
 
         let mut last_wi = 0;

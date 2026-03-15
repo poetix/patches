@@ -15,15 +15,15 @@ use crate::common::approximate::lookup_sine;
 pub struct Lfo {
     instance_id: InstanceId,
     descriptor: ModuleDescriptor,
-    sample_rate: f64,
-    phase: f64,
-    phase_increment: f64,
-    phase_offset: f64,
+    sample_rate: f32,
+    phase: f32,
+    phase_increment: f32,
+    phase_offset: f32,
     mode: PolarityMode,
-    rate: f64,
+    rate: f32,
     prng_state: u64,
-    random_value: f64,
-    prev_sync: f64,
+    random_value: f32,
+    prev_sync: f32,
     // Input port fields
     in_sync: MonoInput,
     in_rate_cv: MonoInput,
@@ -43,14 +43,14 @@ enum PolarityMode {
     UnipolarNegative,
 }
 
-fn xorshift64(state: &mut u64) -> f64 {
+fn xorshift64(state: &mut u64) -> f32 {
     *state ^= *state << 13;
     *state ^= *state >> 7;
     *state ^= *state << 17;
-    (*state as i64 as f64) / (i64::MAX as f64)
+    (*state as i64 as f32) / (i64::MAX as f32)
 }
 
-fn apply_mode(v: f64, mode: PolarityMode) -> f64 {
+fn apply_mode(v: f32, mode: PolarityMode) -> f32 {
     match mode {
         PolarityMode::Bipolar => v,
         PolarityMode::UniposPositive => 0.5 + 0.5 * v,
@@ -221,11 +221,11 @@ mod tests {
     use patches_core::{AudioEnvironment, CablePool, CableValue, Module, ModuleShape, Registry};
     use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
-    fn make_lfo(rate: f64) -> Box<dyn Module> {
+    fn make_lfo(rate: f32) -> Box<dyn Module> {
         make_lfo_sr(rate, 44100.0)
     }
 
-    fn make_lfo_sr(rate: f64, sample_rate: f64) -> Box<dyn Module> {
+    fn make_lfo_sr(rate: f32, sample_rate: f32) -> Box<dyn Module> {
         let mut params = ParameterMap::new();
         params.insert("rate".into(), ParameterValue::Float(rate));
         let mut r = Registry::new();
@@ -294,9 +294,9 @@ mod tests {
 
     #[test]
     fn sine_output_consistent_across_two_cycles() {
-        let rate = 1.0_f64;
+        let rate = 1.0_f32;
         let period = 100_usize;
-        let sample_rate = rate * period as f64;
+        let sample_rate = rate * period as f32;
 
         let mut lfo = make_lfo_sr(rate, sample_rate);
         set_all_outputs_connected(&mut lfo);
@@ -321,9 +321,9 @@ mod tests {
 
     #[test]
     fn phase_offset_shifts_sine_by_quarter_cycle() {
-        let rate = 1.0_f64;
+        let rate = 1.0_f32;
         let period = 100_usize;
-        let sample_rate = rate * period as f64;
+        let sample_rate = rate * period as f32;
 
         let mut lfo_base = make_lfo_sr(rate, sample_rate);
         set_all_outputs_connected(&mut lfo_base);
@@ -371,9 +371,9 @@ mod tests {
 
     #[test]
     fn unipolar_positive_maps_saw_up_to_zero_one() {
-        let rate = 1.0_f64;
+        let rate = 1.0_f32;
         let period = 100_usize;
-        let sample_rate = rate * period as f64;
+        let sample_rate = rate * period as f32;
 
         let mut params = ParameterMap::new();
         params.insert("rate".into(), ParameterValue::Float(rate));
@@ -404,9 +404,9 @@ mod tests {
 
     #[test]
     fn random_output_holds_per_period_and_is_in_range() {
-        let rate = 1.0_f64;
+        let rate = 1.0_f32;
         let period = 100_usize;
-        let sample_rate = rate * period as f64;
+        let sample_rate = rate * period as f32;
 
         let mut params = ParameterMap::new();
         params.insert("rate".into(), ParameterValue::Float(rate));
@@ -465,9 +465,9 @@ mod tests {
 
     #[test]
     fn sync_rising_edge_resets_phase_mid_cycle() {
-        let rate = 1.0_f64;
+        let rate = 1.0_f32;
         let period = 100_usize;
-        let sample_rate = rate * period as f64;
+        let sample_rate = rate * period as f32;
         let mut lfo = make_lfo_sr(rate, sample_rate);
         set_sync_and_rate_cv_connected(&mut lfo);
         let mut pool = make_pool(8);
@@ -501,9 +501,9 @@ mod tests {
 
     #[test]
     fn sync_level_does_not_retrigger() {
-        let rate = 1.0_f64;
+        let rate = 1.0_f32;
         let period = 100_usize;
-        let sample_rate = rate * period as f64;
+        let sample_rate = rate * period as f32;
         let mut lfo = make_lfo_sr(rate, sample_rate);
         set_sync_and_rate_cv_connected(&mut lfo);
         let mut pool = make_pool(8);
@@ -547,9 +547,9 @@ mod tests {
 
     #[test]
     fn rate_cv_doubles_rate_halves_period() {
-        let base_rate = 1.0_f64;
+        let base_rate = 1.0_f32;
         let period = 100_usize;
-        let sample_rate = base_rate * period as f64;
+        let sample_rate = base_rate * period as f32;
 
         let mut lfo = make_lfo_sr(base_rate, sample_rate);
         set_sync_and_rate_cv_connected(&mut lfo);
@@ -582,9 +582,9 @@ mod tests {
 
     #[test]
     fn rate_cv_large_negative_is_clamped() {
-        let rate = 1.0_f64;
+        let rate = 1.0_f32;
         let period = 100_usize;
-        let sample_rate = rate * period as f64;
+        let sample_rate = rate * period as f32;
 
         let mut lfo = make_lfo_sr(rate, sample_rate);
         set_sync_and_rate_cv_connected(&mut lfo);

@@ -55,7 +55,7 @@ connection. Connections without the field default to `CableValue::Mono`.
 
 ## Notes
 
-The fixed maximum of 16 is intentional (matches `CableValue::Poly([f64; 16])`).
+The fixed maximum of 16 is intentional (matches `CableValue::Poly([f32; 16])`).
 Variable poly depth is out of scope for this epic.
 
 Voice management (mapping MIDI notes to poly channels) is also out of scope;

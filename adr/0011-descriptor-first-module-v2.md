@@ -24,7 +24,7 @@ data-driven description — a prerequisite for hot-reload, serialisation, and th
 compilation pipeline described in ADR 0005.
 
 **Parameters were stringly typed and unvalidated at the graph level.** Control signals used
-`ControlSignal::Float { name, value: f64 }`. There was no declared schema for what parameters
+`ControlSignal::Float { name, value: f32 }`. There was no declared schema for what parameters
 a module accepted, no bounds checking, and no defaults — all validation was pushed into each
 module's `receive_signal` implementation.
 
@@ -85,7 +85,7 @@ pub struct ModuleDescriptor {
 
 ```rust
 pub enum ParameterKind {
-    Float { min: f64, max: f64, default: f64 },
+    Float { min: f32, max: f32, default: f32 },
     Int   { min: i64, max: i64, default: i64 },
     Bool  { default: bool },
     Enum  { variants: &'static [&'static str], default: &'static str },
@@ -97,7 +97,7 @@ All fields use `&'static str`; accessing a descriptor never allocates.
 ### `ParameterMap` replaces ad-hoc signals
 
 Parameters are stored and communicated as a typed `ParameterMap` (`String → ParameterValue`
-where `ParameterValue` is `Float(f64) | Int(i64) | Bool(bool) | Enum(&'static str)`).
+where `ParameterValue` is `Float(f32) | Int(i64) | Bool(bool) | Enum(&'static str)`).
 
 `ControlSignal` is updated to `ParameterUpdate { name: &'static str, value: ParameterValue }`
 to use the same typed value representation.

@@ -28,7 +28,7 @@ reaching `AudioOut`.
 
 ## Notes
 
-554.37 Hz is A4 (440 Hz) raised by a just major third: `440.0 * 2f64.powf(4.0 / 12.0)`.
+554.37 Hz is A4 (440 Hz) raised by a just major third: `440.0 * 2f32.powf(4.0 / 12.0)`.
 
 The `Crossfade` name follows the user's specification. Structurally it is a
 stereo mixer at a fixed 50/50 blend; a variable blend ratio can be a future

@@ -34,7 +34,7 @@ hot-reload:
 - [x] `Module::process` no longer accepts `sample_rate`
 - [x] All module instances carry an `InstanceId`
 - [x] `Planner::build(graph, prev_plan)` reuses matching module instances by `InstanceId`
-- [x] `ModuleGraph::connect()` accepts a `scale: f64` parameter
+- [x] `ModuleGraph::connect()` accepts a `scale: f32` parameter
 
 ## Tickets
 
@@ -51,7 +51,7 @@ hot-reload:
 
 ### AudioEnvironment
 
-`AudioEnvironment { sample_rate: f64 }` lives in `patches-core`. `Module::initialise`
+`AudioEnvironment { sample_rate: f32 }` lives in `patches-core`. `Module::initialise`
 is called once when a plan is activated; `Module::process` no longer receives
 `sample_rate`. `SoundEngine` creates the environment from the CPAL stream config and
 calls `initialise` on every new plan before it reaches the audio thread.
@@ -84,9 +84,9 @@ preserving the state for the next retry.
 
 ### Input scaling
 
-`Edge` carries `scale: f64`, validated at `connect()` time
+`Edge` carries `scale: f32`, validated at `connect()` time
 (`ScaleOutOfRange` error if outside `[-1, 1]` or non-finite). At build time the
-scale is resolved from each edge and stored as `input_scales: Vec<f64>` on
+scale is resolved from each edge and stored as `input_scales: Vec<f32>` on
 `ModuleSlot` (one entry per input port; `1.0` for unconnected inputs). In `tick()`:
 
 ```rust

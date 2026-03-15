@@ -23,7 +23,7 @@ impl<'a> CablePool<'a> {
     /// # Panics
     /// Panics (via `unreachable!`) if the pool slot holds a `Poly` value —
     /// a well-formed graph never produces this.
-    pub fn read_mono(&self, input: &MonoInput) -> f64 {
+    pub fn read_mono(&self, input: &MonoInput) -> f32 {
         let ri = 1 - self.wi;
         match self.pool[input.cable_idx][ri] {
             CableValue::Mono(v) => v * input.scale,
@@ -38,7 +38,7 @@ impl<'a> CablePool<'a> {
     ///
     /// # Panics
     /// Panics (via `unreachable!`) if the pool slot holds a `Mono` value.
-    pub fn read_poly(&self, input: &PolyInput) -> [f64; 16] {
+    pub fn read_poly(&self, input: &PolyInput) -> [f32; 16] {
         let ri = 1 - self.wi;
         match self.pool[input.cable_idx][ri] {
             CableValue::Poly(channels) => channels.map(|v| v * input.scale),
@@ -49,12 +49,12 @@ impl<'a> CablePool<'a> {
     }
 
     /// Write a mono `value` to `output`.
-    pub fn write_mono(&mut self, output: &MonoOutput, value: f64) {
+    pub fn write_mono(&mut self, output: &MonoOutput, value: f32) {
         self.pool[output.cable_idx][self.wi] = CableValue::Mono(value);
     }
 
     /// Write a 16-channel poly `value` to `output`.
-    pub fn write_poly(&mut self, output: &PolyOutput, value: [f64; 16]) {
+    pub fn write_poly(&mut self, output: &PolyOutput, value: [f32; 16]) {
         self.pool[output.cable_idx][self.wi] = CableValue::Poly(value);
     }
 }
@@ -78,13 +78,13 @@ mod tests {
 
     #[test]
     fn read_poly_applies_scale_to_all_channels() {
-        let channels: [f64; 16] = std::array::from_fn(|i| i as f64);
+        let channels: [f32; 16] = std::array::from_fn(|i| i as f32);
         let mut pool = make_pool(&[CableValue::Poly(channels)]);
         let cp = CablePool::new(&mut pool, 0);
         let input = PolyInput { cable_idx: 0, scale: 2.0, connected: true };
         let result = cp.read_poly(&input);
         for (i, &v) in result.iter().enumerate() {
-            assert_eq!(v, i as f64 * 2.0, "channel {i} mismatch");
+            assert_eq!(v, i as f32 * 2.0, "channel {i} mismatch");
         }
     }
 
@@ -105,7 +105,7 @@ mod tests {
     #[test]
     fn write_poly_stores_at_write_index() {
         let mut pool = vec![[CableValue::Poly([0.0; 16]); 2]];
-        let data: [f64; 16] = std::array::from_fn(|i| i as f64 * 0.1);
+        let data: [f32; 16] = std::array::from_fn(|i| i as f32 * 0.1);
         {
             let mut cp = CablePool::new(&mut pool, 0);
             let output = PolyOutput { cable_idx: 0, connected: true };

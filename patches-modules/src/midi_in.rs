@@ -6,7 +6,7 @@ use patches_core::CableKind;
 use patches_core::parameter_map::ParameterMap;
 
 /// Semitones per octave, used to convert MIDI note numbers to V/oct.
-const VOCT_SCALING: f64 = 1.0 / 12.0;
+const VOCT_SCALING: f32 = 1.0 / 12.0;
 
 /// Maximum number of simultaneously held keys tracked in the note stack.
 /// Releasing a key pops back to the most recently pressed key still held.
@@ -89,9 +89,9 @@ pub struct MonoMidiIn {
     /// True during the one sample immediately after a note-on.
     trigger_armed: bool,
     /// Current mod wheel value normalised to [0.0, 1.0].
-    mod_value: f64,
+    mod_value: f32,
     /// Current pitchbend value normalised to [-1.0, 1.0].
-    pitch_value: f64,
+    pitch_value: f32,
     // Output port fields
     out_v_oct: MonoOutput,
     out_trigger: MonoOutput,
@@ -159,7 +159,7 @@ impl Module for MonoMidiIn {
     }
 
     fn process(&mut self, pool: &mut CablePool<'_>) {
-        pool.write_mono(&self.out_v_oct, self.current_note as f64 * VOCT_SCALING);
+        pool.write_mono(&self.out_v_oct, self.current_note as f32 * VOCT_SCALING);
 
         let trigger_val = if self.trigger_armed {
             self.trigger_armed = false;
@@ -210,7 +210,7 @@ impl ReceivesMidi for MonoMidiIn {
             // Control Change
             0xB0 => match b1 {
                 1 => {
-                    self.mod_value = b2 as f64 / 127.0;
+                    self.mod_value = b2 as f32 / 127.0;
                 }
                 64 => {
                     // Sustain pedal: >= 64 = on
@@ -221,7 +221,7 @@ impl ReceivesMidi for MonoMidiIn {
             // Pitch Bend: 14-bit value, LSB in b1, MSB in b2; centre = 8192
             0xE0 => {
                 let raw = ((b2 as u16) << 7) | (b1 as u16);
-                self.pitch_value = (raw as f64 - 8192.0) / 8192.0;
+                self.pitch_value = (raw as f32 - 8192.0) / 8192.0;
             }
             _ => {}
         }
@@ -279,10 +279,10 @@ mod tests {
         module.set_ports(&[], &outputs);
     }
 
-    fn tick(m: &mut Box<dyn Module>, pool: &mut Vec<[CableValue; 2]>, tick_count: usize) -> [f64; 5] {
+    fn tick(m: &mut Box<dyn Module>, pool: &mut Vec<[CableValue; 2]>, tick_count: usize) -> [f32; 5] {
         let wi = tick_count % 2;
         m.process(&mut CablePool::new(pool, wi));
-        let mut out = [0.0f64; 5];
+        let mut out = [0.0f32; 5];
         for (i, v) in out.iter_mut().enumerate() {
             if let CableValue::Mono(val) = pool[i][wi] { *v = val; }
         }
@@ -387,7 +387,7 @@ mod tests {
 
     #[test]
     fn voct_correct_for_various_notes() {
-        let cases: &[(u8, f64)] = &[
+        let cases: &[(u8, f32)] = &[
             (0,  0.0),
             (12, 1.0),
             (60, 5.0),

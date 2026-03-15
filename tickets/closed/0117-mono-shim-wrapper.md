@@ -28,7 +28,7 @@ radius of the trait change during the migration window.
       ```rust
       pub trait MonoModule {
           fn describe() -> ModuleDescriptor where Self: Sized;
-          fn process_mono(&mut self, inputs: &[f64], outputs: &mut [f64]);
+          fn process_mono(&mut self, inputs: &[f32], outputs: &mut [f32]);
           // plus initialise, set_parameter as needed
       }
       ```
@@ -36,7 +36,7 @@ radius of the trait change during the migration window.
       - `describe()` delegates to `M::describe()`.
       - `set_ports()` stores the received `InputPort` and `OutputPort` slices
         internally (e.g. `Vec<InputPort>` / `Vec<OutputPort>` fields).
-      - `process()` pre-reads all connected mono inputs into a `Vec<f64>` scratch
+      - `process()` pre-reads all connected mono inputs into a `Vec<f32>` scratch
         buffer, calls `M::process_mono(&scratch_inputs, &mut scratch_outputs)`,
         then writes each non-`Disconnected` output port back to the pool as
         `CableValue::Mono`. Unconnected outputs are skipped.

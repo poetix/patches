@@ -17,10 +17,10 @@ enum Stage {
 #[derive(Clone, Copy)]
 struct AdsrVoice {
     stage: Stage,
-    level: f64,
-    prev_trigger: f64,
+    level: f32,
+    prev_trigger: f32,
     /// Recomputed from the current level on entry to Release.
-    release_inc: f64,
+    release_inc: f32,
 }
 
 impl AdsrVoice {
@@ -50,11 +50,11 @@ pub struct PolyAdsr {
     voice_count: usize,
     voices: Vec<AdsrVoice>,
     // Shared parameters
-    attack_inc: f64,
-    decay_inc: f64,
-    sustain: f64,
-    release_secs: f64,
-    sample_rate: f64,
+    attack_inc: f32,
+    decay_inc: f32,
+    sustain: f32,
+    release_secs: f32,
+    sample_rate: f32,
     // Port fields
     in_trigger: PolyInput,
     in_gate: PolyInput,
@@ -153,7 +153,7 @@ impl Module for PolyAdsr {
         let trigger_arr = pool.read_poly(&self.in_trigger);
         let gate_arr    = pool.read_poly(&self.in_gate);
 
-        let mut out = [0.0f64; 16];
+        let mut out = [0.0f32; 16];
 
         for i in 0..self.voice_count {
             let v = &mut self.voices[i];
@@ -220,7 +220,7 @@ mod tests {
     use patches_core::{AudioEnvironment, CablePool, CableValue, Module, ModuleShape, Registry};
     use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
-    fn make_adsr(attack: f64, decay: f64, sustain: f64, release: f64, voices: usize) -> Box<dyn Module> {
+    fn make_adsr(attack: f32, decay: f32, sustain: f32, release: f32, voices: usize) -> Box<dyn Module> {
         let mut params = ParameterMap::new();
         params.insert("attack".into(),  ParameterValue::Float(attack));
         params.insert("decay".into(),   ParameterValue::Float(decay));
@@ -258,7 +258,7 @@ mod tests {
         m.set_ports(&inputs, &outputs);
     }
 
-    fn tick_with(m: &mut dyn Module, trig: [f64; 16], gate: [f64; 16], pool: &mut Vec<[CableValue; 2]>, n: usize) -> [f64; 16] {
+    fn tick_with(m: &mut dyn Module, trig: [f32; 16], gate: [f32; 16], pool: &mut Vec<[CableValue; 2]>, n: usize) -> [f32; 16] {
         let wi = n % 2;
         let ri = 1 - wi;
         pool[0][ri] = CableValue::Poly(trig);
@@ -270,8 +270,8 @@ mod tests {
         }
     }
 
-    fn arr(val: f64, voice: usize) -> [f64; 16] {
-        let mut a = [0.0f64; 16];
+    fn arr(val: f32, voice: usize) -> [f32; 16] {
+        let mut a = [0.0f32; 16];
         a[voice] = val;
         a
     }

@@ -26,10 +26,10 @@ pub struct ModulePool {
     sink_slot: Option<usize>,
     /// Cached left-channel output from the most recent [`process`](Self::process)
     /// call on the sink slot. `0.0` when no sink is registered.
-    last_sink_left: f64,
+    last_sink_left: f32,
     /// Cached right-channel output from the most recent [`process`](Self::process)
     /// call on the sink slot. `0.0` when no sink is registered.
-    last_sink_right: f64,
+    last_sink_right: f32,
 }
 
 impl ModulePool {
@@ -138,7 +138,7 @@ impl ModulePool {
     ///
     /// Returns `0.0` if no sink is registered. This is a plain field read —
     /// no vtable dispatch.
-    pub fn read_sink_left(&self) -> f64 {
+    pub fn read_sink_left(&self) -> f32 {
         self.last_sink_left
     }
 
@@ -146,7 +146,7 @@ impl ModulePool {
     ///
     /// Returns `0.0` if no sink is registered. This is a plain field read —
     /// no vtable dispatch.
-    pub fn read_sink_right(&self) -> f64 {
+    pub fn read_sink_right(&self) -> f32 {
         self.last_sink_right
     }
 }
@@ -168,13 +168,13 @@ mod tests {
     /// Writes a constant value to cable slot 0 on each process call.
     struct ConstSource {
         id: InstanceId,
-        value: f64,
+        value: f32,
         desc: ModuleDescriptor,
         out: MonoOutput,
     }
 
     impl ConstSource {
-        fn new(value: f64) -> Self {
+        fn new(value: f32) -> Self {
             Self {
                 id: InstanceId::next(),
                 value,
@@ -218,7 +218,7 @@ mod tests {
     /// Implements [`Sink`] so the pool cache can be exercised.
     struct RecordingSink {
         id: InstanceId,
-        last: f64,
+        last: f32,
         desc: ModuleDescriptor,
         input: MonoInput,
     }
@@ -266,8 +266,8 @@ mod tests {
     }
 
     impl Sink for RecordingSink {
-        fn last_left(&self) -> f64 { self.last }
-        fn last_right(&self) -> f64 { self.last }
+        fn last_left(&self) -> f32 { self.last }
+        fn last_right(&self) -> f32 { self.last }
     }
 
     fn make_buf_pool(size: usize) -> Vec<[CableValue; 2]> {

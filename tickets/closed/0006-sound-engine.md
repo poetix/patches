@@ -28,6 +28,6 @@ Implement a sound engine in `patches-engine` that takes an `ExecutionPlan` and r
 
 **Audio callback constraints:** CPAL's output callback must be real-time safe. The `ExecutionPlan` and all `SampleBuffer`s are pre-allocated; the callback should only read/write pre-existing memory. If the engine needs to receive a new `ExecutionPlan` (hot-reload), use a lock-free channel (e.g. `triple-buffer` or an atomic swap) to hand it in between ticks — never inside the callback itself.
 
-**Output format:** Request an `f32` output stream (CPAL's most portable format); convert from `f64` at the point of writing to the hardware buffer.
+**Output format:** Request an `f32` output stream (CPAL's most portable format); convert from `f32` at the point of writing to the hardware buffer.
 
 **Stopping:** `stop` should join or signal the audio thread cleanly. The engine should be restartable with a new `ExecutionPlan` after stopping.

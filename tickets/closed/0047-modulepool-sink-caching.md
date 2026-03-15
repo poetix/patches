@@ -12,18 +12,18 @@ created: 2026-03-03
 awareness of which slot holds the `Sink` module. Callers had to call `get()` to
 retrieve a module reference, call `as_sink()` on it, and read its output — placing
 vtable dispatch in the hot audio path. This ticket removes `get`, tracks the sink slot
-index directly on `ModulePool`, and caches the sink's last output as plain `f64` fields
+index directly on `ModulePool`, and caches the sink's last output as plain `f32` fields
 updated inside `process()`.
 
 ## Acceptance criteria
 
 - [x] `get` method removed from `ModulePool`.
-- [x] `ModulePool` gains `sink_slot: Option<usize>`, `last_sink_left: f64`, `last_sink_right: f64` fields.
+- [x] `ModulePool` gains `sink_slot: Option<usize>`, `last_sink_left: f32`, `last_sink_right: f32` fields.
 - [x] `install()` detects sinks at install time via `module.as_sink().is_some()` and records the slot; clears registration if a non-sink replaces the registered sink slot.
 - [x] `tombstone()` clears `sink_slot` and zeros the cache when the sink slot is tombstoned.
 - [x] `process()` updates the cache after processing the sink slot — a single vtable call per tick, not per read.
 - [x] `has_sink() -> bool` added (distinguishes "no sink" from "sink produced 0.0").
-- [x] `read_sink_left() -> f64` and `read_sink_right() -> f64` are plain field reads — no vtable dispatch.
+- [x] `read_sink_left() -> f32` and `read_sink_right() -> f32` are plain field reads — no vtable dispatch.
 - [x] `get()` removed; `ModulePool` exposes no method that returns a module reference — the pool boundary is opaque to callers.
 - [x] Tests updated to cover `has_sink`, `read_sink_left/right`, `tombstone_clears_sink`, `non_sink_install_does_not_register_sink`, `sink_install_registers_sink`, `read_sink_reflects_last_processed_value`.
 - [x] `cargo clippy` clean, all tests pass.

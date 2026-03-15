@@ -11,7 +11,7 @@ use crate::common::frequency::{C0_FREQ, UnitPhaseAccumulator, FMMode};
 ///
 /// Returns a correction value that smooths the discontinuity near `t = 0` (rising)
 /// and `t = 1` (falling) transitions. Only effective when `dt < 0.5`.
-pub(crate) fn polyblep(t: f64, dt: f64) -> f64 {
+pub(crate) fn polyblep(t: f32, dt: f32) -> f32 {
     if t < dt {
         let t = t / dt;
         2.0 * t - t * t - 1.0
@@ -189,11 +189,11 @@ mod tests {
     use patches_core::{AudioEnvironment, CablePool, CableValue, Module, ModuleShape, Registry};
     use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
-    fn make_osc(frequency: f64) -> Box<dyn Module> {
+    fn make_osc(frequency: f32) -> Box<dyn Module> {
         make_osc_sr(frequency, 44100.0)
     }
 
-    fn make_osc_sr(frequency: f64, sample_rate: f64) -> Box<dyn Module> {
+    fn make_osc_sr(frequency: f32, sample_rate: f32) -> Box<dyn Module> {
         let mut params = ParameterMap::new();
         params.insert("frequency".into(), ParameterValue::Float(frequency));
         let mut r = Registry::new();
@@ -247,9 +247,9 @@ mod tests {
 
     #[test]
     fn sine_output_completes_full_cycle_in_period_samples() {
-        let frequency = 1.0_f64;
+        let frequency = 1.0_f32;
         let period = 100_usize;
-        let sample_rate = (C0_FREQ + frequency) * period as f64;
+        let sample_rate = (C0_FREQ + frequency) * period as f32;
 
         let mut osc = make_osc_sr(frequency, sample_rate);
         set_ports_outputs_only(&mut osc);
@@ -276,9 +276,9 @@ mod tests {
 
     #[test]
     fn triangle_output_completes_full_cycle() {
-        let frequency = 1.0_f64;
+        let frequency = 1.0_f32;
         let period = 100_usize;
-        let sample_rate = (C0_FREQ + frequency) * period as f64;
+        let sample_rate = (C0_FREQ + frequency) * period as f32;
 
         let mut osc = make_osc_sr(frequency, sample_rate);
         set_ports_outputs_only(&mut osc);
@@ -305,9 +305,9 @@ mod tests {
 
     #[test]
     fn sawtooth_polyblep_smooths_transition() {
-        let frequency = 1.0_f64;
+        let frequency = 1.0_f32;
         let period = 100_usize;
-        let sample_rate = (C0_FREQ + frequency) * period as f64;
+        let sample_rate = (C0_FREQ + frequency) * period as f32;
 
         let mut osc = make_osc_sr(frequency, sample_rate);
         set_ports_outputs_only(&mut osc);
@@ -324,9 +324,9 @@ mod tests {
 
     #[test]
     fn sawtooth_non_transition_samples_match_formula() {
-        let frequency = 1.0_f64;
+        let frequency = 1.0_f32;
         let period = 100_usize;
-        let sample_rate = (C0_FREQ + frequency) * period as f64;
+        let sample_rate = (C0_FREQ + frequency) * period as f32;
 
         let mut osc = make_osc_sr(frequency, sample_rate);
         set_ports_outputs_only(&mut osc);
@@ -337,7 +337,7 @@ mod tests {
             let wi = i % 2;
             osc.process(&mut CablePool::new(&mut pool, wi));
             if let CableValue::Mono(v) = pool[6][wi] {
-                let phase = i as f64 / period as f64;
+                let phase = i as f32 / period as f32;
                 let expected = 2.0 * phase - 1.0;
                 assert!(
                     (v - expected).abs() < 1e-10,
@@ -349,9 +349,9 @@ mod tests {
 
     #[test]
     fn square_polyblep_at_transition_not_exactly_plus_minus_one() {
-        let frequency = 1.0_f64;
+        let frequency = 1.0_f32;
         let period = 100_usize;
-        let sample_rate = (C0_FREQ + frequency) * period as f64;
+        let sample_rate = (C0_FREQ + frequency) * period as f32;
 
         let mut osc = make_osc_sr(frequency, sample_rate);
         set_ports_outputs_only(&mut osc);
@@ -379,9 +379,9 @@ mod tests {
 
     #[test]
     fn square_duty_cycle_responds_to_pulse_width_input() {
-        let frequency = 1.0_f64;
+        let frequency = 1.0_f32;
         let period = 100_usize;
-        let sample_rate = (C0_FREQ + frequency) * period as f64;
+        let sample_rate = (C0_FREQ + frequency) * period as f32;
 
         let mut osc = make_osc_sr(frequency, sample_rate);
         // Connect pulse_width input and square output

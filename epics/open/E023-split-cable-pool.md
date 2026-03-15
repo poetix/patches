@@ -29,10 +29,10 @@ pub struct CablePool<'a> {
 }
 
 impl<'a> CablePool<'a> {
-    pub fn read_mono(&self, input: &MonoInput) -> f64;
-    pub fn read_poly(&self, input: &PolyInput) -> [f64; 16];
-    pub fn write_mono(&mut self, output: &MonoOutput, value: f64);
-    pub fn write_poly(&mut self, output: &PolyOutput, value: [f64; 16]);
+    pub fn read_mono(&self, input: &MonoInput) -> f32;
+    pub fn read_poly(&self, input: &PolyInput) -> [f32; 16];
+    pub fn write_mono(&mut self, output: &MonoOutput, value: f32);
+    pub fn write_poly(&mut self, output: &PolyOutput, value: [f32; 16]);
 }
 
 fn process(&mut self, pool: &mut CablePool<'_>);

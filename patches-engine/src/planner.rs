@@ -13,7 +13,7 @@ use crate::midi::{AudioClock, EventQueueConsumer};
 ///
 /// 4096 slots accommodate up to 4096 concurrent output ports, which is more
 /// than sufficient for all expected patch sizes. Each slot is 16 bytes
-/// (`[f64; 2]`), so the pool is 64 KiB.
+/// (`[f32; 2]`), so the pool is 64 KiB.
 const DEFAULT_POOL_CAPACITY: usize = 4096;
 
 /// Converts a [`ModuleGraph`] into an [`ExecutionPlan`] with stable buffer and
@@ -236,7 +236,7 @@ impl PatchEngine {
     /// Return the sample rate established when the engine was opened.
     ///
     /// `None` if [`start`](Self::start) has not yet been called.
-    pub fn sample_rate(&self) -> Option<f64> {
+    pub fn sample_rate(&self) -> Option<f32> {
         self.env.as_ref().map(|e| e.sample_rate)
     }
 
@@ -298,7 +298,7 @@ mod tests {
         PortRef { name, index: 0 }
     }
 
-    fn simple_graph(freq: f64) -> ModuleGraph {
+    fn simple_graph(freq: f32) -> ModuleGraph {
         let mut graph = ModuleGraph::new();
         let osc_desc = Oscillator::describe(&ModuleShape { channels: 0, length: 0 });
         let out_desc = AudioOut::describe(&ModuleShape { channels: 0, length: 0 });

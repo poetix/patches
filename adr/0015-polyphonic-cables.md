@@ -60,27 +60,27 @@ time any module runs; no runtime type coercion or broadcast is ever needed.
 
 ### Cable storage
 
-A cable carries either a single `f64` (mono) or a fixed array of up to 16 `f64`
+A cable carries either a single `f32` (mono) or a fixed array of up to 16 `f32`
 values (poly). At the storage level this is an inline enum, not a trait object, to
 avoid heap allocation and pointer chasing:
 
 ```rust
 pub enum CableValue {
-    Mono(f64),
-    Poly([f64; 16]),
+    Mono(f32),
+    Poly([f32; 16]),
 }
 ```
 
 The buffer pool becomes `Vec<[CableValue; 2]>` — the same ping-pong pair structure
-as today, but each slot now holds a `CableValue` rather than a bare `f64`. The
-`[CableValue; 2]` size (≈272 bytes) is larger than the current `[f64; 2]` (16
+as today, but each slot now holds a `CableValue` rather than a bare `f32`. The
+`[CableValue; 2]` size (≈272 bytes) is larger than the current `[f32; 2]` (16
 bytes), but cable count is small relative to sample count and the total pool fits
 comfortably in L1/L2.
 
 ### Port objects stored on the module
 
-`Module::process` currently receives pre-gathered `&[f64]` inputs and writes to
-`&mut [f64]` outputs. Under this design the signature is reduced to just the pool
+`Module::process` currently receives pre-gathered `&[f32]` inputs and writes to
+`&mut [f32]` outputs. Under this design the signature is reduced to just the pool
 slices:
 
 ```rust
@@ -109,7 +109,7 @@ connected flag:
 ```rust
 pub struct InputPort {
     cable_idx: usize,  // index into the read half of the pool
-    scale: f64,        // 1.0 for unscaled connections
+    scale: f32,        // 1.0 for unscaled connections
     connected: bool,
 }
 
@@ -118,14 +118,14 @@ impl InputPort {
 
     /// For ports declared `CableKind::Mono`. Panics in debug if the cable is poly
     /// (which graph validation makes unreachable in release builds).
-    pub fn read_mono(&self, pool: &[CableValue]) -> f64 {
+    pub fn read_mono(&self, pool: &[CableValue]) -> f32 {
         let CableValue::Mono(v) = &pool[self.cable_idx] else { unreachable!() };
         v * self.scale
     }
 
-    /// For ports declared `CableKind::Poly`. Returns a stack-allocated [f64; 16];
+    /// For ports declared `CableKind::Poly`. Returns a stack-allocated [f32; 16];
     /// no heap allocation. `std::array::from_fn` constructs the array in place.
-    pub fn read_poly(&self, pool: &[CableValue]) -> [f64; 16] {
+    pub fn read_poly(&self, pool: &[CableValue]) -> [f32; 16] {
         let CableValue::Poly(vs) = &pool[self.cable_idx] else { unreachable!() };
         std::array::from_fn(|i| vs[i] * self.scale)
     }
@@ -189,7 +189,7 @@ a new class of risk. The planner's plan-accept sequence is:
 4. Begin ticking under the new plan.
 
 For poly cables, scale is a uniform gain across all 16 channels — one multiply per
-voice, a loop the compiler can auto-vectorize. `[f64; 16]` is returned by value;
+voice, a loop the compiler can auto-vectorize. `[f32; 16]` is returned by value;
 the 128 bytes of storage come from the caller's stack frame (sret convention), not
 the heap. On ARM64, 16 doubles fit in 8 NEON registers; if the result feeds
 directly into a tight inner loop the compiler may keep the values in registers
@@ -217,8 +217,8 @@ both `&pool_r` and `&mut pool_w` can be held simultaneously without aliasing.
 To avoid rewriting all modules at once, a `MonoShim<M>` wrapper type is provided
 that stores port objects in internal `Vec<InputPort>` / `Vec<OutputPort>` fields,
 implements `set_ports`, and provides an adapter `process()` that pre-reads all
-connected mono inputs into a `[f64]` scratch buffer and calls the old
-`process_mono(&[f64], &mut [f64])` signature. Modules using the old convention
+connected mono inputs into a `[f32]` scratch buffer and calls the old
+`process_mono(&[f32], &mut [f32])` signature. Modules using the old convention
 continue to work correctly on mono-only signals. They receive zero for channels
 beyond channel 0 on a poly input and their output is emitted as mono.
 
@@ -232,11 +232,11 @@ input:
 ```rust
 fn process(&mut self, pool_read: &[CableValue], pool_write: &mut [CableValue]) {
     match self.voct_in.read_poly(pool_read) {
-        // read_poly returns [f64; 16]; mono case is handled via the mono path
+        // read_poly returns [f32; 16]; mono case is handled via the mono path
     }
     // or, for a module that handles both:
     if self.voct_in.is_connected() {
-        let vs: [f64; 16] = self.voct_in.read_poly(pool_read);
+        let vs: [f32; 16] = self.voct_in.read_poly(pool_read);
         for (ch, v) in vs.iter().enumerate() {
             // per-voice arithmetic — tight loop, compiler-vectorizable
         }
@@ -259,7 +259,7 @@ cables:
   - from: oscillator.out   to: filter.in
 ```
 
-A connection with `poly: N` creates a `Poly([f64; 16])` cable (zero-padded for
+A connection with `poly: N` creates a `Poly([f32; 16])` cable (zero-padded for
 voices not yet active). Connections without `poly` create `Mono` cables. The
 planner allocates the buffer pool slot for the declared cable type.
 
@@ -272,7 +272,7 @@ planner allocates the buffer pool slot for the declared cable type.
   Tick overhead (currently ~36% of audio CPU per the March 2026 profiling run)
   does not grow with voice count.
 
-- **Per-voice arithmetic is auto-vectorizable.** Tight loops over `[f64; 16]`
+- **Per-voice arithmetic is auto-vectorizable.** Tight loops over `[f32; 16]`
   arrays — sine table lookups, phase advance, envelope ramping — are the kind
   of code that LLVM auto-vectorizes using NEON on ARM without source-level SIMD
   intrinsics.
@@ -308,7 +308,7 @@ planner allocates the buffer pool slot for the declared cable type.
   the core trait. The `MonoShim` wrapper reduces blast radius, but poly-aware
   modules must be rewritten.
 
-- **Buffer pool slots are larger.** `[CableValue; 2]` ≈ 272 bytes vs `[f64; 2]`
+- **Buffer pool slots are larger.** `[CableValue; 2]` ≈ 272 bytes vs `[f32; 2]`
   = 16 bytes. For a 64-cable graph, the pool grows from 1 KB to ~17 KB — still
   L1-resident, but a 17× increase. Mixed mono/poly graphs can use a two-tier pool
   (separate `Vec` for mono and poly slots) if this becomes a concern.
@@ -392,7 +392,7 @@ vtable dispatch per `read()`. For audio, where cable count is small but read cou
 is 48 000 per second per cable, the per-read vtable cost is unacceptable.
 Rejected in favour of the inline enum.
 
-### Pre-gather into `[f64; 16]` scratch per input port
+### Pre-gather into `[f32; 16]` scratch per input port
 
 Keep the existing gather-before / scatter-after structure but expand scratch
 buffers to hold 16-channel data. Avoids changing the `process()` signature.

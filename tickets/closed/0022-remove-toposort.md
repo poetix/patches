@@ -10,7 +10,7 @@ created: 2026-03-01
 
 `build_patch` currently runs Kahn's topological sort over the module graph before
 assembling the `ExecutionPlan`. The sort is unnecessary: `ExecutionPlan::tick()`
-uses a two-slot ring buffer (`[f64; 2]` per cable, alternating `wi`/`ri`) that
+uses a two-slot ring buffer (`[f32; 2]` per cable, alternating `wi`/`ri`) that
 gives every module a 1-sample-delayed view of all its inputs regardless of
 processing order. Any slot ordering produces correct output. This is also stated
 explicitly in CLAUDE.md: *"The 1-sample cable delay means modules can run in any

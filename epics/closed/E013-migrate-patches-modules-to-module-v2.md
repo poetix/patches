@@ -55,7 +55,7 @@ fn prepare(audio_environment: &AudioEnvironment, descriptor: ModuleDescriptor) -
 fn update_validated_parameters(&mut self, params: &ParameterMap) -> Result<(), BuildError>;
 fn descriptor(&self) -> &ModuleDescriptor;
 fn instance_id(&self) -> InstanceId;
-fn process(&mut self, inputs: &[f64], outputs: &mut [f64]);
+fn process(&mut self, inputs: &[f32], outputs: &mut [f32]);
 fn as_any(&self) -> &dyn std::any::Any;
 // defaults: receive_signal (no-op), as_sink (None), update_parameters (validates then delegates)
 ```

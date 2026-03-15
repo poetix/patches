@@ -66,7 +66,7 @@ impl Module for PolyToMono {
 
     fn process(&mut self, pool: &mut CablePool<'_>) {
         let channels = pool.read_poly(&self.in_poly);
-        let sum: f64 = channels[..self.voice_count].iter().sum();
+        let sum: f32 = channels[..self.voice_count].iter().sum();
         pool.write_mono(&self.out_mono, sum);
     }
 
@@ -103,7 +103,7 @@ mod tests {
     fn sums_active_voices_only() {
         let mut m = make_collapse(4);
         set_ports_for_test(&mut m);
-        let mut channels = [0.0f64; 16];
+        let mut channels = [0.0f32; 16];
         channels[0] = 0.25;
         channels[1] = 0.25;
         channels[2] = 0.25;
@@ -117,7 +117,7 @@ mod tests {
         pool[0][1] = CableValue::Poly(channels);
         m.process(&mut CablePool::new(&mut pool, 0));
         match pool[1][0] {
-            CableValue::Mono(v) => assert!((v - 1.0).abs() < f64::EPSILON, "expected 1.0, got {v}"),
+            CableValue::Mono(v) => assert!((v - 1.0).abs() < f32::EPSILON, "expected 1.0, got {v}"),
             _ => panic!("expected Mono"),
         }
     }

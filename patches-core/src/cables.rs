@@ -1,4 +1,4 @@
-/// The arity of a cable: mono (single f64) or poly (16-channel f64 array).
+/// The arity of a cable: mono (single f32) or poly (16-channel f32 array).
 #[derive(Clone, Debug)]
 pub enum CableKind {
     Mono,
@@ -9,8 +9,8 @@ pub enum CableKind {
 /// allocation is required.
 #[derive(Clone, Copy, Debug)]
 pub enum CableValue {
-    Mono(f64),
-    Poly([f64; 16]),
+    Mono(f32),
+    Poly([f32; 16]),
 }
 
 // ── Concrete port structs ──────────────────────────────────────────────────
@@ -20,7 +20,7 @@ pub enum CableValue {
 #[derive(Clone, Debug, PartialEq)]
 pub struct MonoInput {
     pub cable_idx: usize,
-    pub scale: f64,
+    pub scale: f32,
     pub connected: bool,
 }
 
@@ -54,7 +54,7 @@ impl MonoInput {
     /// # Panics
     /// Panics (via `unreachable!`) in debug builds if the pool slot holds a
     /// `CableValue::Poly` value — a well-formed graph never produces this.
-    pub fn read(&self, pool: &[CableValue]) -> f64 {
+    pub fn read(&self, pool: &[CableValue]) -> f32 {
         match pool[self.cable_idx] {
             CableValue::Mono(v) => v * self.scale,
             CableValue::Poly(_) => unreachable!(
@@ -68,7 +68,7 @@ impl MonoInput {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PolyInput {
     pub cable_idx: usize,
-    pub scale: f64,
+    pub scale: f32,
     pub connected: bool,
 }
 
@@ -94,12 +94,12 @@ impl PolyInput {
 
     /// Read all 16 channels from `pool`, applying `self.scale` to each.
     ///
-    /// Returns `[f64; 16]` by value (stack-allocated, no heap allocation).
+    /// Returns `[f32; 16]` by value (stack-allocated, no heap allocation).
     ///
     /// # Panics
     /// Panics (via `unreachable!`) in debug builds if the pool slot holds a
     /// `CableValue::Mono` value — a well-formed graph never produces this.
-    pub fn read(&self, pool: &[CableValue]) -> [f64; 16] {
+    pub fn read(&self, pool: &[CableValue]) -> [f32; 16] {
         match pool[self.cable_idx] {
             CableValue::Poly(channels) => channels.map(|v| v * self.scale),
             CableValue::Mono(_) => unreachable!(
@@ -131,7 +131,7 @@ impl MonoOutput {
     }
 
     /// Write `value` into `pool` at `self.cable_idx`.
-    pub fn write(&self, pool: &mut [CableValue], value: f64) {
+    pub fn write(&self, pool: &mut [CableValue], value: f32) {
         pool[self.cable_idx] = CableValue::Mono(value);
     }
 }
@@ -158,7 +158,7 @@ impl PolyOutput {
     }
 
     /// Write a 16-channel `value` into `pool` at `self.cable_idx`.
-    pub fn write(&self, pool: &mut [CableValue], value: [f64; 16]) {
+    pub fn write(&self, pool: &mut [CableValue], value: [f32; 16]) {
         pool[self.cable_idx] = CableValue::Poly(value);
     }
 }
@@ -235,11 +235,11 @@ impl OutputPort {
 mod tests {
     use super::*;
 
-    fn mono_pool(value: f64) -> Vec<CableValue> {
+    fn mono_pool(value: f32) -> Vec<CableValue> {
         vec![CableValue::Mono(value)]
     }
 
-    fn poly_pool(channels: [f64; 16]) -> Vec<CableValue> {
+    fn poly_pool(channels: [f32; 16]) -> Vec<CableValue> {
         vec![CableValue::Poly(channels)]
     }
 
@@ -263,12 +263,12 @@ mod tests {
 
     #[test]
     fn poly_input_read_applies_scale_to_all_channels() {
-        let channels: [f64; 16] = std::array::from_fn(|i| i as f64);
+        let channels: [f32; 16] = std::array::from_fn(|i| i as f32);
         let pool = poly_pool(channels);
         let port = PolyInput { cable_idx: 0, scale: 2.0, connected: true };
         let result = port.read(&pool);
         for (i, &v) in result.iter().enumerate() {
-            assert_eq!(v, i as f64 * 2.0, "channel {i} mismatch");
+            assert_eq!(v, i as f32 * 2.0, "channel {i} mismatch");
         }
     }
 
@@ -315,7 +315,7 @@ mod tests {
     fn poly_output_write_round_trip() {
         let mut pool = vec![CableValue::Poly([0.0; 16])];
         let port = PolyOutput { cable_idx: 0, connected: true };
-        let data: [f64; 16] = std::array::from_fn(|i| i as f64 * 0.1);
+        let data: [f32; 16] = std::array::from_fn(|i| i as f32 * 0.1);
         port.write(&mut pool, data);
         match pool[0] {
             CableValue::Poly(channels) => assert_eq!(channels, data),

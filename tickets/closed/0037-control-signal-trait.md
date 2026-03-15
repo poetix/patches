@@ -21,7 +21,7 @@ no-op so that existing modules need no changes.
       ```rust
       pub enum ControlSignal {
           /// A single named float parameter (e.g. frequency, gain).
-          Float { name: &'static str, value: f64 },
+          Float { name: &'static str, value: f32 },
           // Further variants (OSC bundles, MIDI, etc.) added as needed.
       }
       ```
@@ -55,7 +55,7 @@ need to store a signal value can do so directly; there is no need to clone.
 
 **`Send` on `ControlSignal`:** `ControlSignal` must implement `Send` so it can be
 queued in the engine's ring buffer (T-0038). Ensure no variant holds non-Send types
-(e.g. `Rc`). The `&'static str` in `Float` is `Send`; `f64` is `Send`.
+(e.g. `Rc`). The `&'static str` in `Float` is `Send`; `f32` is `Send`.
 
 **`name` field in `Float`:** Using `&'static str` for the parameter name keeps the
 variant allocation-free. Module implementations match on string literals (`"freq"`,

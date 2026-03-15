@@ -7,12 +7,12 @@ use super::clock::ClockAnchor;
 ///
 /// This is pure logic with no side effects.
 pub struct EventScheduler {
-    sample_rate: f64,
+    sample_rate: f32,
     lookahead_samples: u64,
 }
 
 impl EventScheduler {
-    pub fn new(sample_rate: f64, lookahead_samples: u64) -> Self {
+    pub fn new(sample_rate: f32, lookahead_samples: u64) -> Self {
         Self {
             sample_rate,
             lookahead_samples,
@@ -29,10 +29,10 @@ impl EventScheduler {
     /// point the result is clamped to `anchor.sample_count`.
     pub fn stamp(&self, anchor: &ClockAnchor, event_wall_time: Instant) -> u64 {
         let elapsed_secs = if event_wall_time >= anchor.playback_wall_time {
-            (event_wall_time - anchor.playback_wall_time).as_secs_f64()
+            (event_wall_time - anchor.playback_wall_time).as_secs_f32()
         } else {
             // Negative: event arrived before the anchor's reference point.
-            -((anchor.playback_wall_time - event_wall_time).as_secs_f64())
+            -((anchor.playback_wall_time - event_wall_time).as_secs_f32())
         };
 
         let elapsed_samples = (elapsed_secs * self.sample_rate).round() as i64;

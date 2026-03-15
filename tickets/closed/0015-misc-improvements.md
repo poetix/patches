@@ -35,7 +35,7 @@ A collection of minor improvements that individually don't warrant their own tic
 
 ### Flatten cable buffer pool (efficiency, parallelism-readiness)
 
-- [ ] Replace `Vec<SampleBuffer>` in `ExecutionPlan` with a flat `Vec<[f64; 2]>` and a single `write_phase: bool` (see [ADR-0001](../../adr/0001-flatten-cable-buffer-pool.md))
+- [ ] Replace `Vec<SampleBuffer>` in `ExecutionPlan` with a flat `Vec<[f32; 2]>` and a single `write_phase: bool` (see [ADR-0001](../../adr/0001-flatten-cable-buffer-pool.md))
 - [ ] Remove the `SampleBuffer` type from `patches-core`
 - [ ] Update builder to allocate into the flat pool
 - [ ] Add helper methods or inline accessors for read/write clarity

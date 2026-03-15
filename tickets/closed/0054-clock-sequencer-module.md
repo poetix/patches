@@ -16,7 +16,7 @@ phase-locked. Supports both simple (quavers_per_beat=2) and compound
 
 ## Acceptance criteria
 
-- [ ] `ClockSequencer::new(bpm: f64, beats_per_bar: u32, quavers_per_beat: u32)` compiles.
+- [ ] `ClockSequencer::new(bpm: f32, beats_per_bar: u32, quavers_per_beat: u32)` compiles.
 - [ ] Four output ports: `bar/0`, `beat/1`, `quaver/2`, `semiquaver/3`.
 - [ ] Outputs are `0.0` on all other samples and `1.0` on the one sample at each boundary.
 - [ ] `bar` fires simultaneously with a `beat` every `beats_per_bar` beats.
@@ -27,7 +27,7 @@ phase-locked. Supports both simple (quavers_per_beat=2) and compound
 
 ## Notes
 
-All subdivision outputs derive from one `beat_phase: f64 ∈ [0.0, 1.0)` accumulator:
+All subdivision outputs derive from one `beat_phase: f32 ∈ [0.0, 1.0)` accumulator:
 
 ```
 beat_phase += bpm / (60.0 * sample_rate);
@@ -39,8 +39,8 @@ the increment:
 ```
 // semiquaver
 let buckets = quavers_per_beat * 2;
-let old_bucket = (old_phase * buckets as f64) as u64;
-let new_bucket = (new_phase * buckets as f64) as u64;
+let old_bucket = (old_phase * buckets as f32) as u64;
+let new_bucket = (new_phase * buckets as f32) as u64;
 if new_bucket > old_bucket || beat_fired { semiquaver = 1.0; }
 ```
 

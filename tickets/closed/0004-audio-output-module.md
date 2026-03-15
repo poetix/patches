@@ -14,9 +14,9 @@ Implement an `AudioOut` module that acts as the sink node in a patch graph. It h
 ## Acceptance criteria
 
 - [ ] `AudioOut` struct in `patches-modules` implementing `Module`
-- [ ] Input ports: `"left"` and `"right"` (`f64` audio signals)
+- [ ] Input ports: `"left"` and `"right"` (`f32` audio signals)
 - [ ] No output ports
-- [ ] Each call to `process` stores the received left/right sample values internally, accessible via `last_left() -> f64` and `last_right() -> f64` (or equivalent)
+- [ ] Each call to `process` stores the received left/right sample values internally, accessible via `last_left() -> f32` and `last_right() -> f32` (or equivalent)
 - [ ] The engine (0006) retrieves the stored samples after each tick to write to the hardware buffer — `AudioOut` does not call any audio API itself
 - [ ] `cargo test -p patches-modules` passes
 - [ ] `cargo clippy` is clean

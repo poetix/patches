@@ -31,11 +31,11 @@ The processing flow established in T-0094 requires no modification.
   ```
 
 - [ ] Internal types (not part of the public API):
-  - `AllPassSection { a: f64, x1: f64, y1: f64 }` — `fn tick(&mut self, x: f64) -> f64`
+  - `AllPassSection { a: f32, x1: f32, y1: f32 }` — `fn tick(&mut self, x: f32) -> f32`
     implements `y = a*(x - y1) + x1; x1 = x; y1 = y; y`.
   - `HalfBandStage` — two branches of `M` `AllPassSection` values each,
-    plus `branch0_last: f64` and `phase: u8`. `fn push(&mut self, x: f64) ->
-    Option<f64>` returns `Some((branch0_last + branch1_out) / 2.0)` on odd
+    plus `branch0_last: f32` and `phase: u8`. `fn push(&mut self, x: f32) ->
+    Option<f32>` returns `Some((branch0_last + branch1_out) / 2.0)` on odd
     calls and `None` on even calls.
 
 - [ ] `Decimator` internally uses `HalfBandStage` cascade(s): one stage for

@@ -123,12 +123,12 @@ impl HeadlessEngine {
     }
 
     /// Left-channel output of the registered sink after the most recent tick.
-    pub fn last_left(&self) -> f64 {
+    pub fn last_left(&self) -> f32 {
         self.module_pool.read_sink_left()
     }
 
     /// Right-channel output of the registered sink after the most recent tick.
-    pub fn last_right(&self) -> f64 {
+    pub fn last_right(&self) -> f32 {
         self.module_pool.read_sink_right()
     }
 

@@ -18,11 +18,11 @@ pub struct Glide {
     instance_id: InstanceId,
     descriptor: ModuleDescriptor,
     /// Current smoothed V/OCT value (C2 = 0.0).
-    voct: f64,
-    alpha: f64,
-    beta: f64,
-    glide_ms: f64,
-    sample_rate: f64,
+    voct: f32,
+    alpha: f32,
+    beta: f32,
+    glide_ms: f32,
+    sample_rate: f32,
     // Port fields
     in_port: MonoInput,
     out_port: MonoOutput,
@@ -38,7 +38,7 @@ impl Glide {
         }
     }
 
-    fn set_glide_ms(&mut self, glide_ms: f64) {
+    fn set_glide_ms(&mut self, glide_ms: f32) {
         self.glide_ms = glide_ms;
         self.update_beta();
     }
@@ -117,11 +117,11 @@ mod tests {
     use patches_core::{AudioEnvironment, CablePool, CableValue, Module, ModuleShape, Registry};
     use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
-    fn make_glide(glide_ms: f64) -> Box<dyn Module> {
+    fn make_glide(glide_ms: f32) -> Box<dyn Module> {
         make_glide_sr(glide_ms, 44100.0)
     }
 
-    fn make_glide_sr(glide_ms: f64, sample_rate: f64) -> Box<dyn Module> {
+    fn make_glide_sr(glide_ms: f32, sample_rate: f32) -> Box<dyn Module> {
         let mut params = ParameterMap::new();
         params.insert("glide_ms".into(), ParameterValue::Float(glide_ms));
         let mut r = Registry::new();
@@ -149,8 +149,8 @@ mod tests {
     fn output_tracks_input_with_glide() {
         let mut g = make_glide_sr(500.0, 44100.0);
         set_ports_for_test(&mut g);
-        let start_voct = 1.0_f64;
-        let target_voct = 2.0_f64;
+        let start_voct = 1.0_f32;
+        let target_voct = 2.0_f32;
 
         let mut pool = make_pool(2);
         pool[0][1] = CableValue::Mono(start_voct);
@@ -175,7 +175,7 @@ mod tests {
     fn zero_glide_ms_tracks_instantly() {
         let mut g = make_glide_sr(0.0, 44100.0);
         set_ports_for_test(&mut g);
-        let target_voct = 2.0_f64;
+        let target_voct = 2.0_f32;
         let mut pool = make_pool(2);
         pool[0][1] = CableValue::Mono(target_voct);
         g.process(&mut CablePool::new(&mut pool, 0));

@@ -6,8 +6,8 @@ use super::PlanError;
 
 // ── Type aliases ──────────────────────────────────────────────────────────────
 
-type EdgeList = Vec<(NodeId, String, u32, NodeId, String, u32, f64)>;
-type InputBufferMap = HashMap<(NodeId, String, u32), (usize, f64)>;
+type EdgeList = Vec<(NodeId, String, u32, NodeId, String, u32, f32)>;
+type InputBufferMap = HashMap<(NodeId, String, u32), (usize, f32)>;
 
 // ── GraphIndex ────────────────────────────────────────────────────────────────
 
@@ -92,7 +92,7 @@ impl<'a> ResolvedGraph<'a> {
         &self,
         desc: &ModuleDescriptor,
         node_id: &NodeId,
-    ) -> Vec<(usize, f64)> {
+    ) -> Vec<(usize, f32)> {
         desc.inputs
             .iter()
             .map(|port| {
@@ -169,7 +169,7 @@ pub(super) fn resolved_graph_for_test<'a>(
 #[cfg(test)]
 pub(super) fn graph_index_for_test<'a>(
     graph: &'a ModuleGraph,
-    edges_raw: &[(NodeId, String, u32, NodeId, String, u32, f64)],
+    edges_raw: &[(NodeId, String, u32, NodeId, String, u32, f32)],
 ) -> GraphIndex<'a> {
     let mut connected_inputs = HashSet::new();
     let mut connected_outputs = HashSet::new();
@@ -257,7 +257,7 @@ mod tests {
         let (graph, _src_id, dst_id) = two_node_graph();
         let dst_desc = graph.get_node(&dst_id).unwrap().module_descriptor.clone();
 
-        let mut map: HashMap<(NodeId, String, u32), (usize, f64)> = HashMap::new();
+        let mut map: HashMap<(NodeId, String, u32), (usize, f32)> = HashMap::new();
         map.insert((dst_id.clone(), "in".to_string(), 0), (7, 0.5));
         let empty_graph = ModuleGraph::new();
         let index = graph_index_for_test(&empty_graph, &[]);
@@ -285,7 +285,7 @@ mod tests {
         let dst_id = NodeId::from("dst2");
         let dst_desc = graph.get_node(&dst_id).unwrap().module_descriptor.clone();
 
-        let mut map: HashMap<(NodeId, String, u32), (usize, f64)> = HashMap::new();
+        let mut map: HashMap<(NodeId, String, u32), (usize, f32)> = HashMap::new();
         map.insert((dst_id.clone(), "x".to_string(), 0), (3, 1.0));
         map.insert((dst_id.clone(), "y".to_string(), 0), (4, 2.0));
         let empty_graph = ModuleGraph::new();
@@ -306,7 +306,7 @@ mod tests {
         let edges = vec![(
             ghost_id.clone(), "out".to_string(), 0u32,
             dst_id.clone(), "in".to_string(), 0u32,
-            1.0f64,
+            1.0f32,
         )];
         let output_buf = HashMap::new();
 
@@ -324,7 +324,7 @@ mod tests {
         let edges = vec![(
             src_id.clone(), "out".to_string(), 0u32,
             dst_id.clone(), "in".to_string(), 0u32,
-            1.0f64,
+            1.0f32,
         )];
         let output_buf = HashMap::new();
 

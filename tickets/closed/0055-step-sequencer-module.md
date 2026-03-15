@@ -34,7 +34,7 @@ Intern each step string as one of:
 
 ```rust
 enum Step {
-    Note { voct: f64 },
+    Note { voct: f32 },
     Rest,
     Tie,
 }
@@ -44,7 +44,7 @@ Parse note names: letter (`C`…`B`), optional accidental (`#` / `b`), octave di
 Semitone index: `C=0, C#=1, D=2, D#=3, E=4, F=5, F#=6, G=7, G#=8, A=9, A#=10, B=11`.
 
 ```
-voct = (octave as f64 - 2.0) + semitone_index as f64 / 12.0
+voct = (octave as f32 - 2.0) + semitone_index as f32 / 12.0
 ```
 
 Store the parsed vec in `steps: Vec<Step>` on the struct. `process` indexes this vec

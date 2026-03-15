@@ -8,7 +8,7 @@ use patches_modules::{AudioOut, Oscillator, Seq, Sum};
 
 const POOL_CAP: usize = 256;
 const MODULE_CAP: usize = 64;
-const SAMPLE_RATE: f64 = 44100.0;
+const SAMPLE_RATE: f32 = 44100.0;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -21,7 +21,7 @@ fn p(name: &'static str) -> PortRef {
 }
 
 /// Oscillator → AudioOut (sine output).
-fn sine_out_graph(osc_id: &str, freq: f64) -> ModuleGraph {
+fn sine_out_graph(osc_id: &str, freq: f32) -> ModuleGraph {
     let mut graph = ModuleGraph::new();
     let mut params = ParameterMap::new();
     params.insert("frequency".to_string(), ParameterValue::Float(freq));
@@ -33,7 +33,7 @@ fn sine_out_graph(osc_id: &str, freq: f64) -> ModuleGraph {
 }
 
 /// Osc("osc_a") + Osc("osc_b") → Sum(2) → AudioOut.
-fn two_osc_graph(freq_a: f64, freq_b: f64) -> ModuleGraph {
+fn two_osc_graph(freq_a: f32, freq_b: f32) -> ModuleGraph {
     let mut graph = ModuleGraph::new();
     let mut pa = ParameterMap::new();
     pa.insert("frequency".to_string(), ParameterValue::Float(freq_a));
@@ -329,7 +329,7 @@ fn state_preserved_across_parameter_update() {
 #[test]
 fn initial_plan_uses_provided_sample_rate() {
     let registry = patches_modules::default_registry();
-    const FREQ: f64 = 440.0;
+    const FREQ: f32 = 440.0;
     let graph = sine_out_graph("osc", FREQ);
 
     let (mut plan, _state) =

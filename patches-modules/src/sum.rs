@@ -67,7 +67,7 @@ impl Module for Sum {
     }
 
     fn process(&mut self, pool: &mut CablePool<'_>) {
-        let total: f64 = self.in_ports[..self.size]
+        let total: f32 = self.in_ports[..self.size]
             .iter()
             .map(|p| pool.read_mono(p))
             .sum();
@@ -148,7 +148,7 @@ mod tests {
         pool[2][1] = CableValue::Mono(0.5);
         m.process(&mut CablePool::new(&mut pool, 0));
         if let CableValue::Mono(v) = pool[3][0] {
-            assert!((v - 1.0).abs() < f64::EPSILON);
+            assert!((v - 1.0).abs() < f32::EPSILON);
         } else { panic!("expected Mono"); }
     }
 }

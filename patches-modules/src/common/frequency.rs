@@ -3,7 +3,7 @@
 /// V/OCT oscillators add the user-supplied `frequency_offset` to this value,
 /// so a `frequency_offset` of `0.0` places the oscillator at C0 (≈ 16.35 Hz)
 /// before any V/OCT input is applied.
-pub const C0_FREQ: f64 = 16.351_598;
+pub const C0_FREQ: f32 = 16.351_598;
 
 #[derive(PartialEq)]
 pub enum FMMode {
@@ -12,15 +12,15 @@ pub enum FMMode {
 }
 
 pub struct UnitPhaseAccumulator {
-    pub phase: f64,
-    pub phase_increment: f64,
-    sample_rate_reciprocal: f64,
+    pub phase: f32,
+    pub phase_increment: f32,
+    sample_rate_reciprocal: f32,
     frequency_control: FrequencyControl,
     pub is_modulating: bool,
 }
 
 impl UnitPhaseAccumulator {
-    pub fn new(sample_rate: f64, reference_frequency: f64) -> Self {
+    pub fn new(sample_rate: f32, reference_frequency: f32) -> Self {
         Self {
             phase: 0.0,
             phase_increment: 0.0,
@@ -46,13 +46,13 @@ impl UnitPhaseAccumulator {
 
     /// Set the frequency offset (Hz) added to the reference frequency.
     /// Recomputes the static phase increment.
-    pub fn set_frequency_offset(&mut self, frequency_offset: f64) {
+    pub fn set_frequency_offset(&mut self, frequency_offset: f32) {
         self.frequency_control.frequency_offset = frequency_offset;
         let base = self.frequency_control.base_pitch();
         self.update_phase_increment(base);
     }
 
-    fn update_phase_increment(&mut self, frequency: f64) {
+    fn update_phase_increment(&mut self, frequency: f32) {
         self.phase_increment = frequency * self.sample_rate_reciprocal;
     }
 
@@ -61,7 +61,7 @@ impl UnitPhaseAccumulator {
         self.phase -= self.phase.floor(); // Wrap phase to [0.0, 1.0)
     }
 
-    pub fn advance_modulating(&mut self, voct_input: f64, fm_input: f64) {
+    pub fn advance_modulating(&mut self, voct_input: f32, fm_input: f32) {
         let modulated_frequency = self.frequency_control.compute(voct_input, fm_input);
         self.update_phase_increment(modulated_frequency);
         self.advance();
@@ -69,35 +69,35 @@ impl UnitPhaseAccumulator {
 }
 
 struct FrequencyControl {
-    reference_frequency: f64,
-    frequency_offset: f64,
+    reference_frequency: f32,
+    frequency_offset: f32,
     pub voct_modulating: bool,
     pub fm_modulating: bool,
     pub fm_mode: FMMode,
     // Cache for the exp2 result: only recomputed when exp_mod changes.
-    last_exp_mod: f64,
-    cached_exp2: f64,
+    last_exp_mod: f32,
+    cached_exp2: f32,
 }
 
 impl FrequencyControl {
 
-    fn new(reference_frequency: f64) -> Self {
+    fn new(reference_frequency: f32) -> Self {
         Self {
             reference_frequency,
             frequency_offset: 0.0,
             voct_modulating: false,
             fm_modulating: false,
             fm_mode: FMMode::Linear,
-            last_exp_mod: f64::NAN, // sentinel: forces first computation
+            last_exp_mod: f32::NAN, // sentinel: forces first computation
             cached_exp2: 1.0,
         }
     }
 
-    fn base_pitch(&self) -> f64 {
+    fn base_pitch(&self) -> f32 {
         self.reference_frequency + self.frequency_offset
     }
 
-    fn compute(&mut self, voct_input: f64, fm_input: f64) -> f64 {
+    fn compute(&mut self, voct_input: f32, fm_input: f32) -> f32 {
         let mut frequency = self.base_pitch();
         let mut exp_mod = 0.0;
         if self.voct_modulating {

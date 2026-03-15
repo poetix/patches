@@ -14,10 +14,10 @@ Define the foundational types and traits that all audio modules implement. Every
 ## Acceptance criteria
 
 - [ ] `Module` trait defined with a single-sample `process` method:
-      `fn process(&mut self, inputs: &[f64], outputs: &mut [f64], sample_rate: f64)`
+      `fn process(&mut self, inputs: &[f32], outputs: &mut [f32], sample_rate: f32)`
 - [ ] `PortDescriptor` type describing a port by name and direction (input/output)
 - [ ] `ModuleDescriptor` type (returned by a method on `Module`) listing a module's input and output ports — used by the graph and builder to validate connections and resolve port names to indices
-- [ ] `SampleBuffer` type: a 2-element ring buffer (`[f64; 2]` + write index) representing a single patch cable — writer stores into the current slot, reader takes from the previous slot
+- [ ] `SampleBuffer` type: a 2-element ring buffer (`[f32; 2]` + write index) representing a single patch cable — writer stores into the current slot, reader takes from the previous slot
 - [ ] All types are in `patches-core` with no audio-backend dependencies
 - [ ] `cargo test -p patches-core` passes
 - [ ] `cargo clippy` is clean

@@ -19,15 +19,15 @@ pub struct Tuner {
     semi: i64,
     cent: i64,
     /// Precomputed offset in V/OCT: octave + semi/12 + cent/1200.
-    offset: f64,
+    offset: f32,
     // Port fields
     in_port: MonoInput,
     out_port: MonoOutput,
 }
 
 impl Tuner {
-    fn recompute_offset(octave: i64, semi: i64, cent: i64) -> f64 {
-        octave as f64 + semi as f64 / 12.0 + cent as f64 / 1200.0
+    fn recompute_offset(octave: i64, semi: i64, cent: i64) -> f32 {
+        octave as f32 + semi as f32 / 12.0 + cent as f32 / 1200.0
     }
 }
 

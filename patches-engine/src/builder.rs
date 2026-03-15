@@ -69,7 +69,7 @@ pub struct ModuleSlot {
     /// `scratch_index` is the positional port index; `buf_index` is the cable pool slot.
     pub unscaled_inputs: Vec<(usize, usize)>,
     /// Inputs whose cable scale differs from `1.0`: `(scratch_index, buf_index, scale)`.
-    pub scaled_inputs: Vec<(usize, usize, f64)>,
+    pub scaled_inputs: Vec<(usize, usize, f32)>,
     /// Indices into the [`ExecutionPlan`] buffer pool — one per output port.
     pub output_buffers: Vec<usize>,
 }
@@ -156,14 +156,14 @@ impl ExecutionPlan {
 
 // ── Decision-phase helpers ────────────────────────────────────────────────────
 
-type PartitionedInputs = (Vec<(usize, usize)>, Vec<(usize, usize, f64)>);
+type PartitionedInputs = (Vec<(usize, usize)>, Vec<(usize, usize, f32)>);
 
 /// Partition resolved `(buffer_index, scale)` pairs into unscaled and scaled lists.
 ///
 /// Entries with `scale == 1.0` go into the unscaled list as `(scratch_index, buf_index)`.
 /// Entries with any other scale go into the scaled list as `(scratch_index, buf_index, scale)`.
 /// The scratch index is the position of each entry in `resolved` (0-based).
-fn partition_inputs(resolved: Vec<(usize, f64)>) -> PartitionedInputs {
+fn partition_inputs(resolved: Vec<(usize, f32)>) -> PartitionedInputs {
     let mut unscaled = Vec::new();
     let mut scaled = Vec::new();
     for (j, (buf_idx, scale)) in resolved.into_iter().enumerate() {
@@ -577,7 +577,7 @@ mod tests {
 
     #[test]
     fn input_scale_is_applied_at_tick_time() {
-        let make_graph = |scale: f64| {
+        let make_graph = |scale: f32| {
             let mut g = ModuleGraph::new();
             let sine_desc = Oscillator::describe(&ModuleShape { channels: 0, length: 0 });
             let out_desc = AudioOut::describe(&ModuleShape { channels: 0, length: 0 });

@@ -57,7 +57,7 @@ graph.connect(&"osc".into(), PortRef { name: "out", index: 0 },
 ```rust
 // Rise: 110 → 880 Hz in N steps
 for step in 0..N {
-    let freq = 110.0 * (880.0_f64 / 110.0).powf(step as f64 / N as f64);
+    let freq = 110.0 * (880.0_f32 / 110.0).powf(step as f32 / N as f32);
     if let Err(_) = engine.send_signal(osc_id, ControlSignal::Float { name: "freq", value: freq }) {
         eprintln!("warning: signal buffer full, skipping step");
     }

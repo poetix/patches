@@ -40,7 +40,7 @@ both running at the output (half) rate. Output = (branch0 + branch1) / 2.
 
 All filter state lives in fixed-size arrays inside `AudioCallback`. Coefficients
 are computed on the non-audio thread (during `SoundEngine::new`) and stored as
-plain `f64` fields. `Decimator::push` contains no allocation, no branching on
+plain `f32` fields. `Decimator::push` contains no allocation, no branching on
 heap structures, and no system calls.
 
 ### Effect on `AudioEnvironment`

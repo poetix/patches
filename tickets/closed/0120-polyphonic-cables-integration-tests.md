@@ -24,7 +24,7 @@ propagation, kind-mismatch rejection at graph construction, and correct
       `PolyProbe` wired up. After plan-accept, the probe's `PolyInput` and
       `PolyOutput` fields have `connected: true` (i.e. `set_ports` was called
       with the correct concrete types).
-- [ ] **Poly cable propagation**: A source module writes a known `[f64; 16]`
+- [ ] **Poly cable propagation**: A source module writes a known `[f32; 16]`
       pattern to a poly output; `PolyProbe` reads it via `read_poly`. After
       one tick, the probe's recorded values match the written pattern.
 - [ ] **Kind-mismatch at connect()**: Constructing a `ModuleGraph` that connects

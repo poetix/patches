@@ -27,7 +27,7 @@ the correct elevated sample rate.
 - [ ] `SoundEngine::new(buffer_pool_capacity, module_pool_capacity, control_period,
   oversampling: OversamplingFactor)` — new final parameter.
 - [ ] `SoundEngine::open()` returns `AudioEnvironment { sample_rate: device_rate
-  * factor as f64 }`.
+  * factor as f32 }`.
 - [ ] `SoundEngine` stores `oversampling_factor: usize` and passes it to
   `AudioCallback::new`.
 - [ ] `AudioCallback` stores `oversampling_factor: usize`. `process_chunk` runs

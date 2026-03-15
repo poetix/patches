@@ -48,7 +48,7 @@ pub enum GraphError {
     InputPortNotFound { node: NodeId, port: String },
     InputAlreadyConnected { node: NodeId, port: String },
     /// `scale` must be finite and in `[-1.0, 1.0]`.
-    ScaleOutOfRange(f64),
+    ScaleOutOfRange(f32),
     /// The source output port and the destination input port have different
     /// `CableKind`s (e.g. mono output wired to poly input).
     CableKindMismatch { from_port: String, to_port: String },
@@ -97,7 +97,7 @@ struct Edge {
     input_name: String,
     input_index: u32,
     /// Scaling factor applied to the signal at read-time. Must be in `[-1.0, 1.0]`.
-    scale: f64,
+    scale: f32,
 }
 
 /// A node in the module graph, holding a descriptor and its current parameter values.
@@ -172,7 +172,7 @@ impl ModuleGraph {
         output: PortRef,
         to: &NodeId,
         input: PortRef,
-        scale: f64,
+        scale: f32,
     ) -> Result<(), GraphError> {
         if !scale.is_finite() || !(-1.0..=1.0).contains(&scale) {
             return Err(GraphError::ScaleOutOfRange(scale));
@@ -278,7 +278,7 @@ impl ModuleGraph {
 
     /// Return a snapshot of all edges as
     /// `(from, output_name, output_index, to, input_name, input_index, scale)` tuples.
-    pub fn edge_list(&self) -> Vec<(NodeId, String, u32, NodeId, String, u32, f64)> {
+    pub fn edge_list(&self) -> Vec<(NodeId, String, u32, NodeId, String, u32, f32)> {
         self.edges
             .values()
             .map(|e| {
@@ -538,11 +538,11 @@ mod tests {
             Err(GraphError::ScaleOutOfRange(_))
         ));
         assert!(matches!(
-            g.connect(&src, pref("out"), &dst, pref("in"), f64::NAN),
+            g.connect(&src, pref("out"), &dst, pref("in"), f32::NAN),
             Err(GraphError::ScaleOutOfRange(_))
         ));
         assert!(matches!(
-            g.connect(&src, pref("out"), &dst, pref("in"), f64::INFINITY),
+            g.connect(&src, pref("out"), &dst, pref("in"), f32::INFINITY),
             Err(GraphError::ScaleOutOfRange(_))
         ));
         // Boundary values are valid.

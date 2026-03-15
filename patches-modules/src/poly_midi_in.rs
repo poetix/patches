@@ -5,7 +5,7 @@ use patches_core::{
 use patches_core::CableKind;
 use patches_core::parameter_map::ParameterMap;
 
-const VOCT_SCALING: f64 = 1.0 / 12.0;
+const VOCT_SCALING: f32 = 1.0 / 12.0;
 
 #[derive(Clone, Copy)]
 struct Voice {
@@ -44,8 +44,8 @@ pub struct PolyMidiIn {
     voices: [Voice; 16],
     /// Incremented each `process` call; used to timestamp voice allocations.
     tick_count: u64,
-    mod_value: f64,
-    pitch_value: f64,
+    mod_value: f32,
+    pitch_value: f32,
     // Output port fields
     out_v_oct: PolyOutput,
     out_trigger: PolyOutput,
@@ -125,13 +125,13 @@ impl Module for PolyMidiIn {
     }
 
     fn process(&mut self, pool: &mut CablePool<'_>) {
-        let mut v_oct   = [0.0f64; 16];
-        let mut trigger = [0.0f64; 16];
-        let mut gate    = [0.0f64; 16];
+        let mut v_oct   = [0.0f32; 16];
+        let mut trigger = [0.0f32; 16];
+        let mut gate    = [0.0f32; 16];
 
         for i in 0..self.voice_count {
             let v = &mut self.voices[i];
-            v_oct[i] = v.note as f64 * VOCT_SCALING;
+            v_oct[i] = v.note as f32 * VOCT_SCALING;
             if v.trigger_armed {
                 v.trigger_armed = false;
                 trigger[i] = 1.0;
@@ -183,13 +183,13 @@ impl ReceivesMidi for PolyMidiIn {
             // Control Change
             0xB0 => {
                 if b1 == 1 {
-                    self.mod_value = b2 as f64 / 127.0;
+                    self.mod_value = b2 as f32 / 127.0;
                 }
             }
             // Pitch Bend: 14-bit value, LSB in b1, MSB in b2; centre = 8192
             0xE0 => {
                 let raw = ((b2 as u16) << 7) | (b1 as u16);
-                self.pitch_value = (raw as f64 - 8192.0) / 8192.0;
+                self.pitch_value = (raw as f32 - 8192.0) / 8192.0;
             }
             _ => {}
         }
@@ -237,7 +237,7 @@ mod tests {
         m.set_ports(&[], &outputs);
     }
 
-    fn read_poly_at(pool: &[[CableValue; 2]], cable: usize, wi: usize) -> [f64; 16] {
+    fn read_poly_at(pool: &[[CableValue; 2]], cable: usize, wi: usize) -> [f32; 16] {
         match pool[cable][wi] {
             CableValue::Poly(v) => v,
             _ => panic!("expected Poly"),

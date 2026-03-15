@@ -23,36 +23,36 @@ These are separate concerns: the enum discriminant encodes arity, and a
       ```
 - [ ] `CableValue` enum exists in `patches-core` with no heap allocation:
       ```rust
-      pub enum CableValue { Mono(f64), Poly([f64; 16]) }
+      pub enum CableValue { Mono(f32), Poly([f32; 16]) }
       ```
 - [ ] Four concrete port structs exist:
       ```rust
-      pub struct MonoInput  { pub cable_idx: usize, pub scale: f64, pub connected: bool }
-      pub struct PolyInput  { pub cable_idx: usize, pub scale: f64, pub connected: bool }
+      pub struct MonoInput  { pub cable_idx: usize, pub scale: f32, pub connected: bool }
+      pub struct PolyInput  { pub cable_idx: usize, pub scale: f32, pub connected: bool }
       pub struct MonoOutput { pub cable_idx: usize, pub connected: bool }
       pub struct PolyOutput { pub cable_idx: usize, pub connected: bool }
       ```
 - [ ] `MonoInput` provides:
       - `is_connected(&self) -> bool` — returns `self.connected`.
-      - `read(&self, pool: &[CableValue]) -> f64` — indexes the pool at
+      - `read(&self, pool: &[CableValue]) -> f32` — indexes the pool at
         `self.cable_idx`, extracts the `CableValue::Mono` inner value, and
         applies `self.scale`. Panics with `unreachable!()` in debug if the slot
         is `CableValue::Poly` (graph validation makes this unreachable in
         well-formed graphs).
 - [ ] `PolyInput` provides:
       - `is_connected(&self) -> bool`.
-      - `read(&self, pool: &[CableValue]) -> [f64; 16]` — indexes the pool at
+      - `read(&self, pool: &[CableValue]) -> [f32; 16]` — indexes the pool at
         `self.cable_idx`, extracts the `CableValue::Poly` inner array, and
-        applies `self.scale` to each channel. Returns by value (`[f64; 16]` on
+        applies `self.scale` to each channel. Returns by value (`[f32; 16]` on
         the caller's stack; no heap allocation). Panics with `unreachable!()`
         in debug if the slot is `CableValue::Mono`.
 - [ ] `MonoOutput` provides:
       - `is_connected(&self) -> bool`.
-      - `write(&self, pool: &mut [CableValue], value: f64)` — writes
+      - `write(&self, pool: &mut [CableValue], value: f32)` — writes
         `CableValue::Mono(value)` into the pool at `self.cable_idx`.
 - [ ] `PolyOutput` provides:
       - `is_connected(&self) -> bool`.
-      - `write(&self, pool: &mut [CableValue], value: [f64; 16])` — writes
+      - `write(&self, pool: &mut [CableValue], value: [f32; 16])` — writes
         `CableValue::Poly(value)` into the pool at `self.cable_idx`.
 - [ ] Two enum wrappers exist for use in `set_ports` delivery:
       ```rust
@@ -90,6 +90,6 @@ fn set_ports(&mut self, inputs: &[InputPort], outputs: &[OutputPort]) {
 The `if let` always matches in a validated graph; the else arm is dead code and
 optionally carries a `debug_assert!(false, "...")`.
 
-`PolyInput::read` returns `[f64; 16]` by value. On ARM64, 16 doubles fit in 8
+`PolyInput::read` returns `[f32; 16]` by value. On ARM64, 16 doubles fit in 8
 NEON registers; whether the compiler keeps them register-resident depends on the
 surrounding code and is not assumed here.

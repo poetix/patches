@@ -24,7 +24,7 @@ leave the codebase compiling and all tests passing before merge.
 - [ ] Gains `new_modules: Vec<(usize, Box<dyn Module>)>` — pool index + instance for
       each module being introduced to the pool by this plan
 - [ ] Gains `tombstones: Vec<usize>` — pool indices of modules removed from the graph
-- [ ] `tick()` signature changes to `tick(pool: &mut [Option<Box<dyn Module>>], buffer_pool: &mut [[f64; 2]], wi: usize)` and accesses modules as `pool[slot.pool_index].as_mut().unwrap()`
+- [ ] `tick()` signature changes to `tick(pool: &mut [Option<Box<dyn Module>>], buffer_pool: &mut [[f32; 2]], wi: usize)` and accesses modules as `pool[slot.pool_index].as_mut().unwrap()`
 - [ ] `last_left()` / `last_right()` accept the module pool by reference and access
       `pool[slots[audio_out_index].pool_index]`
 - [ ] `signal_dispatch` entries map `InstanceId → pool_index` (value semantics unchanged;

@@ -1,4 +1,4 @@
-use std::f64::consts::{FRAC_1_SQRT_2, TAU};
+use std::f32::consts::{FRAC_1_SQRT_2, TAU};
 use crate::common::approximate::fast_tanh;
 
 use patches_core::{
@@ -13,7 +13,7 @@ use patches_core::parameter_map::{ParameterMap, ParameterValue};
 /// fast enough for LFO and envelope modulation. Linear interpolation of
 /// coefficients across the interval prevents audible stepping.
 const COEFF_UPDATE_INTERVAL: u32 = 32;
-const COEFF_UPDATE_INTERVAL_RECIPROCAL: f64 = 1.0 / COEFF_UPDATE_INTERVAL as f64;
+const COEFF_UPDATE_INTERVAL_RECIPROCAL: f32 = 1.0 / COEFF_UPDATE_INTERVAL as f32;
 
 /// Maps normalised resonance [0, 1] to filter Q.
 ///
@@ -21,7 +21,7 @@ const COEFF_UPDATE_INTERVAL_RECIPROCAL: f64 = 1.0 / COEFF_UPDATE_INTERVAL as f64
 /// flat pass-band with no resonance peak. At 1.0 the Q is 10.0, producing
 /// strong, audible resonance without self-oscillation.
 #[inline]
-fn resonance_to_q(resonance: f64) -> f64 {
+fn resonance_to_q(resonance: f32) -> f32 {
     // 0.0 → Q = 1/√2 ≈ 0.707 (Butterworth), 1.0 → Q = 10.0
     FRAC_1_SQRT_2 + (10.0 - FRAC_1_SQRT_2) * resonance
 }
@@ -33,7 +33,7 @@ fn resonance_to_q(resonance: f64) -> f64 {
 ///
 /// Returns `(b0, b1, b2, a1, a2)` ready for Transposed Direct Form II.
 #[inline]
-fn compute_biquad_lowpass(cutoff_hz: f64, resonance: f64, sample_rate: f64) -> (f64, f64, f64, f64, f64) {
+fn compute_biquad_lowpass(cutoff_hz: f32, resonance: f32, sample_rate: f32) -> (f32, f32, f32, f32, f32) {
     let q = resonance_to_q(resonance);
     let f = cutoff_hz.clamp(1.0, sample_rate * 0.499);
     let w0 = TAU * f / sample_rate;
@@ -80,34 +80,34 @@ fn compute_biquad_lowpass(cutoff_hz: f64, resonance: f64, sample_rate: f64) -> (
 pub struct ResonantLowpass {
     instance_id: InstanceId,
     descriptor: ModuleDescriptor,
-    sample_rate: f64,
+    sample_rate: f32,
 
     // ── Parameters ────────────────────────────────────────────────────────
-    cutoff: f64,    // Hz
-    resonance: f64, // 0–1 normalised
+    cutoff: f32,    // Hz
+    resonance: f32, // 0–1 normalised
 
     // ── Current biquad coefficients (what the filter uses this sample) ───
-    b0: f64,
-    b1: f64,
-    b2: f64,
-    a1: f64,
-    a2: f64,
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    a1: f32,
+    a2: f32,
 
     // ── Target coefficients and per-sample increments (CV path only) ─────
-    b0t: f64,
-    b1t: f64,
-    b2t: f64,
-    a1t: f64,
-    a2t: f64,
-    db0: f64,
-    db1: f64,
-    db2: f64,
-    da1: f64,
-    da2: f64,
+    b0t: f32,
+    b1t: f32,
+    b2t: f32,
+    a1t: f32,
+    a2t: f32,
+    db0: f32,
+    db1: f32,
+    db2: f32,
+    da1: f32,
+    da2: f32,
 
     // ── Filter state (Transposed Direct Form II) ──────────────────────────
-    s1: f64,
-    s2: f64,
+    s1: f32,
+    s2: f32,
 
     // ── Update counter (CV path only) ─────────────────────────────────────
     update_counter: u32,
@@ -351,11 +351,11 @@ mod tests {
     use patches_core::{AudioEnvironment, CablePool, CableValue, Module, ModuleShape, Registry};
     use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
-    fn make_filter(cutoff: f64, resonance: f64) -> Box<dyn Module> {
+    fn make_filter(cutoff: f32, resonance: f32) -> Box<dyn Module> {
         make_filter_sr(cutoff, resonance, 44100.0)
     }
 
-    fn make_filter_sr(cutoff: f64, resonance: f64, sample_rate: f64) -> Box<dyn Module> {
+    fn make_filter_sr(cutoff: f32, resonance: f32, sample_rate: f32) -> Box<dyn Module> {
         let mut params = ParameterMap::new();
         params.insert("cutoff".into(), ParameterValue::Float(cutoff));
         params.insert("resonance".into(), ParameterValue::Float(resonance));
@@ -412,12 +412,12 @@ mod tests {
 
     /// Measure the peak absolute output of `m` driven by a sine at `freq_hz`
     /// over `n` samples at `sample_rate`.
-    fn measure_peak(m: &mut Box<dyn Module>, freq_hz: f64, sample_rate: f64, n: usize) -> f64 {
+    fn measure_peak(m: &mut Box<dyn Module>, freq_hz: f32, sample_rate: f32, n: usize) -> f32 {
         let mut pool = make_pool(4);
-        let mut peak = 0.0f64;
+        let mut peak = 0.0f32;
         for i in 0..n {
             let wi = i % 2;
-            let x = (TAU * freq_hz * i as f64 / sample_rate).sin();
+            let x = (TAU * freq_hz * i as f32 / sample_rate).sin();
             pool[0][1 - wi] = CableValue::Mono(x);
             m.process(&mut CablePool::new(&mut pool, wi));
             if let CableValue::Mono(v) = pool[3][wi] {
@@ -503,11 +503,11 @@ mod tests {
             with_cv.process(&mut CablePool::new(&mut pool_with_cv, wi));
         }
 
-        let mut no_cv_peak = 0.0f64;
-        let mut with_cv_peak = 0.0f64;
+        let mut no_cv_peak = 0.0f32;
+        let mut with_cv_peak = 0.0f32;
         for i in 0..4096usize {
             let wi = i % 2;
-            let x = (TAU * test_freq * i as f64 / sr).sin();
+            let x = (TAU * test_freq * i as f32 / sr).sin();
             pool_no_cv[0][1 - wi] = CableValue::Mono(x);
             no_cv.process(&mut CablePool::new(&mut pool_no_cv, wi));
             if let CableValue::Mono(v) = pool_no_cv[3][wi] {

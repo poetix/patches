@@ -123,13 +123,13 @@ struct YamlCable {
     to: String,
     /// Input port: `"name"` or `"name/n"`.
     input: String,
-    #[serde(default = "one_f64", skip_serializing_if = "is_one_f64")]
-    scale: f64,
+    #[serde(default = "one_f32", skip_serializing_if = "is_one_f32")]
+    scale: f32,
 }
 
 fn is_zero_usize(v: &usize) -> bool { *v == 0 }
-fn is_one_f64(v: &f64) -> bool { *v == 1.0 }
-fn one_f64() -> f64 { 1.0 }
+fn is_one_f32(v: &f32) -> bool { *v == 1.0 }
+fn one_f32() -> f32 { 1.0 }
 
 /// Encode `(name, index)` as `"name"` when index is 0, or `"name/index"` otherwise.
 fn encode_port(name: &str, index: u32) -> String {
@@ -316,7 +316,7 @@ fn coerce_param(
     match kind {
         ParameterKind::Float { .. } => yaml_val
             .as_f64()
-            .map(ParameterValue::Float)
+            .map(|f|ParameterValue::Float(f as f32))
             .ok_or_else(|| mismatch(node_id, param_name, "float")),
 
         ParameterKind::Int { .. } => yaml_val

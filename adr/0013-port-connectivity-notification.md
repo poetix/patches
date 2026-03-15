@@ -66,7 +66,7 @@ fn set_connectivity(&mut self, conn: PortConnectivity) {
     self.right_input_connected = conn.inputs[RIGHT_IN_PORT_INDEX];
 }
 
-fn process(&mut self, inputs: &[f64], outputs: &mut [f64]) {
+fn process(&mut self, inputs: &[f32], outputs: &mut [f32]) {
     if self.freq_is_modulated {
         self.recalc_coefficients(inputs[FREQ_PORT_INDEX]);
     }

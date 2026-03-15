@@ -18,8 +18,8 @@ Introduce a `Sink` marker trait in `patches-core` that `AudioOut` (and any futur
 - [ ] `Sink` trait defined in `patches-core`, extending `Module`:
   ```rust
   pub trait Sink: Module {
-      fn last_left(&self) -> f64;
-      fn last_right(&self) -> f64;
+      fn last_left(&self) -> f32;
+      fn last_right(&self) -> f32;
   }
   ```
 - [ ] `Module` trait gains `fn as_sink(&self) -> Option<&dyn Sink>` (default returns `None`)

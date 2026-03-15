@@ -26,20 +26,20 @@ pub struct Adsr {
     instance_id: InstanceId,
     descriptor: ModuleDescriptor,
     // Parameters (set via update_validated_parameters)
-    attack_secs: f64,
-    decay_secs: f64,
-    sustain: f64,
-    release_secs: f64,
+    attack_secs: f32,
+    decay_secs: f32,
+    sustain: f32,
+    release_secs: f32,
     // Stored sample rate (set in prepare)
-    sample_rate: f64,
+    sample_rate: f32,
     // Per-sample increments (recomputed in update_validated_parameters)
-    attack_inc: f64,
-    decay_inc: f64,
-    release_inc: f64,
+    attack_inc: f32,
+    decay_inc: f32,
+    release_inc: f32,
     // Runtime state
     stage: Stage,
-    level: f64,
-    prev_trigger: f64,
+    level: f32,
+    prev_trigger: f32,
     // Port fields
     in_trigger: MonoInput,
     in_gate: MonoInput,
@@ -207,7 +207,7 @@ mod tests {
     use patches_core::{AudioEnvironment, CablePool, CableValue, Module, ModuleShape, Registry};
     use patches_core::parameter_map::{ParameterMap, ParameterValue};
 
-    fn make_envelope(attack: f64, decay: f64, sustain: f64, release: f64) -> Box<dyn Module> {
+    fn make_envelope(attack: f32, decay: f32, sustain: f32, release: f32) -> Box<dyn Module> {
         let mut params = ParameterMap::new();
         params.insert("attack".into(),  ParameterValue::Float(attack));
         params.insert("decay".into(),   ParameterValue::Float(decay));
@@ -240,7 +240,7 @@ mod tests {
         module.set_ports(&inputs, &outputs);
     }
 
-    fn tick(env: &mut dyn Module, trigger: f64, gate: f64, pool: &mut Vec<[CableValue; 2]>, tick_count: usize) -> f64 {
+    fn tick(env: &mut dyn Module, trigger: f32, gate: f32, pool: &mut Vec<[CableValue; 2]>, tick_count: usize) -> f32 {
         let wi = tick_count % 2;
         let ri = 1 - wi;
         pool[0][ri] = CableValue::Mono(trigger);

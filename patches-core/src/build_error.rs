@@ -26,9 +26,9 @@ pub enum BuildError {
     ParameterOutOfRange {
         module: &'static str,
         parameter: &'static str,
-        min: f64,
-        max: f64,
-        found: f64,
+        min: f32,
+        max: f32,
+        found: f32,
     },
 
     Custom {

@@ -16,7 +16,7 @@ stored on the module and delivered via a new `set_ports` method.
 `set_connectivity` is removed, as connectivity is now carried by the `connected`
 field on `MonoInput`, `PolyInput`, `MonoOutput`, and `PolyOutput`.
 
-The old `process(&mut self, inputs: &[f64], outputs: &mut [f64])` method remains
+The old `process(&mut self, inputs: &[f32], outputs: &mut [f32])` method remains
 in the trait (still required) so that all existing implementations compile.
 T-0118 will migrate each module to implement `process_alias` and remove its
 old `process` implementation. Once all migrations are complete a follow-up
@@ -30,7 +30,7 @@ ticket will rename `process_alias` → `process` and remove the old signature.
       ```
       The method is documented as audio-thread-safe: implementations must not
       allocate or block.
-- [ ] The existing `Module::process(&mut self, inputs: &[f64], outputs: &mut [f64])`
+- [ ] The existing `Module::process(&mut self, inputs: &[f32], outputs: &mut [f32])`
       method is left unchanged (still a required method). No existing module
       implementations are modified by this ticket.
 - [ ] `Module::set_ports` is added with a default no-op implementation:
@@ -43,7 +43,7 @@ ticket will rename `process_alias` → `process` and remove the old signature.
       implementations in `patches-modules` are deleted (the method was already a
       default no-op, so removing it from the trait does not break callers that
       merely implement it).
-- [ ] The buffer pool type changes from `Vec<[f64; 2]>` to `Vec<[CableValue; 2]>`.
+- [ ] The buffer pool type changes from `Vec<[f32; 2]>` to `Vec<[CableValue; 2]>`.
       The ping-pong read/write half semantics are preserved.
 - [ ] `ExecutionPlan::tick()` is updated to call `process_alias` (passing the
       appropriate pool halves) instead of the old `process`. The planner's
@@ -64,7 +64,7 @@ ticket will rename `process_alias` → `process` and remove the old signature.
 it from the trait only breaks code that calls it explicitly (the engine's
 `connectivity_updates` path). That path is removed alongside it.
 
-The buffer pool slot size grows from `[f64; 2]` (16 bytes) to
+The buffer pool slot size grows from `[f32; 2]` (16 bytes) to
 `[CableValue; 2]` (≈272 bytes). For a 64-cable graph the pool grows from ~1 KB
 to ~17 KB — still L1-resident.
 

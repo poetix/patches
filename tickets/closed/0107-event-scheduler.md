@@ -16,10 +16,10 @@ Pure logic with no side effects; independently unit-testable.
 
 ## Acceptance criteria
 
-- [ ] `EventScheduler::new(sample_rate: f64, lookahead_samples: u64) -> Self`.
+- [ ] `EventScheduler::new(sample_rate: f32, lookahead_samples: u64) -> Self`.
 - [ ] `EventScheduler::stamp(anchor: &ClockAnchor, event_wall_time: Instant) -> u64`
       returns `anchor.sample_count + elapsed_samples + lookahead_samples` where
-      `elapsed_samples = (event_wall_time − anchor.playback_wall_time).as_secs_f64() * sample_rate`
+      `elapsed_samples = (event_wall_time − anchor.playback_wall_time).as_secs_f32() * sample_rate`
       rounded to the nearest integer.
 - [ ] If `event_wall_time` is before `anchor.playback_wall_time` (event arrived
       before the anchor's reference point), `elapsed_samples` may be negative;

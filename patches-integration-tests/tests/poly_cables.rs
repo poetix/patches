@@ -23,7 +23,7 @@ struct PolyProbeState {
     set_ports_count: AtomicUsize,
     input_connected: AtomicBool,
     output_connected: AtomicBool,
-    last_received: Mutex<Option<[f64; 16]>>,
+    last_received: Mutex<Option<[f32; 16]>>,
 }
 
 /// A minimal module with one poly input and one poly output.
@@ -105,14 +105,14 @@ struct PolySource {
     instance_id: InstanceId,
     descriptor: ModuleDescriptor,
     poly_out: PolyOutput,
-    pattern: [f64; 16],
+    pattern: [f32; 16],
 }
 
-const POLY_PATTERN: [f64; 16] = {
-    let mut arr = [0.0f64; 16];
+const POLY_PATTERN: [f32; 16] = {
+    let mut arr = [0.0f32; 16];
     let mut i = 0;
     while i < 16 {
-        arr[i] = (i as f64 + 1.0) * 0.1;
+        arr[i] = (i as f32 + 1.0) * 0.1;
         i += 1;
     }
     arr
@@ -256,7 +256,7 @@ fn initial_port_delivery() {
     engine.stop();
 }
 
-/// A source writing a known `[f64; 16]` pattern; after two ticks (one for
+/// A source writing a known `[f32; 16]` pattern; after two ticks (one for
 /// PolySource to write, one for PolyProbe to read), the recorded values match.
 #[test]
 fn poly_cable_propagation() {

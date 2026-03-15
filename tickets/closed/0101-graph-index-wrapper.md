@@ -47,7 +47,7 @@ is therefore only available after `allocate_buffers`.
 ```rust
 struct ResolvedGraph<'a> {
     index: &'a GraphIndex<'a>,
-    input_buffer_map: HashMap<(NodeId, String, u32), (usize, f64)>,
+    input_buffer_map: HashMap<(NodeId, String, u32), (usize, f32)>,
 }
 
 impl<'a> ResolvedGraph<'a> {
@@ -60,7 +60,7 @@ impl<'a> ResolvedGraph<'a> {
         &self,
         desc: &ModuleDescriptor,
         node_id: &NodeId,
-    ) -> Vec<(usize, f64)> { ... }
+    ) -> Vec<(usize, f32)> { ... }
 }
 ```
 

@@ -14,9 +14,9 @@ Implement a sine wave oscillator as the first concrete `Module`. It takes a freq
 ## Acceptance criteria
 
 - [ ] `SineOscillator` struct in `patches-modules` implementing `Module`
-- [ ] Frequency set at construction time: `SineOscillator::new(frequency: f64)`
+- [ ] Frequency set at construction time: `SineOscillator::new(frequency: f32)`
 - [ ] No input ports
-- [ ] Output port: `"out"` (audio signal, `f64` in the range −1.0 to 1.0)
+- [ ] Output port: `"out"` (audio signal, `f32` in the range −1.0 to 1.0)
 - [ ] Phase is accumulated correctly across calls — the waveform is continuous (no discontinuities between samples)
 - [ ] Phase wraps within `[0, 2π)` to avoid float drift over time
 - [ ] `cargo test -p patches-modules` passes, including at least:

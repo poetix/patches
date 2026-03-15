@@ -19,7 +19,7 @@ first extends `patches-core` to add one, then uses it in the sequencer.
 
 ```rust
 pub enum ParameterKind {
-    Float { min: f64, max: f64, default: f64 },
+    Float { min: f32, max: f32, default: f32 },
     Int   { min: i64, max: i64, default: i64 },
     Bool  { default: bool },
     Enum  { variants: &'static [&'static str], default: &'static str },

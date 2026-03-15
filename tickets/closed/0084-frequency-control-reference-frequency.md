@@ -19,14 +19,14 @@ callers can set it without touching `FrequencyControl` directly.
 
 ## Acceptance criteria
 
-- [ ] `FrequencyControl::new(reference_frequency: f64)` replaces the current
+- [ ] `FrequencyControl::new(reference_frequency: f32)` replaces the current
       `FrequencyControl::new()`. The `reference_frequency` field is private and
       immutable after construction.
-- [ ] `FrequencyControl::base_frequency` is renamed to `frequency_offset: f64`.
+- [ ] `FrequencyControl::base_frequency` is renamed to `frequency_offset: f32`.
       Its initial value is `0.0`.
 - [ ] `FrequencyControl::compute` uses `self.reference_frequency + self.frequency_offset`
       as the base pitch before applying any V/OCT or FM modulation.
-- [ ] `UnitPhaseAccumulator::new(sample_rate: f64, reference_frequency: f64)` passes
+- [ ] `UnitPhaseAccumulator::new(sample_rate: f32, reference_frequency: f32)` passes
       `reference_frequency` to `FrequencyControl::new`.
 - [ ] `UnitPhaseAccumulator::set_base_frequency` is renamed
       `set_frequency_offset`; it sets `frequency_control.frequency_offset` and
